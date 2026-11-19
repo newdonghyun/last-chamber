@@ -1,0 +1,31 @@
+# 의존성
+node_modules/
+
+# 앱 번들용 생성물 (npm run build:app 이 만든다)
+www/
+
+# 환경 · 비밀값
+.env
+.env.*
+
+# 로그 · OS 잡파일
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Capacitor 네이티브 빌드 산출물 (android/ · ios/ 프로젝트 자체는 커밋한다)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+ios/App/Pods/
+ios/App/build/
+ios/DerivedData/
+ios/capacitor-cordova-ios-plugins/
+ios/App/App/public/
+ios/App/App/capacitor.config.json

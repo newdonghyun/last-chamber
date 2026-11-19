@@ -1,0 +1,342 @@
+/* ==========================================================================
+   LAST CHAMBER — 유료 상품 2종 (VIP 광고 스킵 패스 · 초보자 스타터 팩)
+   --------------------------------------------------------------------------
+   src/ui/monetization.js 가 만드는 요소만 꾸민다. style.css · app.js 는 건드리지 않고, 모든 클래스는 mz- 접두사.
+   색·글꼴은 style.css :root 토큰(--brass · --ink · --font-ui …)을 쓰되, 토큰이 없어도 보이도록 fallback 을 둔다.
+   · .mz-offers     타이틀 화면 [게임 시작] 아래 상품 묶음 — 결과 화면(.title-screen.is-result)에서는 숨김
+       .mz-starter  황금빛 스타터 팩 버튼 (.mz-badge = -80% 리본)    .mz-vip  VIP 광고 스킵 패스 버튼    .mz-status  보유 현황 알약
+   · .mz-caption    결과 화면 광고 버튼 위 '광고 없이 즉시' 안내 (#reward-actions 맨 위, 패스·보호권 보유자만)
+   · .mz-dialog     결제 팝업 (.is-starter | .is-vip · 결제 중 .is-busy · 영수증 .is-receipt)
+   ========================================================================== */
+
+.mz-ico {
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── 타이틀 화면: [게임 시작] 아래 상품 묶음 ───────────────────────── */
+.mz-offers { display: grid; gap: 8px; }
+.mz-offers[hidden] { display: none; }
+.title-screen.is-result .mz-offers { display: none; } /* 결과 화면은 보상 패널 · 광고 버튼으로 이미 빠듯하다 */
+
+/* 황금빛 스타터 팩 버튼 */
+.mz-starter {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  min-height: 56px;
+  padding: 10px 16px 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #2b1a03;
+  background:
+    radial-gradient(ellipse 80% 70% at 50% -15%, rgba(255, 255, 255, .6), transparent 65%),
+    linear-gradient(180deg, #fff1b3 0%, #f4cb5c 36%, #d49a2a 70%, #8c5b13 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .85),
+    inset 0 -3px 0 rgba(94, 54, 6, .5),
+    0 0 0 1px #3a2504,
+    0 0 0 3px rgba(244, 221, 162, .4),
+    0 10px 28px rgba(233, 178, 58, .32);
+  animation: mz-glow 2.6s ease-in-out infinite;
+  transition: transform .1s, filter .2s;
+}
+.mz-starter[hidden] { display: none; }
+.mz-starter::after { /* 지나가는 빛줄기 */
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 45%;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, .62) 50%, transparent 100%);
+  transform: translateX(-130%) skewX(-18deg);
+  animation: mz-sheen 3.4s ease-in-out infinite;
+}
+.mz-starter-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 800 clamp(15px, calc(var(--vh, 1vh) * 2.5), 19px)/1.15 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: .04em;
+}
+.mz-starter-main .mz-ico { width: 18px; height: 18px; fill: rgba(255, 255, 255, .55); }
+.mz-starter-sub {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 700 var(--fs-xs, 11px)/1 var(--font-tech, system-ui, sans-serif);
+  letter-spacing: .08em;
+}
+.mz-starter-sub s { opacity: .6; text-decoration-thickness: 1.5px; }
+.mz-starter-sub b { font-size: 1.35em; letter-spacing: .04em; }
+.mz-starter-sub em {
+  align-self: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-style: normal;
+  color: var(--brass-hi, #f4dda2);
+  background: rgba(43, 26, 3, .88);
+}
+.mz-badge { /* 우상단 -80% 리본 */
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 4px 10px 4px 13px;
+  border-radius: 0 12px 0 10px;
+  font: 800 11px/1 var(--font-tech, system-ui, sans-serif);
+  letter-spacing: .08em;
+  color: #fff;
+  background: linear-gradient(180deg, #ea4443, #a21316);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4);
+}
+
+/* VIP 광고 스킵 패스 버튼 (얇은 강철빛) */
+.mz-vip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 6px 14px 6px 11px;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink, #efe8d8);
+  background: linear-gradient(180deg, #2c2f37, #16181d);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), inset 0 0 0 1px rgba(143, 192, 240, .5), 0 0 0 1px #000, 0 6px 16px rgba(0, 0, 0, .5);
+  transition: transform .1s, filter .2s;
+}
+.mz-vip[hidden] { display: none; }
+.mz-vip .mz-ico { width: 20px; height: 20px; color: var(--steel-hi, #8fc0f0); }
+.mz-vip-main { font: 800 var(--fs-s, 13px)/1.2 var(--font-ui, system-ui, sans-serif); }
+.mz-vip b { font: 700 var(--fs-s, 13px)/1 var(--font-tech, system-ui, sans-serif); letter-spacing: .06em; color: var(--steel-hi, #8fc0f0); }
+
+@media (hover: hover) { .mz-starter:hover, .mz-vip:hover { filter: brightness(1.1); } }
+.mz-starter:active, .mz-vip:active { transform: translateY(2px) scale(.99); }
+.mz-starter:focus-visible, .mz-vip:focus-visible,
+.mz-pay:focus-visible, .mz-later:focus-visible { outline: 2px solid var(--brass-hi, #f4dda2); outline-offset: 3px; }
+
+/* 보유 현황 알약 · 결과 화면 안내 */
+.mz-status,
+.mz-caption {
+  margin: 0;
+  padding: 5px 12px;
+  text-align: center;
+  font: 700 var(--fs-xs, 11px)/1.35 var(--font-ui, system-ui, sans-serif);
+  color: var(--steel-hi, #8fc0f0);
+  background: rgba(143, 192, 240, .1);
+  box-shadow: inset 0 0 0 1px rgba(143, 192, 240, .38);
+}
+.mz-status { justify-self: center; border-radius: 999px; }
+.mz-caption { border-radius: 10px; }
+.mz-status[hidden],
+.mz-caption[hidden] { display: none; }
+
+/* ── 결제 팝업 ──────────────────────────────────────────────────── */
+.mz-dialog {
+  width: min(92vw, 380px);
+  max-width: none;
+  max-height: 92vh;
+  max-height: min(92dvh, 640px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 16px;
+  color: var(--ink, #efe8d8);
+  background: transparent;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.mz-dialog::-webkit-scrollbar { display: none; }
+.mz-dialog::backdrop { background: rgba(0, 0, 0, .78); backdrop-filter: blur(3px); }
+.mz-dialog[open] .mz-card { animation: mz-rise .28s ease-out; }
+.mz-card {
+  position: relative;
+  display: grid;
+  gap: 14px;
+  padding: 22px 20px 18px;
+  border-radius: 16px;
+  background:
+    radial-gradient(ellipse 90% 50% at 50% 0%, rgba(201, 163, 91, .18), transparent 70%),
+    linear-gradient(180deg, #1d1a13, #0e0d0a);
+  box-shadow: inset 0 1px 0 rgba(255, 233, 170, .22), inset 0 0 0 1px rgba(201, 163, 91, .55), 0 0 0 1px #000, 0 24px 60px rgba(0, 0, 0, .7);
+}
+.mz-dialog.is-starter .mz-card {
+  box-shadow: inset 0 1px 0 rgba(255, 244, 190, .4), inset 0 0 0 1px rgba(244, 203, 92, .75), 0 0 0 1px #000, 0 0 42px rgba(233, 178, 58, .22), 0 24px 60px rgba(0, 0, 0, .7);
+}
+.mz-dialog.is-vip .mz-card {
+  background:
+    radial-gradient(ellipse 90% 50% at 50% 0%, rgba(143, 192, 240, .2), transparent 70%),
+    linear-gradient(180deg, #171b21, #0b0d10);
+  box-shadow: inset 0 1px 0 rgba(220, 240, 255, .25), inset 0 0 0 1px rgba(143, 192, 240, .6), 0 0 0 1px #000, 0 24px 60px rgba(0, 0, 0, .7);
+}
+
+.mz-head { display: grid; gap: 7px; text-align: center; }
+.mz-kicker {
+  margin: 0;
+  font: 700 10px/1 var(--font-tech, system-ui, sans-serif);
+  letter-spacing: .34em;
+  text-indent: .34em;
+  color: var(--brass, #c9a35b);
+}
+.mz-dialog.is-vip .mz-kicker { color: var(--steel-hi, #8fc0f0); }
+.mz-title {
+  margin: 0;
+  font: 800 clamp(20px, 5.6vw, 24px)/1.2 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: .02em;
+  color: #ffe9a6;
+  text-shadow: 0 0 18px rgba(244, 203, 92, .4);
+}
+.mz-dialog.is-vip .mz-title { color: #dff0ff; text-shadow: 0 0 18px rgba(143, 192, 240, .4); }
+
+.mz-items { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.mz-items li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px 9px 9px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07);
+}
+.mz-item-ico {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: #241503;
+  background: radial-gradient(circle at 40% 30%, #fff4cf, var(--amber, #ffb547) 55%, #a5601a);
+  box-shadow: 0 0 12px rgba(255, 181, 71, .4);
+}
+.mz-item-ico .mz-ico { width: 20px; height: 20px; }
+.mz-dialog.is-vip .mz-item-ico {
+  color: #07131f;
+  background: radial-gradient(circle at 40% 30%, #e6f3ff, var(--steel-hi, #8fc0f0) 55%, #2b557f);
+  box-shadow: 0 0 12px rgba(143, 192, 240, .4);
+}
+.mz-item-text { display: grid; gap: 3px; min-width: 0; }
+.mz-item-text b { font: 800 var(--fs-m, 14px)/1.25 var(--font-ui, system-ui, sans-serif); }
+.mz-item-text small { font: 600 var(--fs-xs, 11.5px)/1.35 var(--font-ui, system-ui, sans-serif); color: var(--ink-dim, #9a9284); }
+.mz-chips { display: inline-flex; gap: 3px; }
+.mz-chips i { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35), 0 0 0 1px rgba(0, 0, 0, .6); }
+
+.mz-price { display: flex; align-items: baseline; justify-content: center; gap: 10px; }
+.mz-price s { font: 700 var(--fs-m, 14px)/1 var(--font-tech, system-ui, sans-serif); color: var(--ink-dim, #9a9284); text-decoration-thickness: 2px; }
+.mz-price b {
+  font: 800 clamp(28px, 8vw, 34px)/1 var(--font-tech, system-ui, sans-serif);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+  color: #ffe9a6;
+  text-shadow: 0 0 16px rgba(244, 203, 92, .45);
+}
+.mz-dialog.is-vip .mz-price b { color: #dff0ff; text-shadow: 0 0 16px rgba(143, 192, 240, .45); }
+.mz-price em {
+  align-self: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font: 800 11px/1 var(--font-tech, system-ui, sans-serif);
+  font-style: normal;
+  letter-spacing: .08em;
+  color: #fff;
+  background: linear-gradient(180deg, #ea4443, #a21316);
+}
+.mz-fine { margin: -4px 0 0; text-align: center; font: 600 var(--fs-xs, 11.5px)/1.4 var(--font-ui, system-ui, sans-serif); color: var(--ink-dim, #9a9284); }
+.mz-msg { margin: 0; text-align: center; font: 700 var(--fs-s, 13px)/1.4 var(--font-ui, system-ui, sans-serif); color: var(--amber-hi, #ffd88a); }
+.mz-msg:empty { display: none; }
+.mz-msg.is-bad { color: var(--blood-hi, #ff4d4d); }
+
+.mz-actions { display: grid; gap: 8px; }
+.mz-pay,
+.mz-later {
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  font: 800 var(--fs-m, 15px)/1.2 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: .03em;
+  transition: transform .1s, filter .2s;
+}
+.mz-pay {
+  min-height: 50px;
+  padding: 12px 16px;
+  color: #2b1a03;
+  background:
+    radial-gradient(ellipse 80% 70% at 50% -15%, rgba(255, 255, 255, .55), transparent 65%),
+    linear-gradient(180deg, #fff1b3 0%, #f4cb5c 36%, #d49a2a 70%, #8c5b13 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8), inset 0 -3px 0 rgba(94, 54, 6, .5), 0 0 0 1px #3a2504, 0 8px 22px rgba(233, 178, 58, .28);
+}
+.mz-dialog.is-vip .mz-pay {
+  color: #07131f;
+  background:
+    radial-gradient(ellipse 80% 70% at 50% -15%, rgba(255, 255, 255, .55), transparent 65%),
+    linear-gradient(180deg, #e6f3ff 0%, #8fc0f0 45%, #3c6c99 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8), inset 0 -3px 0 rgba(10, 30, 52, .5), 0 0 0 1px #0a1a2b, 0 8px 22px rgba(143, 192, 240, .28);
+}
+.mz-pay:disabled { cursor: default; filter: saturate(.5) brightness(.85); }
+.mz-dialog.is-busy .mz-pay { animation: mz-pulse 1s ease-in-out infinite; }
+.mz-later {
+  min-height: 42px;
+  padding: 9px 14px;
+  color: var(--ink-dim, #9a9284);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14);
+}
+.mz-later:disabled { opacity: .4; cursor: default; }
+@media (hover: hover) { .mz-pay:hover:not(:disabled), .mz-later:hover:not(:disabled) { filter: brightness(1.1); } }
+.mz-pay:active:not(:disabled), .mz-later:active:not(:disabled) { transform: translateY(1px) scale(.99); }
+
+/* 영수증 화면 */
+.mz-seal {
+  justify-self: center;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  color: #241503;
+  background: radial-gradient(circle at 40% 30%, #fff4cf, #f4cb5c 55%, #a5601a);
+  box-shadow: 0 0 24px rgba(244, 203, 92, .5);
+  animation: mz-pop .5s cubic-bezier(.2, 1.4, .4, 1) both;
+}
+.mz-seal .mz-ico { width: 28px; height: 28px; stroke-width: 2.4; }
+.mz-dialog.is-vip .mz-seal {
+  color: #07131f;
+  background: radial-gradient(circle at 40% 30%, #e6f3ff, #8fc0f0 55%, #2b557f);
+  box-shadow: 0 0 24px rgba(143, 192, 240, .5);
+}
+
+@keyframes mz-glow {
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, .85),
+      inset 0 -3px 0 rgba(94, 54, 6, .5),
+      0 0 0 1px #3a2504,
+      0 0 0 3px rgba(244, 221, 162, .6),
+      0 10px 40px rgba(233, 178, 58, .55);
+  }
+}
+@keyframes mz-sheen {
+  0%, 55% { transform: translateX(-130%) skewX(-18deg); }
+  100% { transform: translateX(330%) skewX(-18deg); }
+}
+@keyframes mz-rise { from { opacity: 0; transform: translateY(14px) scale(.97); } }
+@keyframes mz-pop { from { opacity: 0; transform: scale(.4); } }
+@keyframes mz-pulse { 50% { filter: saturate(.6) brightness(.8); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mz-starter,
+  .mz-starter::after,
+  .mz-dialog[open] .mz-card,
+  .mz-seal,
+  .mz-dialog.is-busy .mz-pay { animation: none; }
+}

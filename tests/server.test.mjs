@@ -1,0 +1,257 @@
+// 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 5초 안에 끝난다.
+//   Phase 1 (기본 서버, 클라이언트 2개): 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 무작위 매칭(pro) · 정적 파일
+//   Phase 2 (타이머를 줄인 서버): 20초 턴 타임아웃 강제 격발 · 연결 끊김 부전승 · 재접속 · 새 연결의 자리 인수
+import http from 'node:http';
+import { io as connect } from 'socket.io-client';
+import { createGameServer, QUEUE_TIERS } from '../server/index.js';
+
+const T0 = performance.now();
+let pass = 0;
+const fails = [];
+const serverErrors = [];
+const clientErrors = [];
+const ok = (cond, name) => { if (cond) pass += 1; else { fails.push(name); console.log(`  ✗ ${name}`); } };
+const eq = (got, want, name) => ok(JSON.stringify(got) === JSON.stringify(want), `${name} (got ${JSON.stringify(got)}, want ${JSON.stringify(want)})`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const onError = (err) => serverErrors.push(err);
+
+const allSockets = [];
+async function client(port) {
+  const socket = connect(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false, forceNew: true });
+  const inbox = []; // 받은 이벤트를 전부 쌓아 둔다 → 이벤트가 리스너보다 먼저 도착해도 놓치지 않는다
+  socket.onAny((event, payload) => inbox.push({ event, payload }));
+  socket.on('connect_error', (err) => clientErrors.push(`connect_error: ${err.message}`));
+  allSockets.push(socket);
+  await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject); });
+  return {
+    socket,
+    inbox,
+    call: (event, payload) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`ack 시간 초과: ${event}`)), 2000);
+      const done = (res) => { clearTimeout(timer); resolve(res); };
+      if (payload === undefined) socket.emit(event, done);
+      else socket.emit(event, payload, done);
+    }),
+    waitFor: (event, pred = () => true, ms = 2000) => new Promise((resolve, reject) => {
+      const find = () => inbox.find((m) => m.event === event && pred(m.payload));
+      const hit = find();
+      if (hit) { resolve(hit.payload); return; }
+      const timer = setTimeout(() => { socket.offAny(listener); reject(new Error(`이벤트 시간 초과: ${event}`)); }, ms);
+      const listener = () => {
+        const found = find();
+        if (!found) return;
+        clearTimeout(timer);
+        socket.offAny(listener);
+        resolve(found.payload);
+      };
+      socket.onAny(listener);
+    }),
+  };
+}
+
+const head = (port, urlPath) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port, path: urlPath, method: 'HEAD', agent: false }, (res) => { res.resume(); resolve(res.statusCode); });
+  req.on('error', reject);
+  req.end();
+});
+
+async function phase1() {
+  const server = createGameServer({ quiet: true, onError });
+  const port = await server.start(0, '127.0.0.1');
+  eq([QUEUE_TIERS.free, QUEUE_TIERS.pro, QUEUE_TIERS.vip], [{ fee: 0, prize: 0 }, { fee: 200, prize: 360 }, { fee: 1000, prize: 1800 }], '등급표: free 0 · pro 200→360 · vip 1000→1800');
+  const A = await client(port);
+  const B = await client(port);
+  const profA = { nickname: '알파', mmr: 1100, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native' } };
+  const profB = { nickname: 'Bravo_7', mmr: 900, cosmetics: { gun: '<img src=x onerror=alert(1)>', table: 'obsidian' } }; // 나쁜 id 는 걸러져야 한다
+
+  // 1. 방 생성
+  const created = await A.call('create_private_room', { profile: profA });
+  ok(created.ok && /^[A-HJ-NP-Z2-9]{4}$/.test(created.code), `1 사설 방 코드는 4자리 영문/숫자 (${created.code})`);
+  eq((await A.waitFor('room_created')).code, created.code, '1 room_created 이벤트도 같은 코드');
+  eq((await A.call('create_private_room', { profile: profA })).error, 'ALREADY_IN_ROOM', '1 이미 방에 있으면 또 만들 수 없다');
+  eq((await B.call('join_private_room', 'ZZZZ')).error, 'ROOM_NOT_FOUND', '1 없는 코드는 거절');
+
+  // 2. 입장 (소문자 코드도 통과) → 두 사람 모두 match_found
+  const joined = await B.call('join_private_room', { code: created.code.toLowerCase(), profile: profB });
+  eq([joined.ok, joined.code], [true, created.code], '2 입장 성공');
+  const [mA, mB] = await Promise.all([A.waitFor('match_found'), B.waitFor('match_found')]);
+  eq([mA.mode, mA.tier, mA.fee, mA.prize, mA.code], ['private', 'free', 0, 0, created.code], '2 사설 방은 무료 판');
+  eq([mA.you, mB.you].sort(), ['P1', 'P2'], '2 서로 다른 좌석');
+  eq([mA.opponent.id, mB.opponent.id], [mB.you, mA.you], '2 상대 좌석 id');
+  eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo_7', 900], '2 A 가 보는 상대 프로필(B)');
+  eq(mA.opponent.profile.cosmetics, { gun: null, table: 'obsidian', flame: null, taunt: null }, '2 위험한 코스메틱 id 는 걸러진다');
+  eq(mB.opponent.profile, { nickname: '알파', mmr: 1100, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A)');
+  ok(mA.token.length === 32 && mB.token.length === 32 && mA.token !== mB.token, '2 재접속 토큰은 각자 따로');
+  eq(await B.call('join_private_room', created.code), { ok: false, error: 'ALREADY_IN_ROOM' }, '2 이미 시작된 방에 또 들어갈 수 없다');
+
+  // 3. 첫 상태: 각자 자기 시점만, 탄 순서는 없다
+  const [sA, sB] = await Promise.all([A.waitFor('state_update', (p) => p.reason === 'start'), B.waitFor('state_update', (p) => p.reason === 'start')]);
+  eq([sA.state.me.id, sA.state.opponent.id], [mA.you, mB.you], '3 A 시점 상태');
+  eq([sB.state.me.id, sB.state.opponent.id], [mB.you, mA.you], '3 B 시점 상태');
+  eq([sA.state.turn.isMine, sB.state.turn.isMine].filter(Boolean).length, 1, '3 선공은 정확히 한 명');
+  ok(sA.state.total >= 3 && sA.state.live + sA.state.blank === sA.state.total, `3 실탄 + 공포탄 = 총 발수 (${sA.state.live}+${sA.state.blank}=${sA.state.total}) — 개수만 공개`);
+  ok(!('chamber' in sA.state) && !('chamber' in sB.state), '3 상태에 탄창 필드가 없다');
+  ok(![sA, sB].some((p) => /"(LIVE|BLANK)"/.test(JSON.stringify(p))), '3 시작 페이로드에 탄종이 없다');
+  ok(sA.deadline > sA.now && sA.deadline - sA.now <= 20_000, '3 턴 마감 시각(서버 시계)이 함께 온다');
+  eq(sA.logFrom, 0, '3 로그는 0 부터');
+
+  // 4. 격발 1회
+  const actor = sA.state.turn.isMine ? A : B;
+  const waiter = actor === A ? B : A;
+  const actorSeat = actor === A ? mA.you : mB.you;
+  const waiterSeat = actor === A ? mB.you : mA.you;
+  eq(await actor.call('game_action', { type: 'shoot', target: 'opponent' }), { ok: true }, '4 격발 ack');
+  const [uA, uB] = await Promise.all([A.waitFor('state_update', (p) => p.reason === 'shoot'), B.waitFor('state_update', (p) => p.reason === 'shoot')]);
+  ok([uA, uB].every((u) => u.events.some((e) => e.type === 'SHOT' && e.actor === actorSeat)), '4 양쪽 모두 SHOT 이벤트를 받는다');
+  eq([uA.by, uB.by], [actorSeat, actorSeat], '4 누가 쐈는지 알려 준다');
+  eq([uA.state.total, uB.state.total], [sA.state.total - 1, sA.state.total - 1], '4 남은 탄 −1');
+  eq([uA.state.turn.player, uB.state.turn.player], [waiterSeat, waiterSeat], '4 상대에게 쏘면 턴이 넘어간다');
+  eq([uA.state.me.hp, uA.state.opponent.hp], [uB.state.opponent.hp, uB.state.me.hp], '4 두 시점의 체력이 서로 맞물린다');
+  eq([uA.logFrom, uB.logFrom], [sA.events.length, sB.events.length], '4 로그 커서가 이어진다');
+  ok(uA.deadline >= sA.deadline, '4 격발 뒤 턴 마감이 새로 계산된다');
+
+  // 5. 치트 시도는 상태를 바꾸지 않고 거절된다
+  eq(await actor.call('game_action', { type: 'shoot', target: 'opponent' }), { ok: false, error: 'NOT_YOUR_TURN' }, '5 내 턴이 아닐 때 격발');
+  eq(await actor.call('game_action', { type: 'shoot', target: 'self', playerId: waiterSeat }), { ok: false, error: 'NOT_YOUR_TURN' }, '5 남의 좌석 id 를 실어 보내도 소용없다');
+  eq(await actor.call('game_action', { type: 'use_item', index: 0 }), { ok: false, error: 'NOT_YOUR_TURN' }, '5 내 턴이 아닐 때 아이템');
+  eq(await waiter.call('game_action', { type: 'shoot', target: 'moon' }), { ok: false, error: 'INVALID_TARGET' }, '5 잘못된 대상');
+  eq(await waiter.call('game_action', { type: 'use_item', index: 99 }), { ok: false, error: 'INVALID_ITEM' }, '5 잘못된 아이템 칸');
+  eq(await waiter.call('game_action', { type: 'fly' }), { ok: false, error: 'INVALID_ACTION' }, '5 모르는 액션');
+  eq(await waiter.call('game_action', 'shoot'), { ok: false, error: 'BAD_REQUEST' }, '5 객체가 아닌 액션');
+
+  // 6. 이모트: 그대로 중계, 이상한 값·연타는 거절
+  const emote = { type: 'TAUNT', id: 'knock' };
+  const relayed = A.waitFor('receive_emote');
+  eq(await B.call('send_emote', emote), { ok: true }, '6 이모트 ack');
+  eq(await relayed, emote, '6 상대에게 그대로 중계');
+  eq((await B.call('send_emote', emote)).error, 'RATE_LIMITED', '6 0.5초 안의 연타는 거절');
+  eq((await B.call('send_emote', { type: 'TAUNT', id: { evil: true } })).error, 'BAD_REQUEST', '6 중첩 객체는 거절');
+  eq((await B.call('send_emote', 'knock')).error, 'BAD_REQUEST', '6 객체가 아니면 거절');
+
+  // 7. 나가면 항복 → 상대 부전승
+  const overA = A.waitFor('game_over');
+  const overB = B.waitFor('game_over');
+  eq(await B.call('leave_room'), { ok: true }, '7 leave_room ack');
+  const [goA, goB] = await Promise.all([overA, overB]);
+  eq([goA.youWon, goA.reason, goA.winner, goA.payout], [true, 'forfeit', mA.you, 0], '7 남은 사람이 부전승 (무료 판 = 상금 0)');
+  eq([goB.youWon, goB.payout], [false, 0], '7 나간 사람은 패배');
+  eq(await B.call('game_action', { type: 'shoot', target: 'opponent' }), { ok: false, error: 'NOT_IN_GAME' }, '7 끝난 판에는 입력할 수 없다');
+
+  // 8. 무작위 매칭: 같은 등급 2명 → 자동 방 생성, 승자 상금
+  eq((await A.call('join_queue', { tier: 'gold' })).error, 'INVALID_TIER', '8 없는 등급');
+  eq(await A.call('join_queue', { tier: 'pro', profile: profA }), { ok: true, tier: 'pro', fee: 200, prize: 360 }, '8 대기열 입장');
+  eq((await A.call('join_queue', { tier: 'free' })).error, 'ALREADY_IN_ROOM', '8 대기 중에는 다른 대기열에 못 들어간다');
+  eq(server.stats().queued, 1, '8 대기 인원 1');
+  eq(await A.call('leave_queue'), { ok: true }, '8 leave_queue');
+  eq(server.stats().queued, 0, '8 대기열에서 빠졌다');
+  await A.call('join_queue', { tier: 'pro', profile: profA });
+  await B.call('join_queue', { tier: 'pro', profile: profB });
+  const [qA, qB] = await Promise.all([A.waitFor('match_found', (p) => p.mode === 'queue'), B.waitFor('match_found', (p) => p.mode === 'queue')]);
+  eq([qA.tier, qA.fee, qA.prize, qB.fee, qB.prize], ['pro', 200, 360, 200, 360], '8 매칭된 pro 판: 참가비 200 · 승자 360');
+  ok(qA.code !== created.code && qA.code === qB.code, '8 두 사람이 같은 새 방');
+  const sniper = await client(port);
+  eq((await sniper.call('join_private_room', qA.code)).error, 'ROOM_NOT_FOUND', '8 매칭 방은 코드로 들어올 수 없다');
+  const overQ = B.waitFor('game_over', (p) => p.code === qA.code);
+  await A.call('leave_room');
+  const goQ = await overQ;
+  eq([goQ.youWon, goQ.payout, goQ.prize, goQ.reason], [true, 360, 360, 'forfeit'], '8 승자는 pro 상금 360');
+  eq(server.stats().playing, 0, '8 진행 중인 판 없음');
+
+  // 9. 정적 파일: 프로젝트 루트는 서빙, 서버 내부 경로는 숨김
+  eq(await head(port, '/healthz'), 200, '9 /healthz');
+  eq(await head(port, '/index.html'), 200, '9 /index.html');
+  eq(await head(port, '/src/engine/gameEngine.js'), 200, '9 /src/engine/gameEngine.js');
+  for (const hidden of ['/server/index.js', '/package.json', '/package-lock.json', '/tests/server.test.mjs', '/node_modules/express/package.json', '/%73erver/index.js', '/./server/index.js', '/x/../server/index.js', '/Server./index.js']) {
+    eq(await head(port, hidden), 404, `9 숨김 경로 ${hidden}`);
+  }
+  await server.stop();
+}
+
+async function phase2() {
+  const server = createGameServer({ quiet: true, turnMs: 250, graceMs: 400, onError });
+  const port = await server.start(0, '127.0.0.1');
+  const mk = async (name) => {
+    const [x, y] = [await client(port), await client(port)];
+    const made = await x.call('create_private_room', { profile: { nickname: `${name}1` } });
+    const joined = await y.call('join_private_room', made.code); // 스펙 형태: join_private_room(code)
+    const [mx, my] = await Promise.all([x.waitFor('match_found'), y.waitFor('match_found')]);
+    return { x, y, mx, my, joined, code: made.code };
+  };
+
+  // 10. 턴 타임아웃: 아무도 안 쏘면 서버가 대신 격발
+  const g1 = await mk('타임');
+  eq(g1.joined.ok, true, '10 join_private_room(code) 문자열 형태');
+  eq(g1.mx.opponent.profile.nickname, '방랑자', '10 프로필 없이 들어오면 기본 닉네임');
+  eq([g1.mx.turnMs, g1.mx.graceMs], [250, 400], '10 match_found 가 시간 규칙을 알려 준다');
+  const first = await g1.x.waitFor('state_update', (p) => p.reason === 'start');
+  const timeout = await g1.x.waitFor('state_update', (p) => p.reason === 'timeout', 1500);
+  ok(timeout.events.some((e) => e.type === 'SHOT'), '10 타임아웃 → 서버가 대신 격발 (SHOT 이벤트)');
+  eq(timeout.by, first.state.turn.player, '10 격발한 쪽은 그 턴의 주인');
+  ok(['self', 'opponent'].includes(timeout.auto.target), `10 강제 격발 대상 = ${timeout.auto.target}`);
+  ok(timeout.deadline > first.deadline, '10 타임아웃 뒤 턴 마감이 새로 계산된다');
+  ok((await g1.y.waitFor('state_update', (p) => p.reason === 'timeout')).events.some((e) => e.type === 'SHOT'), '10 상대도 같은 타임아웃 갱신을 받는다');
+
+  // 11. 연결 끊김 → 15초(여기서는 0.4초)가 지나면 부전승
+  const gone = g1.x.waitFor('opponent_status', (p) => p.connected === false);
+  const cut = Date.now();
+  g1.y.socket.disconnect();
+  eq((await gone).graceMs, 400, '11 상대에게 끊김과 유예 시간을 알린다');
+  const over = await g1.x.waitFor('game_over', undefined, 1500);
+  const waited = Date.now() - cut;
+  eq([over.youWon, over.reason, over.winner], [true, 'forfeit', g1.mx.you], '11 유예가 지나면 남은 사람의 부전승');
+  ok(waited >= 350 && waited < 1200, `11 유예 시간(0.4초)을 기다린 뒤에 처리 (${waited}ms)`);
+
+  // 12. 재접속: 위조 토큰은 거절, 진짜 토큰이면 같은 자리로 복귀하고 부전승은 취소
+  const g2 = await mk('복귀');
+  g2.y.socket.disconnect();
+  await g2.x.waitFor('opponent_status', (p) => p.connected === false);
+  const intruder = await client(port);
+  eq(await intruder.call('rejoin_room', { code: g2.code, token: 'f'.repeat(32) }), { ok: false, error: 'ROOM_NOT_FOUND' }, '12 위조 토큰은 거절');
+  const back = await client(port);
+  eq((await back.call('rejoin_room', { code: g2.code, token: g2.my.token })).ok, true, '12 진짜 토큰으로 재접속');
+  const [rm, rs] = await Promise.all([back.waitFor('match_found'), back.waitFor('state_update', (p) => p.reason === 'rejoin')]);
+  eq([rm.resume, rm.you, rm.token], [true, g2.my.you, g2.my.token], '12 같은 좌석 · 같은 토큰으로 복귀');
+  ok(rs.logFrom === 0 && rs.events.length > 0 && rs.state.me.id === g2.my.you, '12 로그 전체와 내 시점 상태를 다시 받는다');
+  await g2.x.waitFor('opponent_status', (p) => p.connected === true);
+  const acted = await back.call('game_action', { type: 'shoot', target: 'self' });
+  ok(acted.ok || acted.error === 'NOT_YOUR_TURN', `12 새 연결이 그 좌석으로 입력할 수 있다 (${acted.ok ? 'ok' : acted.error})`);
+  await sleep(550); // 유예(0.4초)보다 길게
+  ok(!g2.x.inbox.some((m) => m.event === 'game_over'), '12 재접속했다면 유예가 지나도 부전승은 없다');
+
+  // 13. 옛 연결이 아직 살아 있어도 새 연결이 자리를 넘겨받는다 (모바일에서 망이 바뀐 경우)
+  const takeover = await client(port);
+  const replaced = back.waitFor('session_replaced');
+  eq((await takeover.call('rejoin_room', { code: g2.code, token: g2.my.token })).ok, true, '13 새 연결로 재접속');
+  await replaced;
+  ok(true, '13 옛 연결은 session_replaced 를 받는다');
+  await takeover.waitFor('state_update', (p) => p.reason === 'rejoin');
+  await sleep(100);
+  ok(!g2.x.inbox.some((m) => m.event === 'game_over'), '13 자리를 넘겨도 부전승이 아니다');
+  const overTake = g2.x.waitFor('game_over');
+  await takeover.call('leave_room');
+  eq([(await overTake).youWon, (await overTake).reason], [true, 'forfeit'], '13 새 연결이 나가면 상대 부전승');
+  const lateJoin = await client(port);
+  const lateOver = lateJoin.waitFor('game_over', undefined, 1000);
+  eq((await lateJoin.call('rejoin_room', { code: g2.code, token: g2.my.token })).over, true, '13 끝난 판에 늦게 돌아오면 결과만 다시 받는다');
+  eq((await lateOver).youWon, false, '13 늦게 온 사람은 패자로 확인');
+  await server.stop();
+}
+
+try {
+  await phase1();
+  await phase2();
+} catch (err) {
+  fails.push(`테스트 중단: ${err.message}`);
+  console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);
+}
+
+for (const socket of allSockets) socket.close();
+ok(serverErrors.length === 0, `서버 오류 0건 (${serverErrors.map((e) => e.message).join(' | ')})`);
+ok(clientErrors.length === 0, `클라이언트 연결 오류 0건 (${clientErrors.join(' | ')})`);
+
+const ms = Math.round(performance.now() - T0);
+console.log(fails.length === 0
+  ? `PASS  ${pass} checks, 0 failed (서버 오류 0 · 클라이언트 오류 0) — ${ms} ms`
+  : `FAIL  ${pass} passed, ${fails.length} failed — ${ms} ms`);
+process.exitCode = fails.length === 0 ? 0 : 1;
+setTimeout(() => { console.log('  ✗ 서버를 닫은 뒤에도 열린 핸들이 남아 있다'); process.exit(1); }, 1500).unref(); // 정상이면 이 타이머가 울리기 전에 프로세스가 끝난다

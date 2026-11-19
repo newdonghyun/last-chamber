@@ -1,0 +1,293 @@
+/*
+ * LAST CHAMBER - 대전 모드 선택 & 매칭 로비 (4-2단계) 전용 스타일
+ * src/ui/multiplayer.js 가 만드는 <dialog class="mp-modal"> 만 꾸민다. 클래스는 전부 mp- 로 시작해서 style.css 와 겹치지 않는다.
+ * 색 · 글꼴은 style.css :root 의 토큰(--brass · --blood · --ink · --font-*)을 그대로 쓰고, 토큰이 없을 때를 위한 fallback 도 적어 둔다.
+ */
+
+.mp-modal {
+  width: min(calc(100vw - 24px), 440px);
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink, #efe8d8);
+  overflow: visible; /* 그림자가 잘리지 않게 — 스크롤은 안쪽 카드가 맡는다 */
+  font-family: var(--font-ui, "Malgun Gothic", system-ui, sans-serif);
+}
+
+.mp-modal::backdrop {
+  background: radial-gradient(ellipse at 50% 32%, rgba(94, 10, 12, .4), rgba(0, 0, 0, .92) 72%);
+  backdrop-filter: blur(3px);
+}
+
+.mp-modal[open] { animation: mp-in .22s ease-out; }
+.mp-modal [hidden] { display: none !important; }
+
+/* ── 카드 ── */
+
+.mp-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  padding: 18px 16px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background:
+    radial-gradient(ellipse at 50% -10%, rgba(201, 163, 91, .1), transparent 60%),
+    linear-gradient(180deg, #16110e 0%, #0a0808 100%);
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #000, 0 26px 70px rgba(0, 0, 0, .85), inset 0 1px 0 rgba(244, 221, 162, .08);
+}
+
+.mp-card::before { /* 필름 그레인 */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--noise-grain, none);
+  opacity: .05;
+  pointer-events: none;
+}
+
+.mp-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mp-eyebrow {
+  margin: 0 0 2px;
+  font: 600 11px/1 var(--font-tech, sans-serif);
+  letter-spacing: .32em;
+  color: var(--brass, #c9a35b);
+}
+
+.mp-title {
+  margin: 0;
+  font: 700 clamp(22px, 6vw, 28px)/1.15 var(--font-display, Georgia, serif);
+  letter-spacing: .02em;
+  color: var(--brass-hi, #f4dda2);
+  text-shadow: 0 2px 14px rgba(201, 163, 91, .25);
+}
+
+.mp-close {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: -8px -8px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim, #9a9284);
+  font-size: 18px;
+  cursor: pointer;
+}
+.mp-close:focus-visible { outline: 2px solid var(--brass-hi, #f4dda2); outline-offset: -4px; border-radius: 4px; }
+
+.mp-wallet {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .35);
+  font: 500 12px/1 var(--font-tech, sans-serif);
+  letter-spacing: .18em;
+  color: var(--ink-dim, #9a9284);
+}
+.mp-wallet b {
+  font: 700 20px/1 var(--font-type, monospace);
+  letter-spacing: .02em;
+  color: var(--brass-hi, #f4dda2);
+}
+
+.mp-view { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── 섹션 ── */
+
+.mp-sec { display: flex; flex-direction: column; gap: 8px; }
+
+.mp-sec-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font: 700 14px/1.2 var(--font-ui, sans-serif);
+  letter-spacing: .04em;
+  color: var(--ink, #efe8d8);
+}
+.mp-sec-title small {
+  font: 600 10px/1 var(--font-tech, sans-serif);
+  letter-spacing: .28em;
+  color: var(--brass, #c9a35b);
+}
+.mp-sec-title::after { /* 제목 오른쪽의 가는 선 */
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line, rgba(201, 163, 91, .28)), transparent);
+  transform: translateY(-3px);
+}
+
+/* ── 버튼 ── */
+
+.mp-btn,
+.mp-table {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, 0)), #0f0c0b;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, background-color .15s, transform .08s, filter .15s;
+}
+
+.mp-btn { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mp-btn-main { font-weight: 700; font-size: 15px; }
+.mp-btn-sub { font: 500 11px/1 var(--font-tech, sans-serif); letter-spacing: .14em; color: var(--ink-dim, #9a9284); }
+
+@media (hover: hover) {
+  .mp-btn:hover:not(:disabled),
+  .mp-table:hover:not(:disabled) { border-color: var(--brass, #c9a35b); filter: brightness(1.18); }
+}
+.mp-btn:active:not(:disabled),
+.mp-table:active:not(:disabled) { transform: translateY(1px); }
+.mp-btn:focus-visible,
+.mp-table:focus-visible,
+.mp-code-input:focus-visible { outline: 2px solid var(--brass-hi, #f4dda2); outline-offset: 2px; }
+
+.mp-btn:disabled,
+.mp-table:disabled { opacity: .45; filter: grayscale(.55); cursor: not-allowed; }
+
+.mp-btn--solo {
+  border-color: var(--brass, #c9a35b);
+  background: linear-gradient(180deg, #d9b56c 0%, #a67f35 55%, #7d5b1e 100%);
+  color: #1a1206;
+  box-shadow: 0 1px 0 rgba(255, 244, 205, .5) inset, 0 6px 18px rgba(0, 0, 0, .5);
+}
+.mp-btn--solo .mp-btn-sub { color: rgba(26, 18, 6, .7); }
+
+.mp-btn--ghost { justify-content: center; text-align: center; background: transparent; border-color: rgba(217, 38, 38, .55); color: var(--blood-hi, #ff4d4d); }
+.mp-btn--copy { justify-content: center; text-align: center; border-color: var(--brass, #c9a35b); color: var(--brass-hi, #f4dda2); }
+.mp-btn--copy.is-done { border-color: #6fbf73; color: #a9e6ad; }
+
+/* ── 코드 입력 ── */
+
+.mp-join { display: flex; flex-direction: column; gap: 6px; margin: 0; }
+.mp-join-label { font: 600 11px/1 var(--font-tech, sans-serif); letter-spacing: .24em; color: var(--ink-dim, #9a9284); }
+.mp-join-row { display: flex; gap: 8px; }
+.mp-btn--join { flex: none; width: auto; justify-content: center; font-weight: 700; padding-inline: 20px; }
+
+.mp-code-input {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 12px 8px calc(12px + .32em); /* letter-spacing 이 오른쪽에만 붙는 만큼 왼쪽을 보정해 가운데에 보이게 */
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: #060505;
+  color: var(--brass-hi, #f4dda2);
+  font: 700 24px/1 var(--font-type, monospace);
+  letter-spacing: .32em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.mp-code-input::placeholder { color: var(--ink-faint, #5f594f); opacity: .7; }
+.mp-code-input:disabled { opacity: .5; }
+
+.mp-hint { margin: 0; font-size: 11px; color: var(--ink-faint, #5f594f); }
+
+/* ── 판돈 매칭 테이블 ── */
+
+.mp-tables { display: flex; flex-direction: column; gap: 8px; }
+
+.mp-table {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name fee" "note fee";
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 3px;
+}
+.mp-table-name { grid-area: name; font-weight: 700; font-size: 15px; }
+.mp-table-fee { grid-area: fee; font: 700 17px/1 var(--font-type, monospace); color: var(--brass-hi, #f4dda2); white-space: nowrap; }
+.mp-table-note { grid-area: note; font-size: 11px; color: var(--ink-dim, #9a9284); }
+
+.mp-table[data-tier="free"] .mp-table-fee { color: var(--ink, #efe8d8); }
+.mp-table[data-tier="vip"] {
+  border-color: rgba(217, 38, 38, .55);
+  background: linear-gradient(180deg, rgba(217, 38, 38, .14), rgba(94, 10, 12, .1)), #0f0808;
+}
+.mp-table[data-tier="vip"] .mp-table-name,
+.mp-table[data-tier="vip"] .mp-table-fee { color: var(--blood-hi, #ff4d4d); }
+.mp-table.is-short .mp-table-note { color: var(--blood-hi, #ff4d4d); }
+
+/* ── 대기 화면 (친구 방 · 매칭) ── */
+
+.mp-wait { align-items: stretch; text-align: center; gap: 12px; }
+.mp-wait-label { margin: 0; font: 600 12px/1.3 var(--font-tech, sans-serif); letter-spacing: .2em; color: var(--ink-dim, #9a9284); }
+.mp-wait-note { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0; font-size: 12px; color: var(--ink-dim, #9a9284); }
+
+.mp-room-code {
+  margin: 0;
+  padding: 14px 0 14px .3em; /* letter-spacing 보정 */
+  border: 1px dashed var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .4);
+  font: 700 clamp(40px, 14vw, 58px)/1 var(--font-type, monospace);
+  letter-spacing: .3em;
+  color: var(--brass-hi, #f4dda2);
+  text-shadow: 0 0 22px rgba(201, 163, 91, .4);
+  user-select: all; /* 복사 버튼이 막혀도 한 번 눌러 전체 선택 */
+}
+
+.mp-pulse { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--blood-hi, #ff4d4d); box-shadow: 0 0 10px var(--blood, #d92626); animation: mp-blink 1.2s ease-in-out infinite; }
+
+.mp-elapsed { margin: 0; font: 700 34px/1 var(--font-type, monospace); letter-spacing: .06em; color: var(--brass-hi, #f4dda2); }
+
+.mp-radar { position: relative; width: 84px; height: 84px; margin: 2px auto 0; }
+.mp-radar i { position: absolute; inset: 0; border: 1px solid var(--brass, #c9a35b); border-radius: 50%; opacity: 0; animation: mp-ping 2.4s ease-out infinite; }
+.mp-radar i:nth-child(2) { animation-delay: .8s; }
+.mp-radar i:nth-child(3) { animation-delay: 1.6s; }
+.mp-radar::after { content: ""; position: absolute; inset: 34px; border-radius: 50%; background: var(--brass-hi, #f4dda2); box-shadow: 0 0 16px var(--brass, #c9a35b); }
+
+/* ── 상태줄 ── */
+
+.mp-status { min-height: 1.5em; margin: 0; font-size: 13px; line-height: 1.5; text-align: center; color: var(--ink-dim, #9a9284); }
+.mp-status[data-tone="error"] { color: var(--blood-hi, #ff4d4d); }
+.mp-status[data-tone="ok"] { color: var(--brass-hi, #f4dda2); }
+
+.mp-modal.is-busy .mp-card { cursor: progress; }
+
+.mp-copy-buffer { position: fixed; top: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
+
+/* ── 모션 ── */
+
+@keyframes mp-in { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes mp-blink { 50% { opacity: .25; } }
+@keyframes mp-ping { 0% { transform: scale(.3); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mp-modal[open], .mp-pulse, .mp-radar i { animation: none; }
+  .mp-radar i:first-child { opacity: .5; }
+  .mp-btn, .mp-table { transition: none; }
+}
+
+@media (max-height: 640px) {
+  .mp-card { gap: 10px; padding: 14px 14px 12px; }
+  .mp-view { gap: 12px; }
+}

@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#050506" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="지하 카지노 느와르 러시안 룰렛 · LAST CHAMBER" />
+  <!-- 서버 주소 자동 설정 (window.LAST_CHAMBER_SERVER): 웹 = 현재 도메인 · Capacitor 앱/토스 웹뷰 = 클라우드 서버 — 모듈 스크립트(multiplayer.js 등)보다 먼저 실행돼야 해서 일반 스크립트로 맨 위에 둔다 -->
+  <script src="./src/platform/serverConfig.js"></script>
+  <title>LAST CHAMBER</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23c9a35b'/%3E%3Ccircle cx='16' cy='16' r='12.5' fill='%2316181d'/%3E%3Cg fill='%23050506'%3E%3Ccircle cx='16' cy='8' r='3.2'/%3E%3Ccircle cx='22.9' cy='12' r='3.2'/%3E%3Ccircle cx='22.9' cy='20' r='3.2'/%3E%3Ccircle cx='16' cy='24' r='3.2'/%3E%3Ccircle cx='9.1' cy='20' r='3.2'/%3E%3Ccircle cx='9.1' cy='12' r='3.2'/%3E%3C/g%3E%3Ccircle cx='16' cy='8' r='2.4' fill='%23d92626'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./src/ui/monetization.css" /> <!-- 유료 상품 2종(VIP 광고 스킵 패스 · 스타터 팩) 전용 스타일 -->
+  <link rel="stylesheet" href="./src/ui/multiplayer.css" /> <!-- 대전 모드 선택 & 매칭 로비 모달 전용 스타일 (4-2단계) -->
+</head>
+<body>
+  <!--
+    LAST CHAMBER 화면 (요소·상태 클래스 목록은 style.css 맨 위 'JS 연결 계약')
+    · 타이틀(#start-modal, 경기가 끝나면 결과 화면으로 재사용) → 게임 시작 / 프로필 & 랭킹(#profile-modal, 좌상단 미니 카드) / 상점 & 무기고(#store-modal: 총기 · 테이블 · 암시장 상자 & 이펙트 · 도발 액션 4탭) / 룰 & 도감(#rules-modal)
+    · 인게임: 상단 딜러 · 중앙 테이블 · 하단 플레이어 (100dvh 안에 스크롤 없이). 장착한 도발이 있으면 테이블 우상단 구석에 작은 도발 버튼(#btn-taunt), 쓰면 테이블 중앙에 #taunt-fx 연출
+    · 총기·테이블 색은 style.css :root 의 CSS 변수 → 상점에서 스킨을 장착하면 src/ui/storeData.js 의 값으로 바뀐다
+  -->
+
+  <!-- 아이콘 스프라이트: <svg><use href="#i-loupe"></use></svg> -->
+  <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <symbol id="i-loupe" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.2"/><path d="m14.6 14.6 6 6"/><path d="M7.3 8.6a3.1 3.1 0 0 1 2.3-2.2"/></symbol>
+    <symbol id="i-saw" viewBox="0 0 24 24"><rect x="2.5" y="6" width="5.6" height="10.6" rx="2.2"/><rect x="4.35" y="8.7" width="1.9" height="5" rx=".95"/><path d="M8.1 7.2H21v4.6"/><path d="M21 11.8l-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4"/></symbol>
+    <symbol id="i-cuffs" viewBox="0 0 24 24"><circle cx="6.6" cy="15.4" r="4.4"/><circle cx="17.4" cy="15.4" r="4.4"/><rect x="4.8" y="8.3" width="3.6" height="2.8" rx=".7"/><rect x="15.6" y="8.3" width="3.6" height="2.8" rx=".7"/><path d="M8.4 9.7h1.5m4.2 0h1.5"/><ellipse cx="12" cy="9.7" rx="2.1" ry="1.2"/></symbol>
+    <symbol id="i-whiskey" viewBox="0 0 24 24"><path d="M6.6 11.4h10.8l-1 7.7a1.4 1.4 0 0 1-1.4 1.2H9a1.4 1.4 0 0 1-1.4-1.2z" fill="currentColor" fill-opacity=".22" stroke="none"/><path d="M4.8 5.5h14.4l-1.7 13.6a2 2 0 0 1-2 1.7H8.5a2 2 0 0 1-2-1.7z"/><path d="M6 11.4h12"/><rect x="9" y="12.6" width="3.8" height="3.8" rx=".9" transform="rotate(-14 10.9 14.5)"/></symbol>
+    <symbol id="i-cigar" viewBox="0 0 24 24"><rect x="2.5" y="12.2" width="16" height="4.6" rx="2.3"/><path d="M12.8 12.2v4.6m1.8-4.6v4.6"/><circle cx="19.4" cy="14.5" r="1.5" fill="currentColor" stroke="none"/><path d="M19.4 10.2c-.9-1 .9-1.9 0-3s.8-1.9 0-3"/></symbol>
+    <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M5.5 4.5v7.6a6.5 6.5 0 0 0 13 0V4.5h-4.2v7.6a2.3 2.3 0 0 1-4.6 0V4.5z"/><path d="M5.5 8.2h4.2m4.6 0h4.2"/></symbol>
+    <symbol id="i-inverter" viewBox="0 0 24 24"><ellipse cx="12" cy="6.4" rx="5.2" ry="2.2"/><path d="M10 8.4v9.8M14 8.4v9.8"/><path d="m10 10.6 4-1.3M10 13l4-1.3M10 15.4l4-1.3M10 17.8l4-1.3"/><path d="M6.8 21.5h10.4M8.6 21.5v-3.3h6.8v3.3"/><path d="m17.4 4.6 2.3-1.5-.7 2.2 2.5-.8-2.4 3"/><path d="M6.6 4.6 4.3 3.1l.7 2.2-2.5-.8 2.4 3"/></symbol>
+    <symbol id="i-unknown" viewBox="0 0 12 28"><path d="M6 1C3.6 2.7 2.4 6 2.4 10h7.2C9.6 6 8.4 2.7 6 1z" opacity=".6"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".5"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7" opacity=".7"/><path d="M4.4 13.4a1.6 1.6 0 1 1 2.7 1.2c-.6.5-1.1.8-1.1 1.8" fill="none" stroke="#000" stroke-opacity=".75" stroke-width="1.1" stroke-linecap="round"/><circle cx="6" cy="19.1" r=".75" fill="#000" fill-opacity=".75"/></symbol>
+    <symbol id="i-live" viewBox="0 0 12 28"><path d="M6 1C3.6 2.7 2.4 6 2.4 10h7.2C9.6 6 8.4 2.7 6 1z"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".8"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7"/><rect x="3.4" y="11" width="1.3" height="11.4" rx=".65" fill="#fff" opacity=".3"/></symbol>
+    <symbol id="i-blank" viewBox="0 0 12 28"><path d="M2.4 10V6.6L4.2 4h3.6l1.8 2.6V10z"/><path d="M4.2 4 6 6.4 7.8 4" fill="none" stroke="#000" stroke-opacity=".45" stroke-width=".8"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".8"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7"/><rect x="3.4" y="11" width="1.3" height="11.4" rx=".65" fill="#fff" opacity=".3"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 14.5 6-6 6 6"/><path d="m6 19.5 6-6 6 6" opacity=".4"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/><path d="m6 4.5 6 6 6-6" opacity=".4"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M9.4 9.3a2.7 2.7 0 0 1 5.2 1c0 1.8-2.6 2.2-2.6 4"/><circle cx="12" cy="17.4" r=".95" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9.5h3.4L12 5.6v12.8l-4.6-3.9H4z"/><path d="M15.4 9.2a4 4 0 0 1 0 5.6"/><path d="M17.8 6.8a7.4 7.4 0 0 1 0 10.4"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.4L12 5.6v12.8l-4.6-3.9H4z"/><path d="m15.6 9.4 5 5.2M20.6 9.4l-5 5.2"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.2" r=".9" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-brass" viewBox="0 0 24 24"><path d="M9.3 8.4V6.5c0-1.9 1.1-3.4 2.7-4.2 1.6.8 2.7 2.3 2.7 4.2v1.9"/><path d="M8.4 8.4h7.2l.8 10.8H7.6z" fill="currentColor" fill-opacity=".16"/><path d="M8.7 11.6h6.6"/><path d="M6.2 19.2h11.6v2.3H6.2z"/><circle cx="12" cy="20.35" r=".7" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-ad" viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.4" rx="2.2"/><path d="m10.3 8.3 4.6 2.5-4.6 2.5z" fill="currentColor" stroke-linejoin="round"/><path d="M8 20.2h8M12 17v3.2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.6 12.6 4.2 4.2 8.6-9.4"/></symbol>
+    <symbol id="i-knock" viewBox="0 0 24 24"><rect x="4.6" y="3.6" width="9.4" height="8.6" rx="2.6"/><path d="M7.7 3.8v3.9m3.2-3.9v3.9"/><path d="M6.9 12.2v3.4h5.2v-3.4"/><path d="M3 19.2h18"/><path d="M16.8 7.4a4.6 4.6 0 0 1 0 5.2"/><path d="M19.4 5.2a8 8 0 0 1 0 9.6"/></symbol>
+    <symbol id="r-rounds" viewBox="0 0 24 24"><circle cx="5.5" cy="13" r="3.2" fill="currentColor" fill-opacity=".85"/><circle cx="12" cy="13" r="3.2" fill="currentColor" fill-opacity=".85"/><circle cx="18.5" cy="13" r="3.2"/><path d="M2.5 19.5h19"/><path d="m7.5 6 4.5-3 4.5 3"/></symbol>
+    <symbol id="r-loop" viewBox="0 0 24 24"><path d="M19.6 12a7.6 7.6 0 1 1-2.2-5.4"/><path d="M19.8 3.8v4.6h-4.6"/><path d="M10.6 11h2.8v5.4h-2.8z"/><path d="M10.6 11l.7-1.5h1.4l.7 1.5"/></symbol>
+    <symbol id="r-guillotine" viewBox="0 0 24 24"><path d="M5 21.5V2.5M19 21.5V2.5"/><path d="M5 4h14"/><path d="M5.5 7.2 18.5 10.4v1.8H5.5z" fill="currentColor" fill-opacity=".3"/><path d="M2.5 21.5h19"/><circle cx="12" cy="17.2" r="2.3"/></symbol>
+    <symbol id="r-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.6"/><path d="M12 13.5V9.4"/><path d="M9.8 2.5h4.4M12 2.5V6"/><path d="m18.3 6.7 1.5-1.5"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.5 18.5h3"/><path d="M2.5 12a9.5 9.5 0 0 1 3-6.9M3.8 3.6l1.7 1.5-1.4 1.8"/></symbol>
+  </svg>
+
+  <!-- 분위기: 전등 빛기둥 · 담배 연기 · 비네팅 (필름 그레인은 맨 위 .grain) -->
+  <div class="atmosphere" aria-hidden="true">
+    <div class="light-cone"></div>
+    <div class="smoke smoke-a"></div>
+    <div class="smoke smoke-b"></div>
+    <div class="smoke smoke-c"></div>
+    <div class="vignette"></div>
+  </div>
+
+  <main class="app" id="app">
+    <!-- ───────── 상단: 딜러 ───────── -->
+    <section class="zone zone-dealer" id="zone-dealer" aria-label="딜러">
+      <header class="hud">
+        <ol class="round-lamps" id="round-pips" aria-label="라운드">
+          <li class="is-current" aria-current="step">I</li>
+          <li>II</li>
+          <li>III</li>
+        </ol>
+        <div class="scoreboard" aria-label="승수 (딜러 : 나)">
+          <span>DEALER</span><b id="score-dealer">0</b><i>:</i><b id="score-player">0</b><span>YOU</span>
+        </div>
+        <div class="hud-tools">
+          <button class="icon-btn" id="btn-sound" type="button" aria-label="소리 설정" aria-expanded="false" aria-controls="sound-panel" title="소리 설정 (M: 음소거)">
+            <svg aria-hidden="true"><use id="sound-icon" href="#i-sound"></use></svg>
+          </button>
+          <button class="icon-btn" id="btn-help" type="button" aria-label="게임 룰 & 아이템 도감" title="게임 룰 & 아이템 도감 (?)">
+            <svg aria-hidden="true"><use href="#i-help"></use></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 소리 설정: 음소거 · 효과음/배경음 음량 (설정은 브라우저에 기억) -->
+      <div class="sound-panel" id="sound-panel" role="group" aria-label="소리 설정" hidden>
+        <button class="sound-mute" id="btn-mute" type="button" role="switch" aria-checked="false">
+          <span>소리</span><b id="mute-state">켬</b>
+        </button>
+        <label class="sound-row"><span>효과음</span><input type="range" id="range-sfx" min="0" max="100" step="5" value="80" /><output id="val-sfx" for="range-sfx">80</output></label>
+        <label class="sound-row"><span>배경음</span><input type="range" id="range-ambient" min="0" max="100" step="5" value="60" /><output id="val-ambient" for="range-ambient">60</output></label>
+      </div>
+
+      <div class="dealer-row">
+        <figure class="dealer-portrait" aria-hidden="true">
+          <svg viewBox="0 0 80 80">
+            <defs>
+              <radialGradient id="dp-glow" cx=".5" cy=".1" r=".8">
+                <stop offset="0" stop-color="#f3c77a" stop-opacity=".55"/><stop offset=".45" stop-color="#7a5326" stop-opacity=".22"/><stop offset="1" stop-color="#000" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="dp-rim" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#f2c37a" stop-opacity="0"/><stop offset=".5" stop-color="#f2c37a" stop-opacity=".8"/><stop offset="1" stop-color="#f2c37a" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <rect width="80" height="80" fill="url(#dp-glow)"/>
+            <path class="dp-body" d="M4 80c3-15 15-23 36-23s33 8 36 23z"/>
+            <path class="dp-lapel" d="M31 58 40 70 49 58"/>
+            <path d="M39 61h2v19h-2z" fill="#6b0b0e"/>
+            <ellipse class="dp-body" cx="40" cy="43" rx="11.5" ry="13.5"/>
+            <path class="dp-body" d="M26 34c-.6-9.5 4-16.5 14-16.5S54.6 24.5 54 34z"/>
+            <path d="M26 30h28v3.6H26z" fill="#2a0b0d"/>
+            <path class="dp-body" d="M14 35c8-4.6 44-4.6 52 0 1.2.8.7 2-.8 2.3-11.7 1.6-38.7 1.6-50.4 0-1.5-.3-2-1.5-.8-2.3z"/>
+            <path d="M15 35.4c8.6-4 41.4-4 50 0" fill="none" stroke="url(#dp-rim)" stroke-width=".9"/>
+            <path d="M26.2 33.6c-.4-8.6 4.4-15.6 13.8-15.6" fill="none" stroke="#f2c37a" stroke-opacity=".35" stroke-width=".7"/>
+            <ellipse class="dp-eye" cx="35.3" cy="44.6" rx="1.7" ry=".6"/>
+            <ellipse class="dp-eye" cx="44.7" cy="44.6" rx="1.7" ry=".6"/>
+            <path class="dp-cig" d="M45 52 56 53.6"/>
+            <circle class="dp-ember" cx="56.8" cy="53.7" r="1.6"/>
+            <path class="dp-smoke" d="M57 50c-2-3 2-5 0-8s2-5 0-8"/>
+          </svg>
+        </figure>
+        <div class="dealer-info">
+          <div class="nameplate">
+            <span class="nameplate-name">THE DEALER</span>
+            <span class="badge badge-guillotine">단두대</span>
+            <span class="badge badge-cuffed"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg>구속</span>
+          </div>
+          <div class="tube" id="dealer-hp" role="img" aria-label="딜러 체력">
+            <span class="cell is-on"></span><span class="cell is-on"></span><span class="cell is-on"></span>
+          </div>
+          <p class="dealer-line" id="dealer-speech"><span id="dealer-line">“앉지. 오늘 밤 마지막 약실의 주인을 정해 보자고.”</span><span class="thinking" aria-hidden="true"><i></i><i></i><i></i></span></p>
+        </div>
+      </div>
+
+      <ul class="dealer-items" id="dealer-items" aria-label="딜러 아이템">
+        <li class="dslot is-empty"></li><li class="dslot is-empty"></li><li class="dslot is-empty"></li>
+        <li class="dslot is-empty"></li><li class="dslot is-empty"></li><li class="dslot is-empty"></li>
+      </ul>
+    </section>
+
+    <!-- ───────── 중앙: 마호가니 테이블 + 흑요석 상판 ───────── -->
+    <section class="zone zone-table" aria-label="테이블">
+      <div class="table" id="table">
+        <div class="table-surface">
+          <div class="table-hud">
+            <div class="shell-rack" id="shells" aria-label="남은 탄">
+              <div class="rack is-live" id="live-rack">
+                <span class="rack-icons" id="live-icons" aria-hidden="true"></span>
+                <b id="live-count">0</b><small>실탄</small>
+              </div>
+              <div class="rack is-blank" id="blank-rack">
+                <span class="rack-icons" id="blank-icons" aria-hidden="true"></span>
+                <b id="blank-count">0</b><small>공포탄</small>
+              </div>
+              <!-- 변환기 사용 후: 총 발수만 공개 -->
+              <div class="rack is-unknown" id="unknown-rack" hidden>
+                <span class="rack-icons" id="unknown-icons" aria-hidden="true"></span>
+                <b id="total-count">0</b><small>발 · 탄종 불명</small>
+              </div>
+            </div>
+            <div class="turn-meter">
+              <span class="turn-label" id="turn-label">READY</span>
+              <div class="timer" id="turn-timer" style="--p: 1" role="progressbar" aria-label="턴 남은 시간" aria-valuemin="0" aria-valuemax="20" aria-valuenow="20">
+                <div class="timer-fill"></div>
+              </div>
+              <span class="timer-text" id="timer-text">—</span>
+            </div>
+          </div>
+
+          <div class="gun-stage">
+            <!-- #gun: .aim-up(딜러 쪽) / .aim-down(나) / .is-sawed / .barrel-spin / .fire -->
+            <div class="gun" id="gun">
+              <div class="gun-rot">
+                <svg viewBox="0 0 320 320" role="img" aria-label="테이블 위의 리볼버">
+                  <defs>
+                    <!-- 총기 색은 전부 CSS 변수(style.css :root 기본값 · storeData.js 스킨이 덮어씀) → 스킨을 바꾸면 이 그라데이션이 그대로 바뀐다 -->
+                    <linearGradient id="gv-steel" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" style="stop-color: var(--gun-hi)"/><stop offset=".16" style="stop-color: var(--gun-primary)"/><stop offset=".5" style="stop-color: var(--gun-shade)"/><stop offset=".85" style="stop-color: var(--gun-low)"/><stop offset="1" style="stop-color: var(--gun-deep)"/>
+                    </linearGradient>
+                    <linearGradient id="gv-cyl" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" style="stop-color: var(--cyl-hi)"/><stop offset=".22" style="stop-color: var(--cyl-mid)"/><stop offset=".55" style="stop-color: var(--cyl-low)"/><stop offset="1" style="stop-color: var(--cyl-deep)"/>
+                    </linearGradient>
+                    <linearGradient id="gv-cylshade" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#000" stop-opacity=".7"/><stop offset=".3" stop-color="#fff" stop-opacity=".14"/><stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".85"/>
+                    </linearGradient>
+                    <linearGradient id="gv-spec" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".35" stop-color="#fff" stop-opacity=".6"/><stop offset=".62" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+                    </linearGradient>
+                    <linearGradient id="gv-wood" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" style="stop-color: var(--grip-hi)"/><stop offset=".45" style="stop-color: var(--grip-mid)"/><stop offset="1" style="stop-color: var(--grip-lo)"/>
+                    </linearGradient>
+                    <linearGradient id="gv-case" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" style="stop-color: var(--case-1)"/><stop offset=".35" style="stop-color: var(--case-2)"/><stop offset=".65" style="stop-color: var(--case-3)"/><stop offset="1" style="stop-color: var(--case-4)"/>
+                    </linearGradient>
+                    <linearGradient id="gv-brass" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" style="stop-color: var(--gun-accent-hi)"/><stop offset=".45" style="stop-color: var(--gun-accent)"/><stop offset="1" style="stop-color: var(--gun-accent-lo)"/>
+                    </linearGradient>
+                    <pattern id="gv-flute" width="46" height="10" patternUnits="userSpaceOnUse">
+                      <rect width="46" height="4.2" fill="#07090c"/><rect y="4.2" width="46" height="1.1" fill="#aab4c4" opacity=".35"/>
+                    </pattern>
+                    <pattern id="gv-grain" width="40" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(-74)">
+                      <path d="M0 2.5c10-1.6 20 1.6 40 0" fill="none" stroke="#000" stroke-opacity=".3" stroke-width=".7"/>
+                    </pattern>
+                    <pattern id="gv-check" width="3.4" height="3.4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                      <path d="M0 0h3.4M0 0v3.4" stroke="#000" stroke-opacity=".5" stroke-width=".6"/>
+                    </pattern>
+                    <radialGradient id="gv-flash" cx="0" cy=".5" r="1">
+                      <stop offset="0" style="stop-color: var(--muzzle-core)"/><stop offset=".2" style="stop-color: var(--muzzle-color)"/><stop offset=".55" style="stop-color: var(--muzzle-hot)" stop-opacity=".85"/><stop offset="1" style="stop-color: var(--muzzle-edge)" stop-opacity="0"/>
+                    </radialGradient>
+                    <radialGradient id="gv-hot">
+                      <stop offset="0" stop-color="#fff0c0"/><stop offset=".45" stop-color="#ff8a1f" stop-opacity=".8"/><stop offset="1" stop-color="#ff3d00" stop-opacity="0"/>
+                    </radialGradient>
+                    <clipPath id="gv-cyl-clip"><rect x="118" y="113" width="46" height="42" rx="7"/></clipPath>
+                  </defs>
+                  <g transform="translate(-20 -14)">
+                    <g class="gun-body">
+                      <!-- 손잡이: 월넛 + 결 + 체커링 -->
+                      <path d="M100 156 136 166 127 224Q124 246 104 249L81 248Q63 246 66 228L79 182Z" fill="url(#gv-wood)"/>
+                      <path d="M100 156 136 166 127 224Q124 246 104 249L81 248Q63 246 66 228L79 182Z" fill="url(#gv-grain)"/>
+                      <path d="M102 172 126 178 119 222Q117 236 104 238L86 237Q76 235 78 223L87 190Z" fill="url(#gv-check)"/>
+                      <path d="M100 156 79 182 66 228" fill="none" stroke="#d99a5f" stroke-opacity=".35" stroke-width="1.3"/>
+                      <path d="M66 229Q63 246 81 248L104 249Q124 246 127 224" fill="none" stroke="#000" stroke-opacity=".45" stroke-width="2"/>
+                      <circle cx="103" cy="206" r="3.8" fill="url(#gv-brass)"/>
+                      <circle cx="103" cy="206" r="1.3" fill="#3a2a0e"/>
+                      <!-- 방아쇠울 · 방아쇠 -->
+                      <path d="M130 164Q130 197 150 197Q168 197 168 164" fill="none" stroke="url(#gv-steel)" stroke-width="6" stroke-linecap="round"/>
+                      <path d="M131 168Q133 194 150 195" fill="none" style="stroke: var(--gun-edge)" stroke-opacity=".3" stroke-width="1"/>
+                      <path d="M146 164Q152 175 147 188" fill="none" stroke="url(#gv-case)" stroke-width="5" stroke-linecap="round"/>
+                      <!-- 공이치기 (케이스 하든) -->
+                      <path d="M110 114 96 99Q91 94 86 97L84 101Q92 107 101 122Z" fill="url(#gv-case)"/>
+                      <path d="M88 98.5 94.5 103.5M90.5 96.5 97 101.5" stroke="#000" stroke-opacity=".35" stroke-width="1.1"/>
+                      <!-- 프레임 (블루드 스틸) + 각인 -->
+                      <path d="M101 112 116 106H170L178 111V150L170 156V166L132 168 122 174H106L99 160Z" fill="url(#gv-steel)"/>
+                      <path d="M116 106H170L178 111" fill="none" style="stroke: var(--gun-edge)" stroke-opacity=".6" stroke-width="1.2"/>
+                      <path d="M108 152q5-7 10 0t10 0M150 159q4-5 8 0" fill="none" style="stroke: var(--gun-accent)" stroke-opacity=".4" stroke-width=".8"/>
+                      <rect x="104" y="130" width="10" height="5" rx="2.5" fill="#5d6778"/>
+                      <circle cx="110" cy="146" r="2.2" fill="url(#gv-brass)"/>
+                      <circle cx="160" cy="161" r="2" fill="url(#gv-brass)"/>
+                      <!-- 총열 뒷부분 (통짜 언더러그 + 벤트 리브) -->
+                      <rect x="172" y="118" width="60" height="22" fill="url(#gv-steel)"/>
+                      <rect x="172" y="138" width="60" height="13" rx="2" fill="url(#gv-steel)"/>
+                      <rect x="172" y="111" width="60" height="7" style="fill: var(--gun-rib)"/>
+                      <rect x="172" y="111.6" width="60" height="1.4" style="fill: var(--gun-edge)" opacity=".5"/>
+                      <g fill="#06080b"><rect x="178" y="113.6" width="5" height="3.2"/><rect x="190" y="113.6" width="5" height="3.2"/><rect x="202" y="113.6" width="5" height="3.2"/><rect x="214" y="113.6" width="5" height="3.2"/></g>
+                      <rect x="172" y="120" width="60" height="2.3" fill="url(#gv-spec)"/>
+                      <!-- 네온 라인 (사이버 스킨에서만 보임: --gun-neon-opacity) -->
+                      <g class="gun-neon" aria-hidden="true"><path class="neon-glow" d="M178 130H228"/><path class="neon-line" d="M178 130H228"/></g>
+                      <!-- 총열 앞부분: SAW(.is-sawed) 시 떨어져 나감 -->
+                      <g class="gun-barrel-front">
+                        <rect x="232" y="118" width="62" height="22" fill="url(#gv-steel)"/>
+                        <rect x="232" y="138" width="62" height="13" rx="3" fill="url(#gv-steel)"/>
+                        <rect x="232" y="111" width="62" height="7" style="fill: var(--gun-rib)"/>
+                        <rect x="232" y="111.6" width="62" height="1.4" style="fill: var(--gun-edge)" opacity=".5"/>
+                        <g fill="#06080b"><rect x="238" y="113.6" width="5" height="3.2"/><rect x="250" y="113.6" width="5" height="3.2"/><rect x="262" y="113.6" width="5" height="3.2"/></g>
+                        <path d="M274 111 279 101H291V111Z" style="fill: var(--gun-rib)"/>
+                        <rect x="285" y="102.6" width="3" height="5" fill="#d92626"/>
+                        <rect x="292" y="116" width="6" height="36" rx="2" style="fill: var(--gun-cap)"/>
+                        <rect x="232" y="120" width="62" height="2.3" fill="url(#gv-spec)"/>
+                        <g class="gun-neon" aria-hidden="true"><path class="neon-glow" d="M238 130H286"/><path class="neon-line" d="M238 130H286"/></g>
+                      </g>
+                      <!-- 잘린 단면: 달아오른 금속 -->
+                      <g class="gun-saw-cut">
+                        <ellipse class="gun-saw-glow" cx="234" cy="131" rx="12" ry="24" fill="url(#gv-hot)"/>
+                        <path d="M229 110 235 113 230 117 235 121 230 125 235 129 230 133 235 137 230 141 235 145 230 151H227V110Z" fill="#d8dee7"/>
+                      </g>
+                      <!-- 실린더 (.barrel-spin 시 홈이 굴러감) -->
+                      <rect x="118" y="113" width="46" height="42" rx="7" fill="url(#gv-cyl)"/>
+                      <g clip-path="url(#gv-cyl-clip)">
+                        <rect class="gun-flutes" x="118" y="40" width="46" height="400" fill="url(#gv-flute)"/>
+                        <rect x="118" y="113" width="46" height="42" fill="url(#gv-cylshade)"/>
+                        <rect x="118" y="113" width="4" height="42" fill="#000" opacity=".5"/>
+                        <rect x="160" y="113" width="4" height="42" fill="#000" opacity=".5"/>
+                        <rect x="118" y="121" width="46" height="2.4" fill="url(#gv-spec)"/>
+                      </g>
+                      <g class="gun-neon" aria-hidden="true"><path class="neon-glow" d="M123 115V153M159 115V153"/><path class="neon-line" d="M123 115V153M159 115V153"/></g>
+                      <!-- 레이저 조준선 (블러드 크롬 스킨에서만, 조준(.aim-up/.aim-down)할 때 켜짐: --gun-laser-opacity) -->
+                      <g class="gun-laser" aria-hidden="true"><path class="laser-glow" d="M298 129H900"/><path class="laser-line" d="M298 129H900"/></g>
+                      <!-- 총구 화염 · 연기 (.fire) -->
+                      <g class="muzzle-flash">
+                        <path d="M298 129 326 113 318 125 352 129 318 133 326 145Z" fill="url(#gv-flash)"/>
+                        <ellipse cx="305" cy="129" rx="16" ry="12" fill="url(#gv-flash)"/>
+                      </g>
+                      <g class="gun-smoke"><circle cx="306" cy="127" r="7"/><circle cx="317" cy="121" r="9"/><circle cx="326" cy="131" r="6"/></g>
+                    </g>
+                  </g>
+                </svg>
+              </div>
+            </div>
+
+            <!-- 도발 버튼: 상점에서 도발 액션을 사서 장착했고 판이 진행 중일 때만 보인다 (app.js syncTauntButton). 쿨타임 동안은 .is-cooling -->
+            <button class="taunt-btn" id="btn-taunt" type="button" hidden aria-label="도발">
+              <svg aria-hidden="true"><use id="taunt-icon" href="#i-knock"></use></svg>
+              <span class="taunt-cd" aria-hidden="true"></span>
+            </button>
+
+            <!-- 변환기: 푸른 전기 스파크 (.is-active) -->
+            <svg class="sparks" id="sparks" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M18 28 30 37 25 41 38 49 32 53 45 61"/>
+              <path d="M82 24 70 33 76 37 62 45 68 49 55 58"/>
+              <path d="M26 80 38 71 33 67 47 60 42 56 53 49"/>
+              <path d="M76 78 64 69 70 65 56 58 61 54 50 47"/>
+              <path d="M50 10 47 22 53 25 46 36"/>
+            </svg>
+          </div>
+
+          <!-- 연출 레이어 -->
+          <div class="headline" id="headline" aria-hidden="true"></div>
+          <!-- 도발 연출: 테이블 중앙 네온 글자 + 도발별 이펙트 (.is-playing + .is-knock | .is-smoke | .is-flick, 보낸 쪽은 .from-me | .from-opponent) -->
+          <div class="taunt-fx" id="taunt-fx" aria-hidden="true">
+            <span class="tfx-rings"><i></i><i></i><i></i></span>
+            <span class="tfx-wisps"><i></i><i></i><i></i><i></i></span>
+            <span class="tfx-casing"><svg><use href="#i-brass"></use></svg></span>
+            <b class="tfx-text" id="taunt-text"></b>
+          </div>
+          <p class="subtitle" id="subtitle" aria-hidden="true"><span class="sub-line"><span class="sub-ghost" id="sub-ghost"></span><span class="sub-typed" id="sub-typed"></span></span></p>
+
+          <div class="reveal" id="reveal" role="status" aria-live="polite">
+            <p class="reveal-kicker">NEW LOAD</p>
+            <p class="reveal-title">장전</p>
+            <div class="reveal-shells" id="reveal-shells" aria-hidden="true"></div>
+            <p class="reveal-count" id="reveal-count"></p>
+            <p class="reveal-note">순서는 아무도 모른다</p>
+          </div>
+
+          <div class="loupe-popup" id="loupe-popup" role="status">
+            <p class="loupe-kicker"><svg aria-hidden="true"><use href="#i-loupe"></use></svg><span id="loupe-kicker">SECRET · 약실 확인</span></p>
+            <p class="loupe-result" id="loupe-result">—</p>
+            <p class="loupe-note">당신만 보고 있다</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 하단: 플레이어 ───────── -->
+    <section class="zone zone-player" id="zone-player" aria-label="나">
+      <ul class="item-grid" id="player-items" aria-label="내 아이템">
+        <li><span class="card is-empty"></span></li><li><span class="card is-empty"></span></li><li><span class="card is-empty"></span></li>
+        <li><span class="card is-empty"></span></li><li><span class="card is-empty"></span></li><li><span class="card is-empty"></span></li>
+      </ul>
+
+      <div class="player-status">
+        <span class="nameplate-name">YOU</span>
+        <div class="tube" id="player-hp" role="img" aria-label="내 체력">
+          <span class="cell is-on"></span><span class="cell is-on"></span><span class="cell is-on"></span>
+        </div>
+        <span class="badge badge-guillotine">단두대 · 한 발이면 끝</span>
+        <span class="badge badge-cuffed"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg>구속</span>
+      </div>
+
+      <div class="trigger-panel">
+        <button class="trigger trigger-danger" id="btn-shoot-opponent" type="button" disabled>
+          <span class="trigger-icon"><svg aria-hidden="true"><use href="#i-up"></use></svg></span>
+          <span class="trigger-text"><span class="trigger-label">상대에게 격발</span><span class="trigger-sub">FIRE · DEALER</span></span>
+        </button>
+        <button class="trigger trigger-amber" id="btn-shoot-self" type="button" disabled>
+          <span class="trigger-icon"><svg aria-hidden="true"><use href="#i-down"></use></svg></span>
+          <span class="trigger-text"><span class="trigger-label">나에게 격발</span><span class="trigger-sub">FIRE · SELF</span></span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <p class="sr-only" id="sr-log" role="status" aria-live="polite"></p>
+  <div class="crisis" id="crisis" aria-hidden="true"></div> <!-- 위기 비네팅: 마지막 1발 .is-tense / 내 체력 1 .is-danger -->
+  <div class="fx-flash" id="fx-flash" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div class="rotate-hint" aria-hidden="true">
+    <svg><use href="#i-rotate"></use></svg>
+    <p>화면을 세로로 돌려 주세요</p>
+  </div>
+
+  <!-- ───────── 타이틀 화면 ───────── -->
+  <dialog class="title-screen" id="start-modal" open aria-labelledby="title-heading">
+    <div class="title-inner">
+      <!-- 상단 HUD: 내 티어 · 닉네임 · 승률 미니 카드(좌, 누르면 프로필 & 랭킹) / 보유 탄피(BRASS) · 연승(우) -->
+      <div class="title-hud">
+        <button class="player-card" id="player-card" type="button" aria-haspopup="dialog" aria-controls="profile-modal" aria-label="프로필 & 랭킹 열기">
+          <span class="tier-badge" id="pc-badge" aria-hidden="true"><b>I</b></span>
+          <span class="pc-text">
+            <small id="pc-tier">브론즈 칩</small>
+            <span class="pc-line"><b id="pc-name">방랑자</b><i aria-hidden="true">·</i><em id="pc-rate">승률 0.0%</em></span>
+          </span>
+        </button>
+        <div class="wallet" id="wallet" role="img" aria-label="보유 탄피">
+          <svg class="wallet-icon" aria-hidden="true"><use href="#i-brass"></use></svg>
+          <span class="wallet-text"><small>BRASS</small><b id="wallet-amount">0</b></span>
+          <span class="wallet-streak" id="wallet-streak" hidden></span>
+        </div>
+      </div>
+
+      <div class="title-art" aria-hidden="true">
+        <svg class="title-cylinder" viewBox="0 0 200 200">
+          <defs>
+            <radialGradient id="tc-steel" cx=".36" cy=".28" r=".85">
+              <stop offset="0" stop-color="#96a1b3"/><stop offset=".32" stop-color="#3b424e"/><stop offset=".72" stop-color="#14171c"/><stop offset="1" stop-color="#060709"/>
+            </radialGradient>
+            <linearGradient id="tc-brass" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#fbe9b4"/><stop offset=".42" stop-color="#c9a35b"/><stop offset="1" stop-color="#4f3a12"/>
+            </linearGradient>
+            <radialGradient id="tc-hole">
+              <stop offset="0" stop-color="#000"/><stop offset=".72" stop-color="#050506"/><stop offset="1" stop-color="#2c313b"/>
+            </radialGradient>
+            <radialGradient id="tc-case" cx=".38" cy=".32" r=".75">
+              <stop offset="0" stop-color="#fff1c8"/><stop offset=".45" stop-color="#c9a35b"/><stop offset="1" stop-color="#5a4216"/>
+            </radialGradient>
+            <radialGradient id="tc-primer" cx=".4" cy=".35" r=".7">
+              <stop offset="0" stop-color="#ffd6c8"/><stop offset=".4" stop-color="#ff4d4d"/><stop offset="1" stop-color="#5e0a0c"/>
+            </radialGradient>
+          </defs>
+          <circle cx="100" cy="100" r="93" fill="url(#tc-steel)"/>
+          <g fill="#050608">
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(-60 100 100)"/>
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(0 100 100)"/>
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(60 100 100)"/>
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(120 100 100)"/>
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(180 100 100)"/>
+            <rect x="95" y="4" width="10" height="24" rx="5" transform="rotate(240 100 100)"/>
+          </g>
+          <circle cx="100" cy="100" r="92" fill="none" stroke="#b6c1d2" stroke-opacity=".35" stroke-width="1.5"/>
+          <g stroke="#69737f" stroke-opacity=".6" stroke-width="1.6" fill="url(#tc-hole)">
+            <circle cx="100" cy="48" r="19"/><circle cx="145" cy="74" r="19"/><circle cx="145" cy="126" r="19"/>
+            <circle cx="100" cy="152" r="19"/><circle cx="55" cy="126" r="19"/><circle cx="55" cy="74" r="19"/>
+          </g>
+          <circle cx="100" cy="48" r="16.5" fill="url(#tc-case)"/>
+          <circle cx="100" cy="48" r="6.5" fill="url(#tc-primer)"/>
+          <circle cx="100" cy="100" r="17" fill="url(#tc-brass)"/>
+          <path d="M100 88 103 96 111 97 105 102 107 110 100 106 93 110 95 102 89 97 97 96Z" fill="#3a2a0e" opacity=".55"/>
+        </svg>
+      </div>
+
+      <div class="title-logo">
+        <p class="title-kicker">UNDERGROUND · NOIR · ROULETTE</p>
+        <h1 class="title-heading" id="title-heading">LAST<span>CHAMBER</span></h1>
+        <p class="title-sub" id="title-sub">마지막 약실의 주인은 누구인가</p>
+        <p class="title-result" id="title-result" hidden></p>
+      </div>
+
+      <!-- 경기 결과 보상 (결과 화면에서만): 획득 탄피 · 광고로 2배 · 연승 보호 -->
+      <section class="reward" id="reward" aria-labelledby="reward-title" hidden>
+        <header class="reward-head">
+          <h2 class="reward-title" id="reward-title">획득 탄피</h2>
+          <p class="reward-total"><svg aria-hidden="true"><use href="#i-brass"></use></svg><b id="reward-total">+0</b></p>
+        </header>
+        <ul class="reward-lines" id="reward-lines"></ul>
+        <p class="reward-streak" id="reward-streak"></p>
+        <div class="reward-rank" id="reward-rank" hidden></div> <!-- 티어 승급·강등 · 새 칭호 (있을 때만) -->
+      </section>
+      <div class="reward-actions" id="reward-actions" hidden>
+        <button class="ad-btn" id="btn-double" type="button">
+          <span class="ad-btn-icon"><svg aria-hidden="true"><use href="#i-ad"></use></svg></span>
+          <span class="ad-btn-text"><b>광고 보고 보상 2배 받기</b><small id="double-sub">+0 탄피 추가 지급</small></span>
+        </button>
+        <button class="ad-btn is-protect" id="btn-protect" type="button" hidden>
+          <span class="ad-btn-icon"><svg aria-hidden="true"><use href="#i-ad"></use></svg></span>
+          <span class="ad-btn-text"><b>광고 보고 연승 기록 보호하기</b><small id="protect-sub">연승 유지</small></span>
+        </button>
+        <p class="reward-note" id="reward-note" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="title-actions">
+        <p class="trial-note" id="trial-note" hidden></p>
+        <button class="title-btn title-btn-play" id="btn-start" type="button">
+          <span class="title-btn-main">게임 시작</span><span class="title-btn-sub">PLAY</span>
+        </button>
+        <button class="title-btn title-btn-armory" id="btn-armory" type="button">
+          <span class="title-btn-main">상점 &amp; 무기고</span><span class="title-btn-sub">ARMORY</span>
+        </button>
+        <button class="title-btn title-btn-howto" id="btn-howto" type="button">
+          <span class="title-btn-main">게임 룰 &amp; 아이템 도감</span><span class="title-btn-sub">HOW TO PLAY</span>
+        </button>
+      </div>
+      <p class="title-note">효과음이 재생됩니다 · 헤드폰 권장</p>
+    </div>
+  </dialog>
+
+  <!-- ───────── 게임 룰 & 아이템 도감 ───────── -->
+  <dialog class="codex" id="rules-modal" aria-labelledby="codex-title">
+    <div class="codex-shell">
+      <header class="codex-head">
+        <div>
+          <p class="codex-kicker">LAST CHAMBER</p>
+          <h2 class="codex-title" id="codex-title">HOW TO PLAY</h2>
+        </div>
+        <button class="icon-btn codex-close" id="btn-rules-close" type="button" aria-label="닫기">
+          <svg aria-hidden="true"><use href="#i-close"></use></svg>
+        </button>
+      </header>
+
+      <div class="codex-tabs" role="tablist" aria-label="도감 탭">
+        <button class="codex-tab" id="tab-rules" type="button" role="tab" aria-selected="true" aria-controls="panel-rules">기본 룰 &amp; 생존 법칙</button>
+        <button class="codex-tab" id="tab-items" type="button" role="tab" aria-selected="false" aria-controls="panel-items" tabindex="-1">아이템 7종 도감</button>
+      </div>
+
+      <section class="codex-panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" tabindex="0">
+        <article class="rule-card">
+          <div class="rule-icon"><svg aria-hidden="true"><use href="#r-rounds"></use></svg></div>
+          <div class="rule-body">
+            <h3><b>01</b>3판 2선승 &amp; 재장전</h3>
+            <ul>
+              <li>먼저 <em>2판</em>을 이기면 승리. 체력칩을 모두 잃으면 그 판은 끝난다.</li>
+              <li>라운드가 오를수록 체력(3·4·4)과 장전 탄 수(3~5 · 5~7 · 6~8발)가 늘어난다.</li>
+              <li>장전 때 <em class="t-live">실탄</em>·<em class="t-blank">공포탄</em> <em>개수만</em> 공개되고, 순서는 비밀이다.</li>
+              <li><em class="t-volt">변환기</em>를 쓰면 그 장전이 끝날 때까지 실탄·공포탄 개수가 가려지고 <em>총 발수만</em> 보인다.</li>
+              <li>탄이 다 떨어지면 재장전 — 재장전은 턴을 바꾸지 않는다. 턴은 마지막 격발의 결과대로 이어지고, 새 라운드가 시작될 때만 <em>마지막으로 쏜 사람의 상대</em>가 먼저 쏜다.</li>
+              <li>장전할 때마다 아이템 지급 — 1라운드 <em>1개</em>, 2·3라운드 <em>2개</em>씩. 최대 6칸, 같은 아이템 최대 2개(수갑은 1개), 라운드마다 초기화. 수갑·시가는 드물게 나온다.</li>
+            </ul>
+          </div>
+        </article>
+        <article class="rule-card">
+          <div class="rule-icon"><svg aria-hidden="true"><use href="#r-loop"></use></svg></div>
+          <div class="rule-body">
+            <h3><b>02</b>나에게 쏜 공포탄 = 한 번 더</h3>
+            <ul>
+              <li>나에게 쐈는데 <em class="t-blank">공포탄</em>이면 <em>턴이 유지</em>되어 연속으로 행동한다.</li>
+              <li>마지막 발을 나에게 공포탄으로 쏘아 재장전될 때도 <em>내 선공이 유지</em>됩니다.</li>
+              <li>나에게 <em class="t-live">실탄</em>이면 피해를 입고 턴이 넘어간다.</li>
+              <li>상대에게 쏘면 실탄이든 공포탄이든 턴이 넘어간다.</li>
+            </ul>
+          </div>
+        </article>
+        <article class="rule-card">
+          <div class="rule-icon is-danger"><svg aria-hidden="true"><use href="#r-guillotine"></use></svg></div>
+          <div class="rule-body">
+            <h3><b>03</b>단두대 — 체력 1칸</h3>
+            <ul>
+              <li>체력이 1칸 남으면 진공관이 깨진 듯 붉게 지지직거리는 <em class="t-live">단두대</em> 상태.</li>
+              <li>실탄 한 발이면 끝이다 — 쇠톱이 걸린 실탄은 체력 2칸도 한 번에 날린다.</li>
+              <li>단두대에서도 시가로 <em>회복할 수 있다</em>. 살아남고 싶다면 아껴 둬라.</li>
+            </ul>
+          </div>
+        </article>
+        <article class="rule-card">
+          <div class="rule-icon"><svg aria-hidden="true"><use href="#r-timer"></use></svg></div>
+          <div class="rule-body">
+            <h3><b>04</b>20초 턴 타이머</h3>
+            <ul>
+              <li>내 턴마다 <em>20초</em>. 5초 남으면 붉게 점멸한다.</li>
+              <li>0초가 되면 방아쇠가 <em>저절로</em> 당겨진다 — 나 또는 딜러, 무작위.</li>
+              <li>연출 중이거나 이 도감을 보는 동안, 다른 탭·창으로 나가 있는 동안에는 시간과 딜러 진행이 멈춘다.</li>
+            </ul>
+          </div>
+        </article>
+        <p class="codex-keys">PC 단축키 · <kbd>↑</kbd> 상대에게 격발 · <kbd>↓</kbd> 나에게 격발 · <kbd>1</kbd>~<kbd>6</kbd> 아이템 · <kbd>M</kbd> 음소거 · <kbd>?</kbd> 도감</p>
+      </section>
+
+      <section class="codex-panel" id="panel-items" role="tabpanel" aria-labelledby="tab-items" tabindex="0" hidden>
+        <div class="item-codex">
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-loupe"></use></svg></span><h3>돋보기<small>LOUPE</small></h3></div>
+            <p class="codex-tag">약실 확인</p>
+            <p class="codex-desc">지금 약실에 든 탄이 실탄인지 공포탄인지 나만 몰래 본다.</p>
+            <ul class="codex-limits"><li>턴당 1회</li><li>같은 턴에 쇠톱과 함께 쓸 수 없다 (확정 2데미지 방지)</li><li>상대에게는 결과가 보이지 않는다</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-saw"></use></svg></span><h3>쇠톱<small>SAW</small></h3></div>
+            <p class="codex-tag">데미지 ×2</p>
+            <p class="codex-desc">총열을 잘라 이번 한 발의 피해를 2배로 만든다.</p>
+            <ul class="codex-limits"><li>같은 턴에 돋보기·수갑과 함께 쓸 수 없다</li><li>쏘고 나면(공포탄이어도) 효과가 사라진다</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg></span><h3>수갑<small>CUFFS</small></h3></div>
+            <p class="codex-tag">상대 턴 스킵</p>
+            <p class="codex-desc">상대의 다음 턴을 건너뛰게 해 내가 연달아 행동한다.</p>
+            <ul class="codex-limits"><li>다른 아이템보다 드물게 나오고, 한 번에 1개만 가질 수 있다</li><li>같은 턴에 쇠톱과 함께 쓸 수 없다</li><li>상대가 실제로 한 턴을 갖기 전엔 다시 채울 수 없다</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-whiskey"></use></svg></span><h3>위스키<small>WHISKEY</small></h3></div>
+            <p class="codex-tag">탄 배출·템 파괴</p>
+            <p class="codex-desc">지금 약실의 탄을 쏘지 않고 빼내 종류를 공개하고, 상대 아이템 1개를 무작위로 망가뜨린다.</p>
+            <ul class="codex-limits"><li>언제든 사용 가능 (상대 아이템이 없으면 탄만 빠진다)</li><li>어떤 아이템이 부서질지는 고를 수 없다</li><li>마지막 한 발을 빼면 바로 재장전된다</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-cigar"></use></svg></span><h3>시가<small>CIGAR</small></h3></div>
+            <p class="codex-tag">체력 +1</p>
+            <p class="codex-desc">한 모금에 체력을 1칸 회복한다.</p>
+            <ul class="codex-limits"><li>단두대(체력 1)에서도 쓸 수 있다</li><li>체력이 가득 차 있으면 사용 불가</li><li>다른 아이템보다 드물게 나온다 (라운드당 최대 2개)</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-magnet"></use></svg></span><h3>자석<small>MAGNET</small></h3></div>
+            <p class="codex-tag">상대 템 강탈</p>
+            <p class="codex-desc">상대 아이템 하나를 무작위로 빼앗아 그 자리에서 바로 사용한다.</p>
+            <ul class="codex-limits"><li>지금 내가 쓸 수 있는 아이템만 끌려온다</li><li>자석끼리는 빼앗을 수 없다</li><li>쓸 만한 게 없으면 사용 불가</li></ul>
+          </article>
+          <article class="codex-item">
+            <div class="codex-item-head"><span class="codex-item-icon is-volt"><svg aria-hidden="true"><use href="#i-inverter"></use></svg></span><h3>변환기<small>INVERTER</small></h3></div>
+            <p class="codex-tag">약실 반전</p>
+            <p class="codex-desc">지금 약실 탄의 성질을 뒤집는다 — 실탄은 공포탄으로, 공포탄은 실탄으로.</p>
+            <ul class="codex-limits"><li>무엇에서 무엇으로 바뀌었는지는 아무에게도 공개되지 않는다</li><li>돋보기로 미리 본 탄이라면 결과를 알 수 있다</li><li>사용 후 이번 장전의 실탄·공포탄 개수는 가려지고 총 발수만 보인다</li></ul>
+          </article>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- ───────── 상점 & 무기고: 총기 스킨 4종 · 테이블 테마 4종 · 암시장 상자 & 이펙트 · 도발 액션 (카드는 app.js가 storeData.js 카탈로그로 그린다) ───────── -->
+  <dialog class="codex store" id="store-modal" aria-labelledby="store-title">
+    <div class="codex-shell store-shell">
+      <header class="codex-head">
+        <div>
+          <p class="codex-kicker">LAST CHAMBER</p>
+          <h2 class="codex-title" id="store-title">ARMORY</h2>
+        </div>
+        <div class="store-tools">
+          <p class="wallet-chip" role="img" aria-label="보유 탄피"><svg aria-hidden="true"><use href="#i-brass"></use></svg><b id="store-brass">0</b></p>
+          <button class="icon-btn codex-close" id="btn-store-close" type="button" aria-label="닫기">
+            <svg aria-hidden="true"><use href="#i-close"></use></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="codex-tabs" role="tablist" aria-label="상점 탭">
+        <button class="codex-tab" id="tab-guns" type="button" role="tab" aria-selected="true" aria-controls="panel-guns">총기 스킨 5종</button>
+        <button class="codex-tab" id="tab-tables" type="button" role="tab" aria-selected="false" aria-controls="panel-tables" tabindex="-1">테이블 테마 4종</button>
+        <button class="codex-tab" id="tab-chest" type="button" role="tab" aria-selected="false" aria-controls="panel-chest" tabindex="-1">암시장 상자 &amp; 이펙트</button>
+        <button class="codex-tab" id="tab-taunts" type="button" role="tab" aria-selected="false" aria-controls="panel-taunts" tabindex="-1">도발 액션</button>
+      </div>
+
+      <section class="codex-panel store-panel" id="panel-guns" role="tabpanel" aria-labelledby="tab-guns" tabindex="0">
+        <ul class="skin-list" id="list-guns"></ul>
+      </section>
+      <section class="codex-panel store-panel" id="panel-tables" role="tabpanel" aria-labelledby="tab-tables" tabindex="0" hidden>
+        <ul class="skin-list" id="list-tables"></ul>
+      </section>
+      <!-- 탭 3 · 암시장: [낡은 탄약 상자] 뽑기(실린더가 돈다) → 한정 총구 화염 3종 · 칭호 4종. 중복은 탄피 환급 + 천장 게이지, 확률표 공개 -->
+      <section class="codex-panel store-panel" id="panel-chest" role="tabpanel" aria-labelledby="tab-chest" tabindex="0" hidden>
+        <div class="chest-box">
+          <div class="chest-stage" id="chest-stage" aria-hidden="true">
+            <svg viewBox="0 0 200 200" focusable="false">
+              <defs>
+                <radialGradient id="ck-metal" cx=".36" cy=".28" r=".85">
+                  <stop offset="0" stop-color="#96a1b3"/><stop offset=".32" stop-color="#3b424e"/><stop offset=".72" stop-color="#14171c"/><stop offset="1" stop-color="#060709"/>
+                </radialGradient>
+                <linearGradient id="ck-brass" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#fbe9b4"/><stop offset=".42" stop-color="#c9a35b"/><stop offset="1" stop-color="#4f3a12"/>
+                </linearGradient>
+                <radialGradient id="ck-glow">
+                  <stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".38" style="stop-color: var(--chest-glow)" stop-opacity=".75"/><stop offset="1" style="stop-color: var(--chest-glow)" stop-opacity="0"/>
+                </radialGradient>
+              </defs>
+              <circle class="ck-halo" cx="100" cy="100" r="98" fill="url(#ck-glow)"/>
+              <g class="ck-cylinder">
+                <circle cx="100" cy="100" r="80" fill="url(#ck-metal)"/>
+                <circle cx="100" cy="100" r="79" fill="none" stroke="url(#ck-brass)" stroke-width="3"/>
+                <circle cx="100" cy="100" r="68" fill="none" stroke="#000" stroke-opacity=".5" stroke-width="1"/>
+                <g class="ck-chambers">
+                  <circle cx="100" cy="50" r="16"/><circle cx="143.3" cy="75" r="16"/><circle cx="143.3" cy="125" r="16"/>
+                  <circle cx="100" cy="150" r="16"/><circle cx="56.7" cy="125" r="16"/><circle cx="56.7" cy="75" r="16"/>
+                </g>
+                <circle cx="100" cy="100" r="17" fill="url(#ck-brass)"/>
+                <circle cx="100" cy="100" r="6" fill="#1b1409"/>
+              </g>
+              <circle class="ck-lit" cx="100" cy="50" r="13"/>
+              <circle class="ck-ring" cx="100" cy="50" r="16" fill="none"/>
+              <path class="ck-pointer" d="M100 25 90 5h20z"/>
+            </svg>
+          </div>
+          <div class="chest-info">
+            <h3 class="chest-name">낡은 탄약 상자<small>OLD AMMO CRATE</small></h3>
+            <p class="chest-blurb">무엇이 나올지는 열어 보기 전엔 아무도 모른다. 총구 화염 3종과 한정 칭호 4종이 잠들어 있다.</p>
+            <button class="chest-draw" id="btn-chest" type="button">
+              <svg aria-hidden="true"><use href="#i-brass"></use></svg>
+              <span class="chest-draw-text"><b id="chest-draw-label">낡은 탄약 상자 열기</b><small id="chest-price">300 탄피</small></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="pity" id="chest-pity" role="group" aria-labelledby="pity-title">
+          <div class="pity-head"><b id="pity-title">천장 게이지</b><span id="pity-count">0/5</span></div>
+          <div class="pity-pips" id="pity-pips" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          <p class="pity-note" id="pity-note"></p>
+        </div>
+
+        <div class="chest-result" id="chest-result" role="status" aria-live="polite" hidden></div>
+
+        <details class="chest-odds">
+          <summary>확률표 · 규칙</summary>
+          <div class="odds-body" id="odds-body"></div>
+        </details>
+
+        <h3 class="pf-heading chest-heading">수집 현황 <small id="chest-progress">0 / 7</small></h3>
+        <ul class="skin-list" id="list-chest"></ul>
+      </section>
+
+      <!-- 탭 4 · 도발 액션: 450 탄피씩 · 사서 장착하면 인게임 구석에 도발 버튼이 생긴다 -->
+      <section class="codex-panel store-panel" id="panel-taunts" role="tabpanel" aria-labelledby="tab-taunts" tabindex="0" hidden>
+        <p class="taunt-intro">장착한 도발은 게임 화면 구석의 작은 버튼으로 쓸 수 있어요. 테이블 중앙에 네온 글자가 번쩍이고, 딜러가 한마디 받아칩니다. 한 번 쓰면 잠시 쉬어야 해요.</p>
+        <ul class="skin-list" id="list-taunts"></ul>
+      </section>
+
+      <p class="store-toast" id="store-toast" role="status" aria-live="polite" hidden></p>
+    </div>
+  </dialog>
+
+  <!-- ───────── 프로필 & 랭킹: [내 기록] 닉네임 · 전적 · 연승 · 칭호 / [순위표] 가상 라이벌 15명 + 내 실시간 순위 (내용은 app.js가 그린다) ───────── -->
+  <dialog class="codex profile" id="profile-modal" aria-labelledby="profile-title">
+    <div class="codex-shell profile-shell">
+      <header class="codex-head">
+        <div>
+          <p class="codex-kicker">LAST CHAMBER</p>
+          <h2 class="codex-title" id="profile-title">PROFILE</h2>
+        </div>
+        <button class="icon-btn codex-close" id="btn-profile-close" type="button" aria-label="닫기">
+          <svg aria-hidden="true"><use href="#i-close"></use></svg>
+        </button>
+      </header>
+
+      <div class="codex-tabs" role="tablist" aria-label="프로필 탭">
+        <button class="codex-tab" id="tab-record" type="button" role="tab" aria-selected="true" aria-controls="panel-record">내 기록 <small>(MY RECORD)</small></button>
+        <button class="codex-tab" id="tab-board" type="button" role="tab" aria-selected="false" aria-controls="panel-board" tabindex="-1">순위표 <small>(LEADERBOARD)</small></button>
+      </div>
+
+      <section class="codex-panel profile-panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" tabindex="0">
+        <div class="pf-hero" id="pf-hero"></div>
+
+        <form class="nick-form" id="nick-form" autocomplete="off">
+          <label for="nick-input">닉네임</label>
+          <div class="nick-row">
+            <input id="nick-input" name="nickname" type="text" maxlength="12" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="nick-msg" />
+            <button class="sk-btn sk-equip" type="submit">저장</button>
+          </div>
+          <p class="nick-msg" id="nick-msg" role="status" aria-live="polite">1~12자 · 글자, 숫자, 공백, ( _ . - · )</p>
+        </form>
+
+        <dl class="pf-stats" id="pf-stats"></dl>
+
+        <section class="pf-titles" aria-labelledby="pf-title-heading">
+          <h3 class="pf-heading" id="pf-title-heading">칭호 <small>TITLES</small></h3>
+          <div class="pf-title-now" id="pf-title-now"></div>
+          <div class="pf-title-list" id="pf-title-list"></div>
+        </section>
+      </section>
+
+      <section class="codex-panel profile-panel" id="panel-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0" hidden>
+        <div class="lb-summary" id="board-summary" aria-live="polite"></div>
+        <ol class="lb-list" id="board-list" aria-label="순위표"></ol>
+        <p class="lb-note" id="board-note"></p>
+      </section>
+    </div>
+  </dialog>
+
+  <script type="module" src="./src/ui/app.js"></script>
+  <!-- 유료 상품 2종: 타이틀 화면 상품 버튼 · 결제 팝업 · 광고 INSTANT 훅 (app.js 와 독립 — 같은 platformBridge 싱글턴과 localStorage 프로필을 쓴다) -->
+  <script type="module" src="./src/ui/monetization.js"></script>
+  <!-- 대전 모드 선택 & 매칭 로비 (4-2단계): PLAY(#btn-start) 클릭을 가로채 모드 선택 모달을 연다 · AI 딜러 선택 시 원래 PLAY 동작을 그대로 실행 · 매칭 성사 시 window 'pvp:start' 만 발생 -->
+  <script type="module" src="./src/ui/multiplayer.js"></script>
+</body>
+</html>
