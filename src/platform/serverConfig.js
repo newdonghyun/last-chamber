@@ -12,7 +12,7 @@
   'use strict';
 
   // ▼▼▼ 실제 배포한 클라우드 서버 주소 — 배포 후 이 한 줄만 바꾸면 된다 (끝의 / 는 없어도 된다) ▼▼▼
-  const CLOUD_SERVER_URL = 'https://last-chamber.onrender.com';
+  const CLOUD_SERVER_URL = 'https://last-chamber-aaz9.onrender.com';
   // ▲▲▲
 
   if (typeof window === 'undefined') return;
