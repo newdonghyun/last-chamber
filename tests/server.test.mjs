@@ -373,6 +373,14 @@ async function phase4() {
   const board = await R.call('get_leaderboard');
   eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '고수', 1580, false], [2, '신입', 1025, true]], '21 Supabase: TOP 10 mmr 내림차순 · 내 줄');
   eq(board.me?.wins, 1, '21 Supabase: 내 전적');
+
+  // 23. 로비에 들어올 때마다 동기화 — hello 응답이 오는 시점에는 이미 DB 에 써져 있다
+  await V.call('hello', { userId: veteran, nickname: '고수왕' });
+  eq([db.table.get(veteran).nickname, db.table.get(veteran).mmr], ['고수왕', 1580], '23 기존 유저: hello 응답 전에 닉네임 갱신 (전적은 그대로)');
+  db.table.delete(rookie); // 대시보드에서 행을 지운 경우
+  const again = await client(port, { userId: rookie, nickname: '신입' });
+  eq((await again.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1025, '23 재접속 hello → 최신 전적');
+  eq([db.table.get(rookie)?.nickname, db.table.get(rookie)?.mmr], ['신입', 1025], '23 없어진 행은 접속하자마자 다시 만든다');
   await server.stop();
 
   // 22. DB 연결이 실패하면 메모리로 계속 돈다

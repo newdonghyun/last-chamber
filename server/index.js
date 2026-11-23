@@ -154,8 +154,8 @@ export function createGameServer(options = {}) {
   });
 
   const db = cfg.supabaseClient ?? (cfg.supabaseUrl && cfg.supabaseKey ? connectSupabase(cfg.supabaseUrl, cfg.supabaseKey) : null);
-  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: cfg.onError });
-  if (db) log('유저 기록: Supabase players 테이블');
+  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: cfg.onError, log });
+  log(db ? '유저 기록: Supabase players 테이블' : `유저 기록: ${cfg.userDataFile ? '파일' : '메모리'} (SUPABASE_URL · SUPABASE_KEY 없음)`);
   const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users });
   const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS });
   const stats = () => ({ ...rooms.stats(), queued: matchmaker.queued(), users: users.size() });
@@ -173,7 +173,7 @@ export function createGameServer(options = {}) {
     if (current && current.id !== id && socket.data.where) return fail('ALREADY_IN_ROOM'); // 판 · 대기열 도중에 다른 사람으로 바꿀 수 없다
     const record = users.identify(id, nickname); // 저장소가 가득 차면 null — 대전은 그대로, 기록만 남지 않는다
     socket.data.user = { id, nickname };
-    // DB 모드면 그 유저를 불러온 뒤에 답한다 (메모리 모드는 바로)
+    // DB 모드면 조회 · upsert(신규 생성 / 닉네임 갱신)가 끝난 뒤에 답한다 (메모리 모드는 바로)
     return users.ready(id).then(() => ({ ok: true, user: users.publicView(record) ?? { nickname, wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }));
   }
 

@@ -11,9 +11,6 @@
     "build:app": "node scripts/build-www.mjs",
     "cap:sync": "npm run build:app && cap sync"
   },
-  "engines": {
-    "node": ">=22.0.0"
-  },
   "dependencies": {
     "@capacitor/android": "^8.6.2",
     "@capacitor/core": "^8.6.2",

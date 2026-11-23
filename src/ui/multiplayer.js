@@ -83,6 +83,7 @@ let tickFrom = 0;
 let copyTimer = 0;
 let serverRecord = null; // 서버에 기록된 내 전적 { mmr, wins, losses, streak } — hello · get_leaderboard 응답 (이번 방문 동안 기억)
 let connecting = null; // { session, promise } — 로비를 열 때의 랭킹 연결과 버튼 동작이 겹쳐도 소켓은 하나만
+let helloDone = Promise.resolve(null); // 지금 소켓의 hello(서버 DB upsert) 응답 — 랭킹은 이게 끝난 뒤에 받는다
 
 /** 로비 랭킹 티어 (서버 MMR 기준) */
 const RANK_TIERS = Object.freeze([[1500, 'MASTER'], [1300, 'DIAMOND'], [1150, 'GOLD'], [1000, 'SILVER'], [0, 'BRONZE']]);
@@ -252,6 +253,7 @@ async function refreshBoard() {
   ui.boardNote.textContent = '랭킹을 불러오는 중…';
   try {
     await ensureSocket();
+    await helloDone; // 서버가 players 에 upsert 를 끝낸 뒤 → 방금 만든/고친 내 행까지 반영된 랭킹
     if (mine !== session) return;
     const res = await request('get_leaderboard');
     if (mine !== session) return;
@@ -376,15 +378,22 @@ function identity() {
   return user ? { userId: user.id, nickname: user.nickname } : {};
 }
 
-/** 서버에 기록된 내 대전 전적을 받아 로비에 보여 준다. 응답이 없거나(예전 서버) 실패해도 대전에는 영향이 없다 */
+/**
+ * 접속 즉시 user_id · nickname 을 보낸다 → 서버가 players 에 upsert(신규 생성 / 닉네임 갱신)를 끝내고 최신 전적으로 답한다.
+ * → Promise<전적 | null> (응답이 없거나 실패해도 대전에는 영향이 없다)
+ */
 function sayHello(s) {
   const who = identity();
-  if (!who.userId) return;
-  s.timeout(ACK_TIMEOUT_MS).emit('hello', who, (err, res) => {
-    const record = err || !res?.ok ? null : asRecord(res.user);
-    if (!record) return;
-    serverRecord = record;
-    paintMe();
+  if (!who.userId) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    s.timeout(ACK_TIMEOUT_MS).emit('hello', who, (err, res) => {
+      const record = err || !res?.ok ? null : asRecord(res.user);
+      if (record) {
+        serverRecord = record;
+        paintMe();
+      }
+      resolve(record);
+    });
   });
 }
 
@@ -436,7 +445,7 @@ async function connectSocket(mine) {
   s.on('match_found', onMatchFound);
   s.on('room_closed', onRoomClosed);
   s.on('disconnect', onDisconnect);
-  sayHello(s); // 기다리지 않는다 — 방 만들기 · 매칭 요청은 바로 이어서 보낸다
+  helloDone = sayHello(s); // 연결 즉시 로그인 · DB upsert — 방 만들기 · 매칭 요청은 기다리지 않고 바로 이어서 보낸다
   return s;
 }
 
@@ -704,7 +713,7 @@ userSession.subscribe((user) => {
     serverRecord = null;
     closeDialog();
   } else if (sock?.connected) {
-    sayHello(sock);
+    helloDone = sayHello(sock);
   }
   paintMe();
 });

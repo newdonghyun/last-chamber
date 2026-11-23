@@ -109,10 +109,10 @@ const byRank = (a, b) => b.mmr - a.mmr || b.wins - a.wins;
  *   db          Supabase 클라이언트 또는 그 Promise (주면 players 테이블에 저장 · file 은 무시. 연결에 실패하면 메모리로)
  *   maxUsers    최대 기록 수 — 가득 차면 새 유저는 기록하지 않는다 (대전은 그대로 할 수 있다)
  *   saveDelayMs 바뀐 뒤 파일에 쓰기까지 모으는 시간
- *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)
+ *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)        log(...)  상태 로그
  * → { identify, ready, get, recordResult, leaderboard, publicView, size, flush, close }
  */
-export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, now = Date.now, onError = () => {} } = {}) {
+export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, now = Date.now, onError = () => {}, log = () => {} } = {}) {
   const users = new Map(); // id → record
   let dirty = false;
   let timer = null;
@@ -125,10 +125,31 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
   const dbReady = db
     ? Promise.resolve(db).then((c) => { client = c; }, (err) => onError(new Error(`Supabase 에 연결하지 못해 메모리로 동작합니다: ${err?.message ?? err}`)))
     : Promise.resolve();
-  const meta = new Map(); // id → { chain, loaded, loading, pending: [won…], ready } — 유저별 DB 작업 순서 · 불러오기 상태
+  const meta = new Map(); // id → { chain, loaded, loading, pending: [won…] } — 유저별 DB 작업 순서 · 불러오기 상태
   const inflight = new Set();
   let board = { at: -Infinity, rows: null };
-  const check = (res) => { if (res?.error) throw new Error(`Supabase: ${res.error.message}`); return res; };
+  // 행이 안 생길 때 흔한 원인을 로그에 함께 적는다
+  const HINTS = [
+    [/row-level security|permission denied/i, 'SUPABASE_KEY 에 service_role 키를 넣으세요 (anon 키는 RLS 에 막힌다)'],
+    [/ON CONFLICT|unique|exclusion constraint/i, 'players.user_id 에 primary key(또는 unique)가 필요합니다'],
+    [/column|relation|does not exist|schema cache/i, 'players 테이블 · 컬럼(user_id, nickname, wins, losses, streak, max_streak, mmr)을 확인하세요'],
+  ];
+  const check = (res) => {
+    if (!res?.error) return res;
+    const hint = HINTS.find(([re]) => re.test(res.error.message ?? ''))?.[1];
+    throw new Error(`Supabase: ${res.error.message}${hint ? ` — ${hint}` : ''}`);
+  };
+  if (db) { // 시작할 때 테이블을 한 번 읽어 본다 → Render 로그에 연결 상태가 바로 남는다
+    dbReady.then(async () => {
+      if (!client) return;
+      try {
+        check(await client.from(TABLE).select(COLUMNS).limit(1));
+        log('Supabase players 테이블 연결 확인');
+      } catch (err) {
+        onError(err);
+      }
+    });
+  }
   const upsert = async (rec) => {
     await dbReady;
     if (client) check(await client.from(TABLE).upsert(toRow(rec), { onConflict: 'user_id' }));
@@ -143,16 +164,20 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     return run;
   }
 
-  /** 접속/로그인: user_id 로 조회 → DB 값을 캐시에 싣고, 없으면 기본값으로 upsert. 불러오기 전에 끝난 판(pending)은 DB 값 위에 다시 적용 */
+  /**
+   * 접속/로그인마다: user_id 로 조회 → 없으면 upsert 로 생성(처음이면 기본값), 닉네임이 다르면 갱신.
+   * DB 값은 처음 불러올 때만 캐시에 싣는다 (그 뒤로는 캐시가 최신 — 서버 1대 전제). 불러오기 전에 끝난 판(pending)은 DB 값 위에 다시 적용.
+   * 실패하면 loaded 는 그대로 → 다음 로그인 때 다시 시도한다 (그사이 결과는 pending 에 남는다)
+   */
   function loadRow(rec) {
     let m = meta.get(rec.id);
-    if (!m) meta.set(rec.id, (m = { chain: Promise.resolve(), loaded: false, loading: false, pending: [], ready: null }));
+    if (!m) meta.set(rec.id, (m = { chain: Promise.resolve(), loaded: false, loading: false, pending: [] }));
     m.loading = true;
-    m.ready = queue(m, async () => {
+    return queue(m, async () => {
       await dbReady;
       if (!client) { m.loaded = true; m.pending = []; return; } // DB 없이 시작됨 → 메모리 기록만
       const res = check(await client.from(TABLE).select(COLUMNS).eq('user_id', rec.id).maybeSingle());
-      if (res.data) {
+      if (res.data && !m.loaded) {
         Object.assign(rec, fromRow(res.data));
         for (const won of m.pending) applyResult(rec, won);
       }
@@ -160,8 +185,7 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       m.pending = [];
       m.loaded = true;
       if (write) await upsert(rec);
-    }).finally(() => { m.loading = false; }); // 실패하면 loaded 는 false 그대로 → 다음 로그인 때 다시 불러온다 (그사이 결과는 pending 에 남는다)
-    return m.ready;
+    }).finally(() => { m.loading = false; });
   }
 
   if (file) load();
@@ -226,14 +250,11 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
         rec.nickname = nickname;
         rec.updatedAt = t;
         const m = meta.get(id);
-        if (m?.loaded) queue(m, () => upsert(rec)); // 닉네임 변경도 DB 에
+        if (m?.loaded && m.loading) queue(m, () => upsert(rec)); // 진행 중인 동기화가 이미 닉네임을 비교했을 수 있다 → 뒤에 한 번 더
       }
       rec.lastSeenAt = t;
     }
-    if (db) {
-      const m = meta.get(id);
-      if (!m || (!m.loaded && !m.loading)) loadRow(rec);
-    }
+    if (db && !meta.get(id)?.loading) loadRow(rec); // 접속/로그인마다 DB 동기화 (같은 접속의 handshake · hello 는 한 번으로 합쳐진다)
     markDirty();
     return rec;
   }
@@ -287,7 +308,7 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
 
   return {
     identify,
-    ready: (id) => meta.get(id)?.ready ?? Promise.resolve(), // DB 에서 그 유저를 다 불러올 때까지 (메모리 모드면 바로)
+    ready: (id) => meta.get(id)?.chain ?? Promise.resolve(), // 그 유저의 DB 작업(조회 · upsert)이 지금까지 줄 선 것까지 다 끝날 때 (메모리 모드면 바로)
     get: (id) => users.get(id) ?? null,
     recordResult,
     leaderboard,
