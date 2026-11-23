@@ -19,20 +19,21 @@
  *   · 참가비 차감 · 상금 지급은 여기서 하지 않는다 (match.fee / match.prize 를 4-3 이 쓴다). 여기서는 탄피가 부족한 테이블을 막기만 한다.
  *
  * ── 서버 주소 ──  window.LAST_CHAMBER_SERVER (앱/토스 웹뷰처럼 다른 출처에서 쓸 때, 서버 CORS_ORIGIN 도 필요)
- *               → 없으면 페이지를 서빙한 서버(location.origin) → file:// 같은 비 http 에서는 http://localhost:3000.
+ *               → 없으면 페이지를 서빙한 서버(location.origin) → file:// 같은 비 http 에서는 Render 서버(DEFAULT_SERVER).
  *   Socket.io 클라이언트는 서버가 주는 /socket.io/socket.io.js 를 처음 필요할 때 불러온다 → 서버가 꺼져 있어도 AI 딜러 대전은 영향이 없다.
  *
  * ── 로그인 (src/ui/session.js) ──
  *   소켓을 열 때 handshake auth 로 { userId, nickname } 을 보낸다 → 서버가 이 소켓을 그 유저로 기록하고, 상대에게 보이는 닉네임도 이 값으로 맞춘다
- *   (auth 는 함수라서 pvpSession 의 자동 재연결 때도 최신 닉네임이 다시 간다). 연결 직후 hello 로 서버에 기록된 내 대전 전적을 받아 로비에 보여 준다
- *   (예전 서버라 hello 가 없으면 조용히 생략). 로그인 전에는 로비를 열지 않고 로그인 화면을 부른다(window 'lastchamber:need-login').
+ *   (auth 는 함수라서 pvpSession 의 자동 재연결 때도 최신 닉네임이 다시 간다). 연결 직후 register_player { user_id, nickname } →
+ *   서버가 Supabase players 에 upsert 를 끝내고 내 전적 + TOP 10 으로 답한다 → 로비에 바로 그린다. 로그인 전에는 로비를 열지 않고 로그인 화면을 부른다(window 'lastchamber:need-login').
  */
 
 import { PlayerProfile, getTitle } from './storeData.js';
 import { userSession } from './session.js';
 
 const START_BUTTON_ID = 'btn-start';
-const DEFAULT_SERVER = 'http://localhost:3000';
+// 예비 주소 — 보통은 serverConfig.js 가 먼저 window.LAST_CHAMBER_SERVER 를 정한다 (웹 = 지금 도메인 · 앱 = 같은 Render 주소). localhost 로 고정하지 않는다
+const DEFAULT_SERVER = 'https://last-chamber-aaz9.onrender.com';
 const CONNECT_TIMEOUT_MS = 6000;
 const ACK_TIMEOUT_MS = 8000;
 const CODE_LENGTH = 4;
@@ -81,9 +82,9 @@ let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보�
 let tickTimer = 0;
 let tickFrom = 0;
 let copyTimer = 0;
-let serverRecord = null; // 서버에 기록된 내 전적 { mmr, wins, losses, streak } — hello · get_leaderboard 응답 (이번 방문 동안 기억)
+let serverRecord = null; // 서버에 기록된 내 전적 { mmr, wins, losses, streak } — register_player · get_leaderboard 응답 (이번 방문 동안 기억)
 let connecting = null; // { session, promise } — 로비를 열 때의 랭킹 연결과 버튼 동작이 겹쳐도 소켓은 하나만
-let helloDone = Promise.resolve(null); // 지금 소켓의 hello(서버 DB upsert) 응답 — 랭킹은 이게 끝난 뒤에 받는다
+let registered = Promise.resolve(null); // 지금 소켓의 register_player 응답 { ok, user, me, top } — 연결하자마자 보낸다 (서버 upsert 완료 후 도착)
 
 /** 로비 랭킹 티어 (서버 MMR 기준) */
 const RANK_TIERS = Object.freeze([[1500, 'MASTER'], [1300, 'DIAMOND'], [1150, 'GOLD'], [1000, 'SILVER'], [0, 'BRONZE']]);
@@ -253,9 +254,9 @@ async function refreshBoard() {
   ui.boardNote.textContent = '랭킹을 불러오는 중…';
   try {
     await ensureSocket();
-    await helloDone; // 서버가 players 에 upsert 를 끝낸 뒤 → 방금 만든/고친 내 행까지 반영된 랭킹
+    let res = await registered; // 연결 즉시 보낸 register_player 의 응답 = upsert 가 끝난 뒤의 내 전적 + TOP 10
     if (mine !== session) return;
-    const res = await request('get_leaderboard');
+    if (!res?.top) res = await request('get_leaderboard'); // 로그인 정보가 없거나 등록이 실패했으면 랭킹만
     if (mine !== session) return;
     if (!res.ok || !Array.isArray(res.top)) throw new Error(res.error ?? 'BAD_RESPONSE');
     const me = asRecord(res.me);
@@ -372,27 +373,32 @@ function loadSocketIoClient(base) {
   return clientLoading;
 }
 
-/** handshake auth · hello 로 보내는 내 신원 — 로그인 전이면 빈 객체 (서버는 예전처럼 익명 소켓으로 받는다) */
+/** handshake auth 로 보내는 내 신원 — 로그인 전이면 빈 객체 (서버는 예전처럼 익명 소켓으로 받는다) */
 function identity() {
   const user = userSession.user;
   return user ? { userId: user.id, nickname: user.nickname } : {};
 }
 
 /**
- * 접속 즉시 user_id · nickname 을 보낸다 → 서버가 players 에 upsert(신규 생성 / 닉네임 갱신)를 끝내고 최신 전적으로 답한다.
- * → Promise<전적 | null> (응답이 없거나 실패해도 대전에는 영향이 없다)
+ * 접속 즉시 register_player { user_id, nickname } (localStorage 의 로그인 세션 — 유저 ID 는 첫 로그인 때 만들어 저장된다)
+ * → 서버가 players 에 upsert(신규 생성 / 닉네임 갱신)를 끝내고 { ok, user, me, top } 으로 답한다. 실패해도 대전에는 영향이 없다 → null
  */
-function sayHello(s) {
-  const who = identity();
-  if (!who.userId) return Promise.resolve(null);
+function registerPlayer(s) {
+  const user = userSession.user;
+  if (!user) return Promise.resolve(null);
   return new Promise((resolve) => {
-    s.timeout(ACK_TIMEOUT_MS).emit('hello', who, (err, res) => {
-      const record = err || !res?.ok ? null : asRecord(res.user);
+    s.timeout(ACK_TIMEOUT_MS).emit('register_player', { user_id: user.id, nickname: user.nickname }, (err, res) => {
+      if (err || !res?.ok) {
+        console.warn('[LAST CHAMBER] register_player 실패', err?.message ?? res?.error);
+        resolve(null);
+        return;
+      }
+      const record = asRecord(res.me ?? res.user);
       if (record) {
         serverRecord = record;
         paintMe();
       }
-      resolve(record);
+      resolve(res);
     });
   });
 }
@@ -445,7 +451,7 @@ async function connectSocket(mine) {
   s.on('match_found', onMatchFound);
   s.on('room_closed', onRoomClosed);
   s.on('disconnect', onDisconnect);
-  helloDone = sayHello(s); // 연결 즉시 로그인 · DB upsert — 방 만들기 · 매칭 요청은 기다리지 않고 바로 이어서 보낸다
+  registered = registerPlayer(s); // 연결 즉시 등록(players upsert) — 방 만들기 · 매칭 요청은 기다리지 않고 바로 이어서 보낸다
   return s;
 }
 
@@ -713,7 +719,8 @@ userSession.subscribe((user) => {
     serverRecord = null;
     closeDialog();
   } else if (sock?.connected) {
-    helloDone = sayHello(sock);
+    registered = registerPlayer(sock);
+    registered.then((res) => { if (res?.top && dialog.open) paintBoard(res.top); });
   }
   paintMe();
 });

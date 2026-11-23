@@ -255,6 +255,7 @@ async function phase3() {
   const A = await client(port, meA);
   const B = await client(port, { userId: idB, nickname: 'Ace_7' });
   eq(server.stats().users, 2, '14 handshake auth 로 유저 2명 등록');
+  eq(server.stats().storage, 'file', '14 /healthz: Supabase 키가 없으면 파일 저장');
   eq(await A.call('hello', meA), { ok: true, user: { nickname: '총잡이', wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }, '14 hello → 서버에 기록된 내 전적');
   eq((await A.call('hello', { userId: idA, nickname: '총 잡이' })).error, 'INVALID_NICKNAME', '14 공백이 든 닉네임은 거절');
   eq((await A.call('hello', { userId: idA, nickname: '총' })).error, 'INVALID_NICKNAME', '14 1자 닉네임은 거절');
@@ -381,6 +382,18 @@ async function phase4() {
   const again = await client(port, { userId: rookie, nickname: '신입' });
   eq((await again.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1025, '23 재접속 hello → 최신 전적');
   eq([db.table.get(rookie)?.nickname, db.table.get(rookie)?.mmr], ['신입', 1025], '23 없어진 행은 접속하자마자 다시 만든다');
+
+  // 24. register_player { user_id, nickname } — upsert 가 끝난 뒤 내 전적 + TOP 10 으로 답한다
+  const newbie = randomUUID();
+  const N = await client(port); // handshake auth 없이 이벤트로만 등록
+  const reg = await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
+  eq([reg.ok, reg.me?.nickname, reg.me?.mmr, reg.top?.some((r) => r.isMe && r.nickname === '등록왕')], [true, '등록왕', 1000, true], '24 register_player → 내 전적 + TOP 10 (내 줄 포함)');
+  eq(db.table.get(newbie)?.nickname, '등록왕', '24 응답이 올 때 이미 players 에 upsert 되어 있다');
+  const upserts = db.calls.filter((c) => c === 'upsert').length;
+  await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
+  eq(db.calls.filter((c) => c === 'upsert').length, upserts + 1, '24 다시 등록해도 upsert 한다');
+  eq((await N.call('register_player', { nickname: '아이디없음' })).error, 'BAD_REQUEST', '24 user_id 가 없으면 거절');
+  eq([server.stats().storage, server.stats().dbOk], ['supabase', true], '24 /healthz: 저장 방식 · DB 상태');
   await server.stop();
 
   // 22. DB 연결이 실패하면 메모리로 계속 돈다
@@ -390,7 +403,51 @@ async function phase4() {
   const solo = await client(port2, { userId: rookie, nickname: '신입' });
   eq((await solo.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1000, '22 Supabase 연결 실패 → 메모리 폴백');
   ok((await solo.call('get_leaderboard')).ok && errors.length === 1, `22 오류는 한 번만 알리고 랭킹은 메모리에서 (${errors.map((e) => e.message).join(' | ')})`);
+  eq(broken.stats().storage, 'memory', '22 /healthz: 메모리로 동작 중');
   await broken.stop();
+}
+
+// 실제 supabase-js + 가짜 PostgREST, 전역 WebSocket 이 없는 Node 18/20 을 흉내낸다
+// (예전에는 createClient 가 'native WebSocket not found' 예외를 던져 서버가 메모리로 떨어지고 players 에 아무것도 안 들어갔다)
+async function phase5() {
+  const rows = new Map();
+  const requests = [];
+  const rest = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://x');
+      requests.push(`${req.method} ${url.pathname}`);
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'POST') {
+        for (const row of [].concat(JSON.parse(body))) rows.set(row.user_id, { ...rows.get(row.user_id), ...row });
+        res.statusCode = 201;
+        res.end();
+        return;
+      }
+      const id = url.searchParams.get('user_id')?.replace(/^eq\./, '');
+      res.end(JSON.stringify(id ? [rows.get(id)].filter(Boolean) : [...rows.values()].sort((a, b) => b.mmr - a.mmr)));
+    });
+  });
+  await new Promise((resolve) => rest.listen(0, '127.0.0.1', resolve));
+  const nativeWebSocket = globalThis.WebSocket;
+  delete globalThis.WebSocket;
+  const errors = [];
+  const server = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseUrl: `http://127.0.0.1:${rest.address().port}`, supabaseKey: 'test-service-role' });
+  const port = await server.start(0, '127.0.0.1');
+  try {
+    const id = randomUUID();
+    const C = await client(port);
+    const reg = await C.call('register_player', { user_id: id, nickname: '노드20' });
+    eq([reg.ok, server.stats().storage], [true, 'supabase'], `25 전역 WebSocket 이 없어도(Node 18/20) Supabase 클라이언트를 만든다 (${errors.map((e) => e.message.split('\n')[0]).join(' | ')})`);
+    eq([rows.get(id)?.nickname, rows.get(id)?.mmr], ['노드20', 1000], '25 실제 supabase-js 로 players 에 upsert');
+    ok(requests.some((r) => r.startsWith('POST /rest/v1/players')) && errors.length === 0, `25 PostgREST 요청: ${requests.join(', ')} · 오류 ${errors.length}건`);
+  } finally {
+    globalThis.WebSocket = nativeWebSocket;
+    await server.stop();
+    rest.closeAllConnections?.();
+    await new Promise((resolve) => rest.close(resolve));
+  }
 }
 
 try {
@@ -398,6 +455,7 @@ try {
   await phase2();
   await phase3();
   await phase4();
+  await phase5();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

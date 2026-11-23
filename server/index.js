@@ -18,6 +18,7 @@
  *     · 판이 끝나면 로그인한 좌석의 서버 전적(승/패)을 기록하고 game_over 의 record 로 알려 준다
  *
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
+ *   register_player({ user_id, nickname })        로비 접속 즉시: 로그인 + Supabase players upsert(완료 후 응답) → { ok, user, me, top }  (me · top = get_leaderboard 와 같다)
  *   hello({ userId, nickname })                   로그인 · 닉네임 변경 (연결 뒤에 해도 된다) → { ok, user: { nickname, wins, losses, games, streak, maxStreak, mmr } }  ← 서버에 기록된 내 전적
  *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (mmr 내림차순 10명), me: 내 전적 | null }
  *                                                 판 · 대기열 도중에 다른 유저 ID 로 바꿀 수는 없다 (ALREADY_IN_ROOM)
@@ -90,9 +91,28 @@ const SERVER_DEFAULTS = {
 };
 const LEADERBOARD_SIZE = 10;
 
-/** Supabase 클라이언트 — 패키지는 키가 있을 때만 불러온다 (실패하면 userStore 가 메모리로 돌아간다) */
-const connectSupabase = (url, key) => import('@supabase/supabase-js')
-  .then(({ createClient }) => createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } }));
+/**
+ * Supabase 클라이언트 — 패키지는 키가 있을 때만 불러온다 (실패하면 userStore 가 메모리로 돌아간다).
+ * createClient 는 Realtime 클라이언트를 만들면서 WebSocket 을 찾는데, Node 22 미만(Render 기본 Node 등)에는 전역 WebSocket 이 없어
+ * 'native WebSocket not found' 예외 → 서버가 메모리로 떨어져 players 에 아무것도 안 들어갔다 → ws 패키지로 채운다 (Realtime 은 쓰지 않는다)
+ */
+async function connectSupabase(url, key) {
+  const { createClient } = await import('@supabase/supabase-js');
+  const transport = globalThis.WebSocket ?? (await import('ws')).WebSocket;
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport } });
+}
+
+/** 로그에 남길 키 종류 (키 값은 찍지 않는다): service_role · secret 이어야 서버가 RLS 에 막히지 않고 쓸 수 있다 */
+function keyRole(key) {
+  if (key.startsWith('sb_secret_')) return 'secret';
+  if (key.startsWith('sb_publishable_')) return 'publishable — 서버에는 secret(service_role) 키가 필요합니다';
+  try {
+    const role = JSON.parse(Buffer.from(key.split('.')[1], 'base64url').toString('utf8')).role;
+    return role === 'service_role' ? 'service_role' : `${role} — 서버에는 service_role 키가 필요합니다`;
+  } catch {
+    return '형식을 알 수 없음';
+  }
+}
 
 // ───────── 정적 파일: 서버 내부 경로는 숨긴다 ─────────
 
@@ -153,12 +173,15 @@ export function createGameServer(options = {}) {
     maxHttpBufferSize: 16 * 1024, // 프로필 · 액션은 아주 작다
   });
 
+  // 유저 기록(DB) 로그 — Render 로그에서 찾기 쉽게 [DB] · [DB ERROR] 머리말 (quiet(테스트)이면 오류는 onError 로만)
+  const dbLog = (...args) => { if (!cfg.quiet) console.log(...args); };
+  const dbError = (err) => { if (cfg.quiet) cfg.onError(err); else console.error('[DB ERROR]', err); };
+  dbLog('[DB] SUPABASE_URL:', cfg.supabaseUrl ? 'set' : 'missing', '· SUPABASE_KEY:', cfg.supabaseKey ? `set (${keyRole(cfg.supabaseKey)})` : 'missing');
   const db = cfg.supabaseClient ?? (cfg.supabaseUrl && cfg.supabaseKey ? connectSupabase(cfg.supabaseUrl, cfg.supabaseKey) : null);
-  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: cfg.onError, log });
-  log(db ? '유저 기록: Supabase players 테이블' : `유저 기록: ${cfg.userDataFile ? '파일' : '메모리'} (SUPABASE_URL · SUPABASE_KEY 없음)`);
+  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: dbError, log: dbLog });
   const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users });
   const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS });
-  const stats = () => ({ ...rooms.stats(), queued: matchmaker.queued(), users: users.size() });
+  const stats = () => ({ ...rooms.stats(), queued: matchmaker.queued(), users: users.size(), ...users.health(), node: process.version });
 
   /**
    * 로그인: 이 소켓을 유저 { id, nickname } 로 기억하고 서버 기록을 만들거나 닉네임을 갱신한다 (handshake auth · hello 이벤트 공통).
@@ -175,6 +198,14 @@ export function createGameServer(options = {}) {
     socket.data.user = { id, nickname };
     // DB 모드면 조회 · upsert(신규 생성 / 닉네임 갱신)가 끝난 뒤에 답한다 (메모리 모드는 바로)
     return users.ready(id).then(() => ({ ok: true, user: users.publicView(record) ?? { nickname, wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }));
+  }
+
+  /** register_player({ user_id, nickname }): 로그인 + players upsert(끝날 때까지 기다림) → 내 전적 + TOP 10 */
+  async function registerPlayer(socket, payload) {
+    const res = await identifyUser(socket, { userId: payload?.user_id, nickname: payload?.nickname });
+    if (!res.ok) return res;
+    const board = await getLeaderboard(socket);
+    return { ok: true, user: res.user, me: board.me, top: board.top };
   }
 
   /** TOP 10 (mmr 내림차순) + 내 전적. 유저 ID 는 응답에 넣지 않는다 (내 줄은 isMe 로만) */
@@ -198,7 +229,8 @@ export function createGameServer(options = {}) {
 
   // ── Socket.io 이벤트 라우팅: 이벤트 이름 → 처리하는 쪽 ──
   const handlers = {
-    hello: identifyUser,
+    register_player: registerPlayer,
+    hello: identifyUser, // 예전 클라이언트용 (register_player 와 같은 로그인 · upsert, 랭킹 없이)
     get_leaderboard: getLeaderboard,
     create_private_room: rooms.createPrivateRoom,
     join_private_room: rooms.joinPrivateRoom,

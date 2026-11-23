@@ -122,42 +122,55 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
   // ── Supabase (db 가 있을 때만) ──
   if (db) file = null; // DB 가 원본 — 파일과 둘로 갈라지지 않게
   let client = null;
+  let dbOk = null; // 마지막 DB 작업 성공 여부 (/healthz) — null = 아직 없음
   const dbReady = db
-    ? Promise.resolve(db).then((c) => { client = c; }, (err) => onError(new Error(`Supabase 에 연결하지 못해 메모리로 동작합니다: ${err?.message ?? err}`)))
+    ? Promise.resolve(db).then((c) => { client = c; }, (err) => onError(new Error(`Supabase 클라이언트를 만들지 못해 메모리로 동작합니다: ${err?.message ?? err}`, { cause: err })))
     : Promise.resolve();
   const meta = new Map(); // id → { chain, loaded, loading, pending: [won…] } — 유저별 DB 작업 순서 · 불러오기 상태
   const inflight = new Set();
   let board = { at: -Infinity, rows: null };
   // 행이 안 생길 때 흔한 원인을 로그에 함께 적는다
   const HINTS = [
-    [/row-level security|permission denied/i, 'SUPABASE_KEY 에 service_role 키를 넣으세요 (anon 키는 RLS 에 막힌다)'],
+    [/row-level security|permission denied/i, 'SUPABASE_KEY 에 service_role(secret) 키를 넣으세요 (anon 키는 RLS 에 막힌다)'],
     [/ON CONFLICT|unique|exclusion constraint/i, 'players.user_id 에 primary key(또는 unique)가 필요합니다'],
     [/column|relation|does not exist|schema cache/i, 'players 테이블 · 컬럼(user_id, nickname, wins, losses, streak, max_streak, mmr)을 확인하세요'],
+    [/fetch failed|ENOTFOUND|Invalid API key|JWT/i, 'SUPABASE_URL · SUPABASE_KEY 값을 확인하세요'],
   ];
-  const check = (res) => {
+  /** Supabase 응답 { data, error } → 오류면 code · details · hint 까지 담아 던진다 (원본은 err.cause) */
+  const check = (res, op) => {
     if (!res?.error) return res;
-    const hint = HINTS.find(([re]) => re.test(res.error.message ?? ''))?.[1];
-    throw new Error(`Supabase: ${res.error.message}${hint ? ` — ${hint}` : ''}`);
+    const e = res.error;
+    const hint = HINTS.find(([re]) => re.test(`${e.message} ${e.details ?? ''}`))?.[1];
+    throw new Error([`${op} 실패: ${e.message}`, e.code && `code=${e.code}`, e.details && `details=${e.details}`, e.hint && `hint=${e.hint}`, hint && `→ ${hint}`].filter(Boolean).join(' · '), { cause: e });
   };
-  if (db) { // 시작할 때 테이블을 한 번 읽어 본다 → Render 로그에 연결 상태가 바로 남는다
+  // 시작 로그: Supabase 를 쓰는지, players 테이블을 읽을 수 있는지 (Render 로그에서 바로 확인)
+  if (db) {
     dbReady.then(async () => {
+      log('[DB] Supabase initialized:', Boolean(client));
       if (!client) return;
       try {
-        check(await client.from(TABLE).select(COLUMNS).limit(1));
-        log('Supabase players 테이블 연결 확인');
+        check(await client.from(TABLE).select(COLUMNS).limit(1), 'players 테이블 확인');
+        dbOk = true;
+        log('[DB] players 테이블 확인 완료 — 접속 · register_player 마다 upsert 합니다');
       } catch (err) {
+        dbOk = false;
         onError(err);
       }
     });
+  } else {
+    log('[DB] Supabase initialized:', false, `— SUPABASE_URL · SUPABASE_KEY 가 없어 ${file ? '파일' : '메모리'}에 저장합니다`);
   }
   const upsert = async (rec) => {
     await dbReady;
-    if (client) check(await client.from(TABLE).upsert(toRow(rec), { onConflict: 'user_id' }));
+    if (!client) return;
+    check(await client.from(TABLE).upsert(toRow(rec), { onConflict: 'user_id' }), `players upsert(${rec.nickname})`);
+    dbOk = true;
+    board.at = -Infinity; // 새 행 · 바뀐 닉네임이 랭킹에 바로 보이게
   };
 
-  /** 유저별 DB 작업을 차례로 (불러오기 → 결과 저장 → …). 실패해도 게임은 계속 — 오류만 알린다 */
+  /** 유저별 DB 작업을 차례로 (불러오기 → 결과 저장 → …). 실패해도 게임은 계속 — 오류는 [DB ERROR] 로 알린다 */
   function queue(m, task) {
-    const run = m.chain.then(task).catch(onError);
+    const run = m.chain.then(task).catch((err) => { dbOk = false; onError(err); });
     m.chain = run;
     inflight.add(run);
     run.finally(() => inflight.delete(run));
@@ -165,9 +178,9 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
   }
 
   /**
-   * 접속/로그인마다: user_id 로 조회 → 없으면 upsert 로 생성(처음이면 기본값), 닉네임이 다르면 갱신.
-   * DB 값은 처음 불러올 때만 캐시에 싣는다 (그 뒤로는 캐시가 최신 — 서버 1대 전제). 불러오기 전에 끝난 판(pending)은 DB 값 위에 다시 적용.
-   * 실패하면 loaded 는 그대로 → 다음 로그인 때 다시 시도한다 (그사이 결과는 pending 에 남는다)
+   * 접속 · 로그인 · register_player 마다 players 에 upsert (신규면 기본값으로 생성, 기존이면 닉네임 갱신 · 지워진 행도 다시 생긴다).
+   * 처음 한 번만 user_id 로 조회해 DB 전적을 캐시에 싣는다 (그 뒤로는 캐시가 최신 — 서버 1대 전제). 불러오기 전에 끝난 판(pending)은 DB 값 위에 다시 적용.
+   * 조회가 실패하면 loaded 는 그대로 → 다음 접속 때 다시 시도한다 (그사이 결과는 pending 에 남는다)
    */
   function loadRow(rec) {
     let m = meta.get(rec.id);
@@ -176,15 +189,16 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     return queue(m, async () => {
       await dbReady;
       if (!client) { m.loaded = true; m.pending = []; return; } // DB 없이 시작됨 → 메모리 기록만
-      const res = check(await client.from(TABLE).select(COLUMNS).eq('user_id', rec.id).maybeSingle());
-      if (res.data && !m.loaded) {
-        Object.assign(rec, fromRow(res.data));
-        for (const won of m.pending) applyResult(rec, won);
+      if (!m.loaded) {
+        const res = check(await client.from(TABLE).select(COLUMNS).eq('user_id', rec.id).maybeSingle(), `players select(${rec.nickname})`);
+        if (res.data) {
+          Object.assign(rec, fromRow(res.data));
+          for (const won of m.pending) applyResult(rec, won);
+        }
+        m.pending = [];
+        m.loaded = true;
       }
-      const write = !res.data || res.data.nickname !== rec.nickname || m.pending.length > 0;
-      m.pending = [];
-      m.loaded = true;
-      if (write) await upsert(rec);
+      await upsert(rec);
     }).finally(() => { m.loading = false; });
   }
 
@@ -281,11 +295,13 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     if (client) {
       if (board.rows && now() - board.at < BOARD_CACHE_MS) return board.rows;
       try {
-        const res = check(await client.from(TABLE).select(COLUMNS).order('mmr', { ascending: false }).order('wins', { ascending: false }).limit(limit));
+        const res = check(await client.from(TABLE).select(COLUMNS).order('mmr', { ascending: false }).order('wins', { ascending: false }).limit(limit), 'players leaderboard');
+        dbOk = true;
         const rows = (res.data ?? []).map((row) => (meta.get(row.user_id)?.loaded && users.get(row.user_id)) || { id: row.user_id, nickname: row.nickname, ...fromRow(row) }); // 캐시가 더 최신
         board = { at: now(), rows: rows.sort(byRank) };
         return board.rows;
       } catch (err) {
+        dbOk = false;
         onError(err);
       }
     }
@@ -312,6 +328,7 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     get: (id) => users.get(id) ?? null,
     recordResult,
     leaderboard,
+    health: () => ({ storage: db ? (client ? 'supabase' : 'memory') : (file ? 'file' : 'memory'), dbOk }), // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부
     publicView: publicRecord,
     size: () => users.size,
     flush,
