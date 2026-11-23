@@ -18,9 +18,35 @@
  *   ⚠ 무료 클라우드 호스팅(Render 무료 플랜 등)의 디스크는 재배포 · 재시작 때 비워진다 — 오래 남기려면 영구 디스크 경로를 USER_DATA_FILE 로 주거나 DB 로 바꿀 것.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
+const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
+const SUPABASE_DEFAULT_KEY = 'sb_publishable_Kb57Uuv-m8SXWk6CJXtMPA_sXUQjdSI';
+export const SUPABASE_URL = process.env.SUPABASE_URL || SUPABASE_DEFAULT_URL;
+export const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_DEFAULT_KEY;
+
+/** node server/index.js 로 실행된 서버인가 (테스트처럼 서버를 import 만 한 경우에는 실제 DB 에 붙지 않는다) */
+function startedAsServer() {
+  try {
+    const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+    const dir = realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+    const entry = realpathSync(process.argv[1] ?? '');
+    return same(entry, path.join(dir, 'index.js')) || same(entry, dir);
+  } catch {
+    return false;
+  }
+}
+
+/** Supabase 클라이언트 — Node 22 미만에는 전역 WebSocket 이 없어 createClient 가 실패하므로 ws 로 채운다 (Realtime 은 쓰지 않는다) */
+async function connectSupabase(url, key) {
+  const { createClient } = await import('@supabase/supabase-js');
+  const transport = globalThis.WebSocket ?? (await import('ws')).WebSocket;
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport } });
+}
 
 /** 유저 ID = UUID (소문자 16진수, RFC 4122 변형) — 클라이언트 src/ui/session.js 의 USER_ID_PATTERN 과 같다 */
 export const USER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -120,6 +146,10 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
   let closed = false;
 
   // ── Supabase (db 가 있을 때만) ──
+  if (!db && startedAsServer()) { // 서버 실행인데 index.js 가 클라이언트를 못 넘겼다(환경 변수 없음) → 기본 접속 정보로
+    log('[DB] SUPABASE_URL · SUPABASE_KEY:', process.env.SUPABASE_URL && process.env.SUPABASE_KEY ? '환경 변수' : '기본값 사용', `(${SUPABASE_URL})`);
+    db = connectSupabase(SUPABASE_URL, SUPABASE_KEY);
+  }
   if (db) file = null; // DB 가 원본 — 파일과 둘로 갈라지지 않게
   let client = null;
   let dbOk = null; // 마지막 DB 작업 성공 여부 (/healthz) — null = 아직 없음
