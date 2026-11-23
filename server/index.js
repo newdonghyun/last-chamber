@@ -68,7 +68,7 @@ import express from 'express';
 import { Server } from 'socket.io';
 import { createRoomManager, fail, cleanProfile, ROOM_DEFAULTS, TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS } from './roomManager.js';
 import { createMatchmaker, QUEUE_TIERS } from './matchmaker.js';
-import { createUserStore, cleanUserId, cleanNickname, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
+import { createUserStore, cleanUserId, cleanNickname, supabaseOrigin, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
 
 // 테스트 · 이후 단계가 server/index.js 하나만 import 해도 되도록 규칙 상수와 프로필 검사기를 그대로 다시 내보낸다
 export { TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, QUEUE_TIERS, USER_NICK_RULE, cleanProfile };
@@ -99,7 +99,7 @@ const LEADERBOARD_SIZE = 10;
 async function connectSupabase(url, key) {
   const { createClient } = await import('@supabase/supabase-js');
   const transport = globalThis.WebSocket ?? (await import('ws')).WebSocket;
-  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport } });
+  return createClient(supabaseOrigin(url), key.trim(), { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport } }); // 경로 · 공백이 섞인 환경 변수도 그대로 동작
 }
 
 /** 로그에 남길 키 종류 (키 값은 찍지 않는다): service_role · secret 이어야 서버가 RLS 에 막히지 않고 쓸 수 있다 */

@@ -26,7 +26,15 @@ import { fileURLToPath } from 'node:url';
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
 const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
 const SUPABASE_DEFAULT_KEY = 'sb_publishable_Kb57Uuv-m8SXWk6CJXtMPA_sXUQjdSI';
-export const SUPABASE_URL = process.env.SUPABASE_URL || SUPABASE_DEFAULT_URL;
+/** 'https://xxx.supabase.co/rest/v1/' 처럼 경로까지 넣어도 프로젝트 주소(origin)만 쓴다 — 경로가 붙으면 supabase-js 가 /rest/v1 을 한 번 더 붙여 PGRST125(Invalid path)로 실패한다 */
+export const supabaseOrigin = (url) => {
+  try {
+    return new URL(String(url).trim()).origin;
+  } catch {
+    return url;
+  }
+};
+export const SUPABASE_URL = supabaseOrigin(process.env.SUPABASE_URL || SUPABASE_DEFAULT_URL);
 export const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_DEFAULT_KEY;
 
 /** node server/index.js 로 실행된 서버인가 (테스트처럼 서버를 import 만 한 경우에는 실제 DB 에 붙지 않는다) */
