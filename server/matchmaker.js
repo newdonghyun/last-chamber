@@ -7,7 +7,7 @@
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석.
  */
 
-import { cleanProfile, fail } from './roomManager.js';
+import { profileOf, fail } from './roomManager.js';
 
 /** 매칭 등급: fee = 참가비(탄피), prize = 승자가 받는 탄피 (2명이 낸 판돈의 90%) */
 export const QUEUE_TIERS = Object.freeze({
@@ -30,7 +30,7 @@ export function createMatchmaker({ io, rooms, tiers = QUEUE_TIERS }) {
     const tier = payload?.tier;
     if (typeof tier !== 'string' || !Object.hasOwn(tiers, tier)) return fail('INVALID_TIER');
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
-    queues[tier].push({ socketId: socket.id, profile: cleanProfile(payload.profile) });
+    queues[tier].push({ socketId: socket.id, profile: profileOf(socket, payload.profile) }); // 로그인한 소켓이면 서버가 확인한 닉네임
     socket.data.where = { kind: 'queue', tier };
     const { fee, prize } = tiers[tier];
     socket.emit('queue_joined', { tier, fee, prize });

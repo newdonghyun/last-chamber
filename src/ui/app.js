@@ -17,6 +17,13 @@
  *   '보상 2배'·'연승 보호'를 받는다. 상점(#store-modal)에서 총기 스킨·테이블 테마를 탄피/결제/광고로 얻어 장착하면
  *   style.css 의 CSS 변수가 바뀌어 인게임 총기·테이블 색이 달라진다. (카탈로그·저장은 storeData.js)
  *   광고·결제·진동은 플랫폼별 SDK를 직접 부르지 않고 platformBridge 의 표준 메서드(showRewardedAd · purchaseProduct · triggerHaptic)만 쓴다.
+ *   진동은 결정적인 순간에만 1회: 실탄 발사('shot') · 피격('hit') · 승패 확정('win' | 'lose') — 버튼 · 턴 전환 · 아이템 · 장전 · 공포탄에는 울리지 않는다 (300ms 쿨타임은 platformBridge).
+ *
+ * 로그인: 시작 화면(src/ui/loginGate.js)에서 정한 닉네임 · 유저 ID 는 src/ui/session.js 가 갖고 있다. 여기서는 구독만 해서
+ *   프로필 닉네임 · 타이틀 HUD · 인게임 내 이름표(#zone-player .nameplate-name)를 그 닉네임으로 맞춘다 (프로필 모달의 닉네임 변경도 session 을 거친다).
+ *
+ * 렌더링(모바일 WebView 깜빡임 방지): 같은 값이면 DOM 을 쓰지 않고(setText · setAttr · setHidden), 아이템 줄은 아이템이 바뀔 때만 새로 만든다
+ *   (사용 가능 여부 · 설명은 버튼을 그대로 두고 속성만 고친다). 애니메이션 재시작은 강제 리플로우를 한 번으로 묶는다(restartClasses).
  *
  * 암시장(상점 탭 3 · 4): [낡은 탄약 상자] 300 탄피 → 실린더가 돈 뒤 한정 총구 화염 3종 · 칭호 4종 중 하나. 이미 가진 것이면 120 탄피 환급 + 천장 게이지 +1, 5가 되면 다음 상자는
  *   미보유 희귀 확정 (규칙·확률표는 storeData.js CHEST / chestOdds · 화면에도 그대로 공개). 장착한 화염은 인게임 총구 화염의 CSS 변수(--muzzle-*)를 바꾼다.
@@ -29,10 +36,11 @@ import { AIDealer } from '../engine/aiDealer.js';
 import { SoundEngine } from './soundEngine.js';
 import { platformBridge as platform } from '../platform/platformBridge.js';
 import {
-  KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, NICKNAME, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
+  KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
   CHEST, CHEST_ITEMS, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
 import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
+import { userSession, nicknameErrorText, attachNicknameFilter, NICK_HINT } from './session.js'; // 로그인한 닉네임 · 유저 ID (화면은 loginGate.js)
 
 const PLAYER = 'player';
 const AI = 'ai';
@@ -219,6 +227,22 @@ const el = {
   boardSummary: $('board-summary'),
   boardList: $('board-list'),
   boardNote: $('board-note'),
+  login: $('login-modal'),
+  account: $('account-modal'),
+  myName: document.querySelector('#zone-player .nameplate-name'),
+};
+
+// ── 같은 값이면 DOM 을 건드리지 않는 쓰기 ──
+// 모바일 WebView 에서는 같은 글자 · 속성을 다시 써도 스타일 재계산 · 레이아웃 · 다시 그리기가 일어날 수 있어(엔진 버전마다 다름) 렌더가 잦을수록 깜빡인다.
+const setText = (node, text) => { if (node && node.textContent !== text) node.textContent = text; };
+const setAttr = (node, name, value) => { if (node && node.getAttribute(name) !== value) node.setAttribute(name, value); };
+const setHidden = (node, hidden) => { if (node && node.hidden !== hidden) node.hidden = hidden; };
+const setDisabled = (node, disabled) => { if (node && node.disabled !== disabled) node.disabled = disabled; };
+const htmlCache = new WeakMap(); // 노드 → 마지막으로 넣은 innerHTML (같은 마크업이면 다시 파싱 · 교체하지 않는다)
+const setHtml = (node, html) => {
+  if (!node || htmlCache.get(node) === html) return;
+  htmlCache.set(node, html);
+  node.innerHTML = html;
 };
 
 // 소리 설정: 효과음·배경음 음량(0~1)과 음소거. 저장된 값을 쓰고, 저장소를 못 쓰면(비공개 창 등) 기본값으로 동작한다.
@@ -255,6 +279,8 @@ let sparkTimer = 0;
 let tabHidden = document.hidden; // 다른 탭·창에 나가 있는 동안 게임 일시정지
 let crisisLevel = ''; // '' | 'tense'(마지막 1발) | 'danger'(내 체력 1) → #crisis 위기 비네팅
 let lastTension = -1; // 배경음 긴장도 (바뀔 때만 엔진에 전달)
+const slotKeys = { [PLAYER]: null, [AI]: null }; // 지금 화면에 그려진 아이템 줄 ('loupe|saw|…') — 같으면 슬롯을 다시 만들지 않는다
+let audioUnlockArmed = false; // PvP 시작 때 붙이는 '첫 터치에 오디오 깨우기' 리스너가 이미 대기 중인가 (판마다 쌓이지 않게)
 
 const profile = new PlayerProfile(); // 탄피 · 해금/장착 · 체험 · 연승 (localStorage에 영구 저장)
 let adBusy = false; // 광고·결제 화면이 떠 있는 동안 중복 요청과 단축키를 막는다
@@ -285,7 +311,7 @@ const josa = (word, withFinal, withoutFinal) => {
   const code = word.charCodeAt(word.length - 1) - 0xac00;
   return word + (code >= 0 && code < 11172 && code % 28 !== 0 ? withFinal : withoutFinal);
 };
-const say = (line) => { if (!online) el.line.textContent = line; }; // PvP 에서는 이 칸에 딜러(AI) 대사를 쓰지 않는다
+const say = (line) => { if (!online) setText(el.line, line); }; // PvP 에서는 이 칸에 딜러(AI) 대사를 쓰지 않는다
 const vsFoe = (text) => (online ? text.replaceAll('딜러', '상대') : text); // PvP: 딜러 → 상대 ('상대'도 받침이 없어 이/가 · 을/를 조사가 그대로 맞는다)
 const thinking = (on) => el.speech.classList.toggle('is-thinking', on);
 const isPaused = () => !online && (el.rules.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
@@ -412,8 +438,11 @@ function readSkinDefaults() {
 }
 
 // 장착(또는 체험) 중인 스킨 + 총구 화염을 CSS 변수로 적용한다: 이전 변수를 모두 지워 style.css 기본값으로 되돌린 뒤 새 값만 덮어쓴다 (화염은 총기 스킨 위에 한 번 더)
+// 이미 같은 조합이면 아무것도 하지 않는다 — :root 의 변수 수십 개를 지웠다 다시 쓰면 문서 전체의 스타일을 다시 계산해서 (앱 복귀 · 상점 · 턴마다) 화면이 한 번 덜컹인다
 function applyLoadout({ gun, table, flame = DEFAULT_FLAME_ID }) {
   const root = document.documentElement;
+  const now = root.dataset;
+  if (now.gun === gun && now.table === table && now.flame === flame) return;
   for (const key of [...SKIN_VAR_KEYS[KIND.GUN], ...SKIN_VAR_KEYS[KIND.TABLE], ...SKIN_VAR_KEYS.flame]) root.style.removeProperty(key);
   for (const [key, value] of Object.entries(loadoutVars(gun, table, flame))) root.style.setProperty(key, value);
   root.dataset.gun = gun;
@@ -429,7 +458,7 @@ function tweenNumber(node, from, to, { ms = 650, prefix = '' } = {}) {
     clearTimeout(prev.timer);
     tweens.delete(node);
   }
-  const settle = () => { node.textContent = prefix + fmt(to); };
+  const settle = () => setText(node, prefix + fmt(to));
   if (from === to || reducedMotion() || document.hidden) {
     settle();
     return;
@@ -459,21 +488,20 @@ function syncWallet({ animate = false, value } = {}) {
   const chip = el.storeBrass.parentElement;
   tweenNumber(el.walletAmount, from, to);
   tweenNumber(el.storeBrass, from, to);
-  el.wallet.setAttribute('aria-label', `보유 탄피 ${fmt(to)}${profile.streak ? ` · ${profile.streak}연승` : ''}`);
-  chip.setAttribute('aria-label', `보유 탄피 ${fmt(to)}`);
-  el.walletStreak.hidden = profile.streak < 1;
-  el.walletStreak.textContent = `${profile.streak}연승`;
+  setAttr(el.wallet, 'aria-label', `보유 탄피 ${fmt(to)}${profile.streak ? ` · ${profile.streak}연승` : ''}`);
+  setAttr(chip, 'aria-label', `보유 탄피 ${fmt(to)}`);
+  setHidden(el.walletStreak, profile.streak < 1);
+  setText(el.walletStreak, `${profile.streak}연승`);
   if (animate && to > from) {
-    restartClass(el.wallet, 'is-gain');
-    restartClass(chip, 'is-gain');
+    restartClasses([[el.wallet, 'is-gain'], [chip, 'is-gain']]);
   }
 }
 
 // 광고로 예약해 둔 '다음 1판 체험' 스킨을 시작 버튼 위에 알려 준다
 function syncTitleExtras() {
   const names = [KIND.GUN, KIND.TABLE].map((kind) => getItem(kind, profile.trialId(kind))?.name).filter(Boolean);
-  el.trialNote.hidden = names.length === 0;
-  el.trialNote.textContent = names.length ? `다음 1판 체험 · ${names.join(' · ')}` : '';
+  setHidden(el.trialNote, names.length === 0);
+  setText(el.trialNote, names.length ? `다음 1판 체험 · ${names.join(' · ')}` : '');
 }
 
 function resetRewardUi() {
@@ -520,6 +548,8 @@ function showReward(outcome) {
   if (outcome.tierChange) notes.push(h('p', outcome.tierChange === 'up' ? 'is-up' : 'is-down', `${outcome.tierChange === 'up' ? '▲ 승급' : '▼ 강등'} — ${outcome.tier.label}`));
   const gained = outcome.newTitles.map((id) => getTitle(id)?.name).filter(Boolean);
   if (gained.length) notes.push(h('p', 'is-title', `새 칭호 — ${gained.join(', ')}`));
+  const server = outcome.pvp?.record; // PvP: 서버가 기록한 이 계정(유저 ID)의 대전 전적 (game_over.record — 로그인한 경우만)
+  if (server) notes.push(h('p', '', `서버 대전 전적 ${fmt(server.wins)}승 ${fmt(server.losses)}패`));
   el.rewardRank.replaceChildren(...notes);
   el.rewardRank.hidden = notes.length === 0;
   el.doubleSub.textContent = `+${fmt(outcome.total)} 탄피 추가 지급`;
@@ -602,11 +632,6 @@ async function onProtect() { // [광고 보고 연승 기록 보호하기] → �
 
 // ───────── 프로필 · 티어 · 순위표 ─────────
 
-const NICK_ERRORS = {
-  empty: '닉네임을 입력해 주세요',
-  too_long: `닉네임은 ${NICKNAME.maxLength}자까지 쓸 수 있어요`,
-  invalid_chars: '글자, 숫자, 공백, ( _ . - · ) 만 쓸 수 있어요',
-};
 // Elo 로 계산된 실제 변동값. 나보다 100 이상 높은 상대를 이기면 '언더독 승리'
 const UNDERDOG_GAP = 100;
 const mmrText = (outcome) => {
@@ -635,12 +660,34 @@ function tierBadge(tier, size = '') {
 function syncPlayerCard() {
   const tier = profile.tier;
   paintTier(el.playerCard, tier);
-  el.playerCard.dataset.tier = tier.id;
-  el.pcBadge.firstElementChild.textContent = tier.roman;
-  el.pcTier.textContent = tier.ko;
-  el.pcName.textContent = profile.nickname;
-  el.pcRate.textContent = `승률 ${profile.winRateText}`;
-  el.playerCard.setAttribute('aria-label', `프로필 & 랭킹 열기 — ${profile.nickname}, ${tier.label}, MMR ${fmt(profile.mmr)}, 승률 ${profile.winRateText}`);
+  setAttr(el.playerCard, 'data-tier', tier.id);
+  setText(el.pcBadge.firstElementChild, tier.roman);
+  setText(el.pcTier, tier.ko);
+  setText(el.pcName, profile.nickname);
+  setText(el.pcRate, `승률 ${profile.winRateText}`);
+  setAttr(el.playerCard, 'aria-label', `프로필 & 랭킹 열기 — ${profile.nickname}, ${tier.label}, MMR ${fmt(profile.mmr)}, 승률 ${profile.winRateText}`);
+}
+
+// 인게임 내 이름표(하단): 로그인한 닉네임 + 작은 'YOU' — 사람 상대(PvP)든 딜러든 같은 이름표 (상대 이름표는 paintFoe)
+function paintMe() {
+  const node = el.myName;
+  if (!node) return;
+  const name = userSession.user?.nickname ?? profile.nickname;
+  if (node.dataset.name === name) return;
+  node.dataset.name = name;
+  node.classList.add('is-human'); // 긴 닉네임은 말줄임 (style.css .nameplate-name.is-human)
+  node.replaceChildren(name, h('small', 'np-meta', 'YOU'));
+}
+
+// 로그인 · 닉네임 변경 · 로그아웃 (session.js 구독): 프로필 닉네임을 로그인한 닉네임으로 맞추고, 닉네임이 보이는 곳을 바로 고친다
+function syncFromSession(user = userSession.user) {
+  if (user && profile.reload().nickname !== user.nickname) profile.setNickname(user.nickname);
+  syncPlayerCard();
+  paintMe();
+  if (el.profile.open) {
+    if (document.activeElement !== el.nickInput) el.nickInput.value = profile.nickname; // 입력 중인 글자는 지우지 않는다
+    renderBoard(); // 순위표 내 줄의 이름
+  }
 }
 
 function openProfile(tab = 'record') {
@@ -660,7 +707,7 @@ function closeProfile() {
 }
 
 function nickMessage(text, tone = '') {
-  el.nickMsg.textContent = text || `1~${NICKNAME.maxLength}자 · 글자, 숫자, 공백, ( _ . - · )`;
+  el.nickMsg.textContent = text || NICK_HINT; // 닉네임 규칙(2~10자 · 공백 없이)은 session.js 와 서버가 같다
   el.nickMsg.classList.toggle('is-bad', tone === 'bad');
   el.nickMsg.classList.toggle('is-ok', tone === 'ok');
 }
@@ -753,18 +800,18 @@ async function renderBoard() {
   el.boardNote.textContent = source === 'virtual' ? `가상 라이벌 ${fmt(total - 1)}명 기준 순위예요 · 서버가 연결되면 실제 유저 순위로 바뀝니다` : '';
 }
 
+// 프로필 모달의 닉네임 저장도 로그인 세션을 거친다 (계정 창과 같은 규칙 · 같은 저장소 — 서버로 가는 닉네임이 어긋나지 않게)
 function onNickSubmit(ev) {
   ev.preventDefault();
-  const res = profile.setNickname(el.nickInput.value);
+  const res = userSession.rename(el.nickInput.value);
   if (!res.ok) {
-    nickMessage(NICK_ERRORS[res.reason] ?? '닉네임을 저장할 수 없어요', 'bad');
+    nickMessage(nicknameErrorText(res.reason), 'bad');
     return;
   }
-  el.nickInput.value = res.nickname;
-  nickMessage('닉네임을 저장했어요', 'ok');
+  el.nickInput.value = res.user.nickname;
+  nickMessage(res.unchanged ? '지금 쓰고 있는 닉네임이에요' : '닉네임을 저장했어요', 'ok');
   sound.playClick();
-  syncPlayerCard();
-  renderBoard(); // 내 줄의 이름도 바로 바뀐다
+  // HUD · 이름표 · 순위표 내 줄은 세션 구독(syncFromSession)이 바로 바꾼다
 }
 
 function onTitleClick(ev) {
@@ -1260,8 +1307,7 @@ async function onChestOpen() {
     stage.classList.toggle('is-rare', item.rarity === 'rare');
     restartClass(stage, 'is-open');
     sound.playItem();
-    if (item.rarity === 'rare') setTimeout(() => sound.playItem(), 150);
-    platform.triggerHaptic(item.rarity === 'rare' ? 'heavy' : 'light');
+    if (item.rarity === 'rare') setTimeout(() => sound.playItem(), 150); // 상자 연출은 소리만 (진동은 게임의 결정적인 순간에만)
     showChestResult(r);
     syncWallet({ animate: true }); // 환급이 있으면 지금 올라간다
   } finally {
@@ -1324,8 +1370,7 @@ function playTaunt(event, { from = 'me' } = {}) {
   restartClass(fx, 'is-playing');
   clearTimeout(tauntFxTimer);
   tauntFxTimer = setTimeout(() => fx.classList.remove('is-playing'), TAUNT_FX_MS + 60);
-  playTauntSound(taunt.id);
-  platform.triggerHaptic('light');
+  playTauntSound(taunt.id); // 도발은 소리 · 연출만 (진동 없음)
   el.srLog.textContent = from === 'me' ? `도발 — ${taunt.name}` : `상대의 도발 — ${taunt.name}`;
 }
 
@@ -1353,10 +1398,10 @@ function resetTaunt() { // 새 판: 쿨타임 · 진행 중인 연출 초기화
 // 장착한 도발이 있고 판이 진행 중일 때만 도발 버튼을 보인다 (게임 시작 · 종료 · 상점에서 장착을 바꾼 뒤)
 function syncTauntButton() {
   const taunt = getTaunt(profile.equippedTaunt);
-  el.btnTaunt.hidden = !taunt || !engine || Boolean(engine.getPublicState(PLAYER).winner);
+  setHidden(el.btnTaunt, !taunt || !engine || Boolean(engine.getPublicState(PLAYER).winner));
   if (!taunt) return;
-  el.tauntIcon.setAttribute('href', `#${taunt.icon}`);
-  el.btnTaunt.setAttribute('aria-label', `도발: ${taunt.name}`);
+  setAttr(el.tauntIcon, 'href', `#${taunt.icon}`);
+  setAttr(el.btnTaunt, 'aria-label', `도발: ${taunt.name}`);
   el.btnTaunt.title = `도발: ${taunt.name}`;
   el.btnTaunt.style.setProperty('--tn-hi', taunt.chips[0]);
   el.btnTaunt.style.setProperty('--tn-main', taunt.chips[1]);
@@ -1378,11 +1423,20 @@ function onTauntClick() {
 
 const foeNameNode = document.querySelector('#zone-dealer .nameplate-name');
 const DEALER_NAME = foeNameNode?.textContent ?? 'THE DEALER';
+const scoreFoeLabel = document.querySelector('#zone-dealer .scoreboard span'); // 점수판 왼쪽 'DEALER'
+const fireFoeSub = document.querySelector('#btn-shoot-opponent .trigger-sub'); // 격발 버튼 아래 'FIRE · DEALER'
 
 // 상대(딜러) 이름 칸: PvP 면 상대 닉네임 + 티어 · MMR (딜러 대사 칸에는 칭호), 아니면 원래 딜러 이름
 function paintFoe() {
+  const word = online ? 'OPPONENT' : 'DEALER'; // PvP 의 상대는 딜러가 아니라 사람 — 점수판 · 격발 버튼의 고정 문구도 맞춘다 (차례 표시 · 결과 화면은 이미 OPPONENT)
+  setText(scoreFoeLabel, word);
+  if (fireFoeSub) {
+    setText(fireFoeSub, `FIRE · ${word}`);
+    fireFoeSub.classList.toggle('is-long', online); // 더 긴 문구라 자간을 좁힌다 (style.css .trigger-sub.is-long)
+  }
   if (!foeNameNode) return;
   const foe = online ? pvpOpponent() : null;
+  foeNameNode.classList.toggle('is-human', Boolean(foe)); // 사람 상대의 긴 닉네임은 말줄임 (style.css .nameplate-name.is-human)
   if (!foe) {
     foeNameNode.textContent = DEALER_NAME;
     return;
@@ -1408,7 +1462,13 @@ function onPvpUpdate() {
 
 function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 첫 상태를 받은 뒤 부른다) — 아니면 AI 딜러 대전
   sound.unlock().catch(() => {}); // 사용자 클릭 안에서 오디오 활성화 (자동재생 정책, 총성 녹음도 이때 불러옴)
-  if (pvp) document.addEventListener('pointerdown', () => sound.unlock().catch(() => {}), { once: true }); // PvP 는 소켓 이벤트로 시작해 제스처 밖일 수 있다 → 첫 터치에서 한 번 더
+  if (pvp && !audioUnlockArmed) { // PvP 는 소켓 이벤트로 시작해 제스처 밖일 수 있다 → 첫 터치에서 한 번 더 (터치 없이 판이 이어져도 리스너가 쌓이지 않게 하나만)
+    audioUnlockArmed = true;
+    document.addEventListener('pointerdown', () => {
+      audioUnlockArmed = false;
+      sound.unlock().catch(() => {});
+    }, { once: true });
+  }
   sound.setTension(0);
   sound.startAmbient(); // 앰비언트 배경음 (다시 하기로 재시작해도 한 번만 켜짐)
   const token = ++gameId;
@@ -1432,6 +1492,7 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
     memory = { knownShell: null };
   }
   paintFoe();
+  paintMe();
   resetTaunt();
   syncTauntButton(); // 장착한 도발이 있으면 이번 판 구석에 도발 버튼
   lastLogIndex = 0;
@@ -1441,6 +1502,8 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   dealBuffer = {};
   fresh[PLAYER].clear();
   fresh[AI].clear();
+  slotKeys[PLAYER] = null; // 새 판의 첫 render 는 아이템 줄을 새로 그린다 (지난 판의 부서지던 슬롯 등이 남지 않게)
+  slotKeys[AI] = null;
 
   clearSubtitles();
   forget();
@@ -1518,9 +1581,10 @@ async function endGame(s, token) {
   }
   say(pick(won ? LINES.gameWon : LINES.gameLost));
   subtitle(won ? '딜러가 쓰러졌다 — 당신의 승리' : '당신이 쓰러졌다 — 딜러의 승리', won ? 'info' : 'danger');
+  if (token === gameId) platform.triggerHaptic(won ? 'win' : 'lose'); // 승패 확정: 진동 1회 (승리 Medium · 패배 Heavy)
   await headline(won ? 'VICTORY' : 'DEFEAT', won ? 'info' : 'danger', 1900);
   if (token !== gameId) return;
-  el.titleHeading.innerHTML = won ? 'YOU<span>SURVIVED</span>' : 'GAME<span>OVER</span>';
+  setHtml(el.titleHeading, won ? 'YOU<span>SURVIVED</span>' : 'GAME<span>OVER</span>'); // 같은 결과가 이어지면 다시 파싱하지 않는다
   el.titleSub.textContent = vsFoe(won ? '딜러가 테이블 위에 쓰러졌다. 오늘 밤 마지막 약실은 당신의 것.' : '마지막 약실은 딜러의 것이었다. 다시 앉겠는가?');
   el.titleResult.textContent = `${online ? 'OPPONENT' : 'DEALER'} ${s.opponent.wins} : ${s.me.wins} YOU`;
   el.titleResult.hidden = false;
@@ -1553,7 +1617,7 @@ async function handleItem(index) {
     if (online) advance(token); // 그새 서버가 보낸 로그가 있으면 이어서 연출
     return;
   }
-  sound.playItem();
+  sound.playItem(); // 아이템 사용은 소리만 (진동 없음)
   await present(token);
   if (token !== gameId) return;
   busy = false;
@@ -1613,7 +1677,7 @@ async function runAITurn(token) {
     let result = null;
     if (action.type === 'item') {
       result = engine.useItem(AI, action.slotIndex);
-      if (result.ok) sound.playItem(); // 변환기도 사용 사실과 소리는 공개
+      if (result.ok) sound.playItem(); // 변환기도 사용 사실과 소리는 공개 (진동 없음)
     }
     if (!result?.ok) { // 격발 (아이템 실패 시에도 상대에게 격발로 진행해 멈추지 않게)
       thinking(false);
@@ -1660,15 +1724,12 @@ async function fireSequence(shooter, target, token, known = null) {
     }
     sound.playGunshot();
     sound.playDamage();
-    platform.triggerHaptic(atDealer ? 'medium' : 'heavy'); // 격발 — 내가 맞으면(피격) 더 세게
+    platform.triggerHaptic(atDealer ? 'shot' : 'hit'); // 실탄 1회: 상대가 맞으면 실탄 발사(Medium) · 내가 맞으면 피격(Heavy) — 300ms 쿨타임으로 중복 수신도 한 번만
     sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
-    restartClass(el.gun, 'fire');
-    restartClass(el.app, 'shake-hard');
-    restartClass(el.flash, 'flash-red');
+    restartClasses([[el.gun, 'fire'], [el.app, 'shake-hard'], [el.flash, 'flash-red']]); // 강제 리플로우 1번으로 세 연출을 함께 시작
     if (slow) await wait(SLOWMO_MS);
   } else {
-    sound.playClick();
-    platform.triggerHaptic('light'); // 공포탄: 딸깍
+    sound.playClick(); // 공포탄: 딸깍 소리만 (진동 없음)
   }
   await wait(AFTERMATH_MS);
   el.gun.classList.remove('fire', 'aim-up', 'aim-down');
@@ -1734,7 +1795,7 @@ async function presentEntry(e, rest) {
       await presentShot(e, rest);
       break;
     case 'ITEM':
-      if (online && e.actor === AI) sound.playItem(); // 딜러 AI 턴에서는 사용 직전에 울리던 소리 (내 아이템은 handleItem 이 울린다)
+      if (online && e.actor === AI) sound.playItem(); // 상대 턴에서는 사용 직전에 울리던 소리 (내 아이템은 handleItem 이 울린다 · 진동 없음)
       await presentItem(e);
       break;
     case 'ROUND_END': {
@@ -1843,7 +1904,7 @@ function effectText(item, e, mine) {
 async function reloadSequence(e) {
   forget();
   render();
-  sound.playReload();
+  sound.playReload(); // 장전은 소리 · 연출만 (진동 없음)
   restartClass(el.gun, 'barrel-spin');
   el.revealShells.replaceChildren(...Array.from({ length: e.live + e.blank }, (_, i) => {
     const live = i < e.live;
@@ -1851,7 +1912,7 @@ async function reloadSequence(e) {
     icon.style.setProperty('--i', String(i));
     return icon;
   }));
-  el.revealCount.innerHTML = `<b class="t-live">실탄 ${e.live}</b> · <b class="t-blank">공포탄 ${e.blank}</b>`;
+  setHtml(el.revealCount, `<b class="t-live">실탄 ${e.live}</b> · <b class="t-blank">공포탄 ${e.blank}</b>`); // 숫자만 들어가는 고정 마크업 — 같은 구성이면 건너뛴다
   subtitle(`장전 — 실탄 ${e.live}발 · 공포탄 ${e.blank}발, 순서는 비밀`);
   el.reveal.classList.add('is-visible');
   await wait(REVEAL_MS);
@@ -1877,8 +1938,7 @@ function patchHp(tube, zone, damage) { // 라운드가 넘어가기 전, 맞은 
   const lit = [...tube.querySelectorAll('.cell.is-on')];
   const left = Math.max(0, lit.length - damage);
   lit.slice(left).forEach((cell) => cell.classList.remove('is-on'));
-  zone.classList.toggle('is-guillotine', left === 1);
-  if (left === 1) platform.triggerHaptic(zone === el.zonePlayer ? 'heavy' : 'medium'); // 단두대 진입
+  zone.classList.toggle('is-guillotine', left === 1); // 단두대 진입 — 진동은 이 격발의 실탄 진동 한 번으로 충분하다 (예전엔 여기서 한 번 더 울려 연달아 떨렸다)
   if (zone === el.zonePlayer && left === 1) setCrisis('danger'); // 내가 단두대가 되는 순간 바로 위기 비네팅
 }
 
@@ -1899,8 +1959,7 @@ function forget() {
 }
 
 function sparkFx() { // 변환기: 푸른 전기 스파크 + 총 감전
-  restartClass(el.sparks, 'is-active');
-  restartClass(el.gun, 'shock');
+  restartClasses([[el.sparks, 'is-active'], [el.gun, 'shock']]);
   clearTimeout(sparkTimer);
   sparkTimer = setTimeout(() => {
     el.sparks.classList.remove('is-active');
@@ -1982,9 +2041,15 @@ function clearSubtitles() {
 }
 
 function restartClass(node, cls) { // 같은 애니메이션 클래스를 처음부터 다시 재생
-  node.classList.remove(cls);
-  void node.getBoundingClientRect();
-  node.classList.add(cls);
+  restartClasses([[node, cls]]);
+}
+
+// 여러 노드의 애니메이션을 한꺼번에 처음부터: 모두 떼고 → 강제 리플로우 한 번 → 모두 붙인다.
+// 노드마다 떼고-리플로우-붙이기를 하면 격발 순간 같은 프레임에 레이아웃을 여러 번 다시 계산해 프레임이 밀리고 화면이 깜빡인다.
+function restartClasses(pairs) {
+  for (const [node, cls] of pairs) node.classList.remove(cls);
+  if (pairs.length) void pairs[0][0].getBoundingClientRect();
+  for (const [node, cls] of pairs) node.classList.add(cls);
 }
 
 // ───────── 렌더링 ─────────
@@ -1997,8 +2062,8 @@ function render() {
   const canAct = myTurn && !busy;
 
   renderRounds(s.round);
-  el.scoreDealer.textContent = String(s.opponent.wins);
-  el.scorePlayer.textContent = String(s.me.wins);
+  setText(el.scoreDealer, String(s.opponent.wins));
+  setText(el.scorePlayer, String(s.me.wins));
 
   renderHp(el.dealerHp, s.opponent, '딜러');
   renderHp(el.playerHp, s.me, '내');
@@ -2008,32 +2073,32 @@ function render() {
   el.zonePlayer.classList.toggle('is-cuffed', t?.cuffed === PLAYER);
   el.zoneDealer.classList.toggle('is-active', t?.player === AI && !s.winner);
   el.zonePlayer.classList.toggle('is-active', myTurn);
-  el.turnLabel.textContent = s.winner ? 'GAME OVER' : myTurn ? 'YOUR TURN' : online ? 'OPPONENT' : 'DEALER';
+  setText(el.turnLabel, s.winner ? 'GAME OVER' : myTurn ? 'YOUR TURN' : online ? 'OPPONENT' : 'DEALER');
   el.turnLabel.classList.toggle('is-dealer', t?.player === AI);
 
   // 탄 랙: 변환기로 가려졌으면 총 발수만 (탄종을 역산할 수 없게)
   const obscured = s.live === null;
-  el.liveRack.hidden = obscured;
-  el.blankRack.hidden = obscured;
-  el.unknownRack.hidden = !obscured;
+  setHidden(el.liveRack, obscured);
+  setHidden(el.blankRack, obscured);
+  setHidden(el.unknownRack, !obscured);
   if (obscured) {
     renderShells(el.unknownIcons, s.total, 'i-unknown');
-    el.totalCount.textContent = String(s.total);
-    el.shells.setAttribute('aria-label', `남은 탄 ${s.total}발 — 변환기로 탄종이 가려짐`);
+    setText(el.totalCount, String(s.total));
+    setAttr(el.shells, 'aria-label', `남은 탄 ${s.total}발 — 변환기로 탄종이 가려짐`);
   } else {
     renderShells(el.liveIcons, s.live, 'i-live');
     renderShells(el.blankIcons, s.blank, 'i-blank');
-    el.liveCount.textContent = String(s.live);
-    el.blankCount.textContent = String(s.blank);
-    el.shells.setAttribute('aria-label', `남은 탄: 실탄 ${s.live}발, 공포탄 ${s.blank}발`);
+    setText(el.liveCount, String(s.live));
+    setText(el.blankCount, String(s.blank));
+    setAttr(el.shells, 'aria-label', `남은 탄: 실탄 ${s.live}발, 공포탄 ${s.blank}발`);
   }
 
   renderDealerItems(s.opponent.items);
   renderPlayerItems(s, canAct);
 
   el.gun.classList.toggle('is-sawed', Boolean(t?.sawActive));
-  el.btnOpponent.disabled = !canAct;
-  el.btnSelf.disabled = !canAct;
+  setDisabled(el.btnOpponent, !canAct);
+  setDisabled(el.btnSelf, !canAct);
   syncMood(s);
 }
 
@@ -2044,9 +2109,9 @@ function renderRounds(round) {
     li.classList.toggle('is-current', current);
     li.classList.toggle('is-won', result === 'won');
     li.classList.toggle('is-lost', result === 'lost');
-    if (current) li.setAttribute('aria-current', 'step');
-    else li.removeAttribute('aria-current');
-    li.setAttribute('aria-label', `라운드 ${i + 1}${result === 'won' ? ' 승리' : result === 'lost' ? ' 패배' : ''}`);
+    if (current) setAttr(li, 'aria-current', 'step');
+    else if (li.hasAttribute('aria-current')) li.removeAttribute('aria-current');
+    setAttr(li, 'aria-label', `라운드 ${i + 1}${result === 'won' ? ' 승리' : result === 'lost' ? ' 패배' : ''}`);
   });
 }
 
@@ -2062,8 +2127,8 @@ function renderHp(tube, side, label) {
     }), glass);
     cells = tube.querySelectorAll('.cell');
   }
-  cells.forEach((cell, i) => cell.classList.toggle('is-on', i < side.hp));
-  tube.setAttribute('aria-label', `${label} 체력 ${side.hp}/${side.maxHp}`);
+  cells.forEach((cell, i) => cell.classList.toggle('is-on', i < side.hp)); // toggle(force) 는 상태가 같으면 아무것도 바꾸지 않는다
+  setAttr(tube, 'aria-label', `${label} 체력 ${side.hp}/${side.maxHp}`);
 }
 
 function renderShells(container, count, iconId) {
@@ -2071,63 +2136,97 @@ function renderShells(container, count, iconId) {
   container.replaceChildren(...Array.from({ length: count }, () => svgUse('shell', iconId)));
 }
 
+// 방금 지급된 슬롯의 등장 연출(.is-new → card-pop). 연출이 끝나면 클래스를 떼어, 슬롯을 다시 쓰더라도 연출이 또 돌지 않게 한다
+function markNew(node) {
+  node.classList.add('is-new');
+  node.addEventListener('animationend', function done(ev) {
+    if (ev.target !== node) return; // 안쪽 요소에서 올라온 이벤트는 무시
+    node.classList.remove('is-new');
+    node.removeEventListener('animationend', done);
+  });
+}
+
+// 딜러(상대) 아이템 6칸: 아이템 구성이 바뀔 때만 다시 만든다 (render 는 연출마다 여러 번 불린다)
 function renderDealerItems(items) {
-  el.dealerItems.replaceChildren(...Array.from({ length: 6 }, (_, i) => {
-    const li = document.createElement('li');
-    const item = items[i];
-    li.className = item ? 'dslot' : 'dslot is-empty';
-    if (item) {
-      const info = ITEM_INFO[item];
-      const name = document.createElement('span');
-      name.textContent = info.name;
-      li.dataset.item = item;
-      li.title = `${info.name} · ${info.tag} — ${info.desc}`;
-      li.append(svgUse('', info.icon), name);
-      if (fresh[AI].has(i)) li.classList.add('is-new');
-    }
-    return li;
-  }));
+  const key = items.join('|');
+  if (slotKeys[AI] !== key) {
+    slotKeys[AI] = key;
+    el.dealerItems.replaceChildren(...Array.from({ length: 6 }, (_, i) => {
+      const li = document.createElement('li');
+      const item = items[i];
+      li.className = item ? 'dslot' : 'dslot is-empty';
+      if (item) {
+        const info = ITEM_INFO[item];
+        const name = document.createElement('span');
+        name.textContent = info.name;
+        li.dataset.item = item;
+        li.title = `${info.name} · ${info.tag} — ${info.desc}`;
+        li.append(svgUse('', info.icon), name);
+        if (fresh[AI].has(i)) markNew(li);
+      }
+      return li;
+    }));
+  }
   fresh[AI].clear();
 }
 
+// 내 아이템 6칸: 아이템 구성이 바뀔 때만 버튼을 새로 만들고, 사용 가능 여부 · 설명만 바뀌면 그 자리에서 속성만 고친다.
+// (예전에는 render 마다 12칸 + SVG 아이콘을 통째로 다시 만들어 모바일에서 아이템 줄이 깜빡였고, 방금 지급된 카드의 등장 연출이
+//  같은 프레임의 다음 render 에 지워졌으며, 키보드 포커스도 풀렸다)
 function renderPlayerItems(s, canAct) {
-  el.playerItems.replaceChildren(...Array.from({ length: 6 }, (_, i) => {
-    const li = document.createElement('li');
-    const item = s.me.items[i];
-    if (!item) {
-      const empty = document.createElement('span');
-      empty.className = 'card is-empty';
-      li.append(empty);
-      return li;
-    }
+  const items = s.me.items;
+  const key = items.join('|');
+  if (slotKeys[PLAYER] !== key) {
+    slotKeys[PLAYER] = key;
+    el.playerItems.replaceChildren(...Array.from({ length: 6 }, (_, i) => buildPlayerSlot(items[i], i)));
+  }
+  for (const btn of el.playerItems.querySelectorAll('button.card')) {
+    const item = btn.dataset.item;
     const info = ITEM_INFO[item];
     const reason = canAct ? blockReason(item, s) : null;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = fresh[PLAYER].has(i) ? 'card is-new' : 'card';
-    btn.dataset.index = String(i);
-    btn.dataset.item = item;
-    btn.disabled = !canAct || reason !== null;
-    btn.title = `${info.name} · ${info.tag} — ${reason ?? info.desc}`;
-    btn.setAttribute('aria-label', btn.title);
-
-    const icon = document.createElement('span');
-    icon.className = 'card-icon';
-    icon.append(svgUse('', info.icon));
-    const text = document.createElement('span');
-    text.className = 'card-text';
-    const name = document.createElement('span');
-    name.className = 'card-name';
-    name.textContent = info.name;
-    const tag = document.createElement('span');
-    tag.className = 'card-tag';
-    tag.textContent = info.tag;
-    text.append(name, tag);
-    btn.append(icon, text);
-    li.append(btn);
-    return li;
-  }));
+    setDisabled(btn, !canAct || reason !== null);
+    const label = `${info.name} · ${info.tag} — ${reason ?? info.desc}`;
+    if (btn.title !== label) {
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+  }
   fresh[PLAYER].clear();
+}
+
+// 내 아이템 한 칸 (사용 가능 여부 · 설명은 renderPlayerItems 가 바로 채운다 — 처음에는 잠가 둔다)
+function buildPlayerSlot(item, i) {
+  const li = document.createElement('li');
+  if (!item) {
+    const empty = document.createElement('span');
+    empty.className = 'card is-empty';
+    li.append(empty);
+    return li;
+  }
+  const info = ITEM_INFO[item];
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'card';
+  if (fresh[PLAYER].has(i)) markNew(btn);
+  btn.dataset.index = String(i);
+  btn.dataset.item = item;
+  btn.disabled = true;
+
+  const icon = document.createElement('span');
+  icon.className = 'card-icon';
+  icon.append(svgUse('', info.icon));
+  const text = document.createElement('span');
+  text.className = 'card-text';
+  const name = document.createElement('span');
+  name.className = 'card-name';
+  name.textContent = info.name;
+  const tag = document.createElement('span');
+  tag.className = 'card-tag';
+  tag.textContent = info.tag;
+  text.append(name, tag);
+  btn.append(icon, text);
+  li.append(btn);
+  return li;
 }
 
 // 엔진의 사용 불가 조건과 같은 규칙 (SAW의 수갑 충돌만 공개 정보 한계로 조금 더 엄격) → 쓸 수 없으면 사유 문자열
@@ -2205,16 +2304,16 @@ function drawTimer() {
   // 게이지는 1초 linear 트랜지션이라 '다음 초' 값을 넣어야 실제 시간과 맞는다
   el.timer.style.setProperty('--p', String(Math.max(0, sec - 1) / (TURN_MS / 1000)));
   el.timer.classList.toggle('is-urgent', sec <= URGENT_MS / 1000);
-  el.timer.setAttribute('aria-valuenow', String(sec));
-  el.timerText.textContent = String(sec);
+  setAttr(el.timer, 'aria-valuenow', String(sec));
+  setText(el.timerText, String(sec));
 }
 
-function idleTimer() { // 딜러 턴·대기 중: 꽉 찬 게이지, 숫자 없음
+function idleTimer() { // 딜러 턴·대기 중: 꽉 찬 게이지, 숫자 없음 (연출마다 여러 번 불리므로 같은 값은 다시 쓰지 않는다)
   timer.shown = -1;
-  el.timer.style.setProperty('--p', '1');
+  el.timer.style.setProperty('--p', '1'); // 인라인 스타일은 값이 같으면 엔진이 무시한다
   el.timer.classList.remove('is-urgent');
-  el.timer.setAttribute('aria-valuenow', String(TURN_MS / 1000));
-  el.timerText.textContent = '—';
+  setAttr(el.timer, 'aria-valuenow', String(TURN_MS / 1000));
+  setText(el.timerText, '—');
 }
 
 // ───────── 게임 룰 & 아이템 도감 ─────────
@@ -2287,13 +2386,14 @@ wireTabs(el.tabs);
 wireTabs(el.storeTabs);
 wireTabs(el.profileTabs, (which) => { if (which === 'board') renderBoard(); }); // 순위표 탭을 열 때마다 실시간 순위를 다시 계산
 
-// 프로필 · 티어 · 순위표 (좌상단 미니 카드 → 프로필 & 랭킹 모달)
-syncPlayerCard();
+// 프로필 · 티어 · 순위표 (좌상단 미니 카드 → 프로필 & 랭킹 모달) + 로그인한 닉네임 (session.js 구독 — 로그인 · 닉네임 변경 · 로그아웃마다 바로 반영)
+syncFromSession();
+userSession.subscribe(syncFromSession);
 el.playerCard.addEventListener('click', () => openProfile());
 el.btnProfileClose.addEventListener('click', closeProfile);
 el.profile.addEventListener('click', (ev) => { if (ev.target === el.profile) closeProfile(); }); // 바깥 어두운 곳
 el.nickForm.addEventListener('submit', onNickSubmit);
-el.nickInput.addEventListener('input', () => nickMessage('')); // 다시 입력하면 이전 안내는 지운다
+attachNicknameFilter(el.nickInput, () => nickMessage('')); // 공백은 입력하는 즉시 지우고, 다시 입력하면 이전 안내는 지운다
 el.pfTitleList.addEventListener('click', onTitleClick);
 
 // 상점 · 보상 · 탄피 (장착 중인 스킨과 보유 탄피를 화면에 반영하고 시작)
@@ -2351,6 +2451,7 @@ const isTextField = (node) => node instanceof HTMLTextAreaElement || (node insta
 document.addEventListener('keydown', (ev) => {
   if (ev.repeat || ev.altKey || ev.ctrlKey || ev.metaKey) return;
   if (isTextField(ev.target)) return;
+  if (el.login?.open || el.account?.open) return; // 로그인 화면 · 계정 창 위로 도감 · 음소거 단축키가 끼어들지 않게
   if (ev.key === '?') {
     ev.preventDefault();
     if (adBusy) return; // 광고·결제 화면 위로 도감이 뜨지 않게

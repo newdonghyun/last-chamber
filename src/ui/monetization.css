@@ -157,7 +157,7 @@
   scrollbar-width: none;
 }
 .mz-dialog::-webkit-scrollbar { display: none; }
-.mz-dialog::backdrop { background: rgba(0, 0, 0, .78); backdrop-filter: blur(3px); }
+.mz-dialog::backdrop { background: rgba(0, 0, 0, .86); } /* backdrop-filter(블러) 없음 — 모바일 WebView 깜빡임 방지 (대신 조금 더 어둡게) */
 .mz-dialog[open] .mz-card { animation: mz-rise .28s ease-out; }
 .mz-card {
   position: relative;

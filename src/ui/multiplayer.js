@@ -21,9 +21,15 @@
  * ── 서버 주소 ──  window.LAST_CHAMBER_SERVER (앱/토스 웹뷰처럼 다른 출처에서 쓸 때, 서버 CORS_ORIGIN 도 필요)
  *               → 없으면 페이지를 서빙한 서버(location.origin) → file:// 같은 비 http 에서는 http://localhost:3000.
  *   Socket.io 클라이언트는 서버가 주는 /socket.io/socket.io.js 를 처음 필요할 때 불러온다 → 서버가 꺼져 있어도 AI 딜러 대전은 영향이 없다.
+ *
+ * ── 로그인 (src/ui/session.js) ──
+ *   소켓을 열 때 handshake auth 로 { userId, nickname } 을 보낸다 → 서버가 이 소켓을 그 유저로 기록하고, 상대에게 보이는 닉네임도 이 값으로 맞춘다
+ *   (auth 는 함수라서 pvpSession 의 자동 재연결 때도 최신 닉네임이 다시 간다). 연결 직후 hello 로 서버에 기록된 내 대전 전적을 받아 로비에 보여 준다
+ *   (예전 서버라 hello 가 없으면 조용히 생략). 로그인 전에는 로비를 열지 않고 로그인 화면을 부른다(window 'lastchamber:need-login').
  */
 
 import { PlayerProfile, getTitle } from './storeData.js';
+import { userSession } from './session.js';
 
 const START_BUTTON_ID = 'btn-start';
 const DEFAULT_SERVER = 'http://localhost:3000';
@@ -57,6 +63,7 @@ const ERROR_TEXT = Object.freeze({
   INVALID_TIER: '알 수 없는 테이블입니다.',
   SERVER_BUSY: '서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.',
   SERVER_ERROR: '서버 오류가 발생했습니다.',
+  INVALID_NICKNAME: '닉네임이 규칙에 맞지 않습니다. 타이틀 우상단 계정 메뉴에서 바꿔 주세요.',
 });
 
 const fmt = (n) => Number(n).toLocaleString('ko-KR');
@@ -74,6 +81,7 @@ let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보�
 let tickTimer = 0;
 let tickFrom = 0;
 let copyTimer = 0;
+let serverRecord = null; // 서버에 기록된 내 대전 전적 { wins, losses } — hello 응답 (이번 방문 동안 기억)
 
 // ───────── 화면 (모달을 직접 만든다) ─────────
 
@@ -90,6 +98,7 @@ dialog.innerHTML = `
       </div>
       <button class="mp-close" type="button" data-act="close" aria-label="닫기">&#10005;</button>
     </header>
+    <p class="mp-me"><span class="mp-me-label">PLAYER</span><b data-ui="me-name"></b><small data-ui="me-record"></small></p>
     <p class="mp-wallet"><span>보유 탄피</span><b data-ui="brass">0</b></p>
 
     <div class="mp-view" data-ui="menu">
@@ -156,6 +165,8 @@ const q = (name) => dialog.querySelector(`[data-ui="${name}"]`);
 const ui = {
   eyebrow: q('eyebrow'),
   title: q('title'),
+  meName: q('me-name'),
+  meRecord: q('me-record'),
   brass: q('brass'),
   menu: q('menu'),
   room: q('room'),
@@ -182,6 +193,14 @@ const ui = {
 function say(text, tone = 'info') {
   ui.status.textContent = text;
   ui.status.dataset.tone = tone;
+}
+
+/** 로비 맨 위: 로그인한 닉네임 + 서버에 기록된 대전 전적 (hello 응답 전에는 안내 문구) */
+function paintMe() {
+  ui.meName.textContent = userSession.user?.nickname ?? profile.nickname;
+  ui.meRecord.textContent = serverRecord
+    ? `서버 대전 전적 ${fmt(serverRecord.wins)}승 ${fmt(serverRecord.losses)}패`
+    : '대전 서버에 연결되면 서버 전적이 표시돼요';
 }
 
 /** 요청 중이거나 탄피가 모자란 버튼을 잠근다 (AI 딜러 · 닫기는 언제나 열어 둔다 — 빠져나갈 길) */
@@ -229,6 +248,7 @@ function resetUi() {
   ui.codeInput.value = '';
   ui.copyLabel.textContent = '코드 복사';
   ui.copyBtn.classList.remove('is-done');
+  paintMe();
   toMenu();
 }
 
@@ -284,10 +304,30 @@ function loadSocketIoClient(base) {
   return clientLoading;
 }
 
+/** handshake auth · hello 로 보내는 내 신원 — 로그인 전이면 빈 객체 (서버는 예전처럼 익명 소켓으로 받는다) */
+function identity() {
+  const user = userSession.user;
+  return user ? { userId: user.id, nickname: user.nickname } : {};
+}
+
+/** 서버에 기록된 내 대전 전적을 받아 로비에 보여 준다. 응답이 없거나(예전 서버) 실패해도 대전에는 영향이 없다 */
+function sayHello(s) {
+  const who = identity();
+  if (!who.userId) return;
+  s.timeout(ACK_TIMEOUT_MS).emit('hello', who, (err, res) => {
+    const wins = res?.user?.wins;
+    const losses = res?.user?.losses;
+    if (err || !res?.ok || !Number.isFinite(wins) || !Number.isFinite(losses)) return;
+    serverRecord = { wins, losses };
+    paintMe();
+  });
+}
+
 /** 소켓을 열고 첫 connect 까지 기다린다. 첫 시도가 실패하면 재시도 없이 접는다 (CONNECT_FAILED) */
 function openSocket(io, mine) {
   return new Promise((resolve, reject) => {
-    const s = io(serverUrl(), { forceNew: true, timeout: CONNECT_TIMEOUT_MS });
+    // auth 를 함수로 주면 (재)연결할 때마다 다시 읽는다 → 매칭 뒤 pvpSession 이 자동 재연결해도 지금 닉네임으로 다시 인증된다
+    const s = io(serverUrl(), { forceNew: true, timeout: CONNECT_TIMEOUT_MS, auth: (cb) => cb(identity()) });
     const onFail = () => {
       s.off('connect', onOk);
       s.disconnect();
@@ -322,6 +362,7 @@ async function ensureSocket() {
   s.on('match_found', onMatchFound);
   s.on('room_closed', onRoomClosed);
   s.on('disconnect', onDisconnect);
+  sayHello(s); // 기다리지 않는다 — 방 만들기 · 매칭 요청은 바로 이어서 보낸다
   return s;
 }
 
@@ -355,12 +396,15 @@ function request(event, payload) {
   });
 }
 
-/** 서버에 보내는 내 프로필 (서버가 같은 모양으로 다시 걸러 낸다 — cleanProfile). 코스메틱은 지금 화면에 적용되는 조합이다 */
+/**
+ * 서버에 보내는 내 프로필 (서버가 같은 모양으로 다시 걸러 낸다 — cleanProfile). 코스메틱은 지금 화면에 적용되는 조합이다.
+ * 닉네임은 로그인한 닉네임 — 서버도 handshake auth 로 인증한 닉네임으로 덮어쓰므로, 상대 화면의 이름표와 서버 기록이 같은 이름이 된다.
+ */
 function buildProfile() {
   profile.reload();
   const loadout = profile.activeLoadout();
   return {
-    nickname: profile.nickname,
+    nickname: userSession.user?.nickname ?? profile.nickname,
     mmr: profile.mmr,
     tier: profile.tier.id,
     title: getTitle(profile.equippedTitle)?.name,
@@ -570,7 +614,22 @@ document.addEventListener('click', (e) => {
   if (!btn) return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  if (!userSession.isLoggedIn) { // 로그인 전에는 로비 · 매칭으로 가지 않는다 (보통은 시작 화면이 이미 가리고 있다)
+    window.dispatchEvent(new CustomEvent('lastchamber:need-login'));
+    return;
+  }
   if (dialog.open) return;
   resetUi();
   dialog.showModal();
 }, true);
+
+// 로그인 · 닉네임 변경 · 로그아웃: 로비의 내 이름을 바로 고치고, 연결 중이면 서버에도 새 닉네임을 알린다. 로그아웃이면 로비를 닫는다(소켓도 정리)
+userSession.subscribe((user) => {
+  if (!user) {
+    serverRecord = null;
+    closeDialog();
+  } else if (sock?.connected) {
+    sayHello(sock);
+  }
+  paintMe();
+});

@@ -8,15 +8,19 @@
   <meta name="description" content="지하 카지노 느와르 러시안 룰렛 · LAST CHAMBER" />
   <!-- 서버 주소 자동 설정 (window.LAST_CHAMBER_SERVER): 웹 = 현재 도메인 · Capacitor 앱/토스 웹뷰 = 클라우드 서버 — 모듈 스크립트(multiplayer.js 등)보다 먼저 실행돼야 해서 일반 스크립트로 맨 위에 둔다 -->
   <script src="./src/platform/serverConfig.js"></script>
+  <!-- 로그인 여부를 첫 화면을 그리기 전에 판단 (html.needs-login) → 로그인 화면 · 타이틀이 깜빡이며 바뀌지 않게. 판단은 src/ui/loginGate.js 가 넘겨받는다 -->
+  <script src="./src/ui/sessionBoot.js"></script>
   <title>LAST CHAMBER</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23c9a35b'/%3E%3Ccircle cx='16' cy='16' r='12.5' fill='%2316181d'/%3E%3Cg fill='%23050506'%3E%3Ccircle cx='16' cy='8' r='3.2'/%3E%3Ccircle cx='22.9' cy='12' r='3.2'/%3E%3Ccircle cx='22.9' cy='20' r='3.2'/%3E%3Ccircle cx='16' cy='24' r='3.2'/%3E%3Ccircle cx='9.1' cy='20' r='3.2'/%3E%3Ccircle cx='9.1' cy='12' r='3.2'/%3E%3C/g%3E%3Ccircle cx='16' cy='8' r='2.4' fill='%23d92626'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="./style.css" />
   <link rel="stylesheet" href="./src/ui/monetization.css" /> <!-- 유료 상품 2종(VIP 광고 스킵 패스 · 스타터 팩) 전용 스타일 -->
   <link rel="stylesheet" href="./src/ui/multiplayer.css" /> <!-- 대전 모드 선택 & 매칭 로비 모달 전용 스타일 (4-2단계) -->
+  <link rel="stylesheet" href="./src/ui/loginGate.css" /> <!-- 시작 화면 로그인(닉네임) · 계정 창 · 타이틀 우상단 계정 버튼 -->
 </head>
 <body>
   <!--
     LAST CHAMBER 화면 (요소·상태 클래스 목록은 style.css 맨 위 'JS 연결 계약')
+    · 시작 화면 로그인(#login-modal: 닉네임 2~10자 · 공백 없이 → 유저 ID(UUID)와 함께 이 기기에 저장, 다음부터 자동 로그인) → 타이틀. 타이틀 우상단 계정 버튼(#btn-account) → #account-modal 닉네임 변경 · 로그아웃
     · 타이틀(#start-modal, 경기가 끝나면 결과 화면으로 재사용) → 게임 시작 / 프로필 & 랭킹(#profile-modal, 좌상단 미니 카드) / 상점 & 무기고(#store-modal: 총기 · 테이블 · 암시장 상자 & 이펙트 · 도발 액션 4탭) / 룰 & 도감(#rules-modal)
     · 인게임: 상단 딜러 · 중앙 테이블 · 하단 플레이어 (100dvh 안에 스크롤 없이). 장착한 도발이 있으면 테이블 우상단 구석에 작은 도발 버튼(#btn-taunt), 쓰면 테이블 중앙에 #taunt-fx 연출
     · 총기·테이블 색은 style.css :root 의 CSS 변수 → 상점에서 스킨을 장착하면 src/ui/storeData.js 의 값으로 바뀐다
@@ -50,6 +54,7 @@
     <symbol id="r-guillotine" viewBox="0 0 24 24"><path d="M5 21.5V2.5M19 21.5V2.5"/><path d="M5 4h14"/><path d="M5.5 7.2 18.5 10.4v1.8H5.5z" fill="currentColor" fill-opacity=".3"/><path d="M2.5 21.5h19"/><circle cx="12" cy="17.2" r="2.3"/></symbol>
     <symbol id="r-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.6"/><path d="M12 13.5V9.4"/><path d="M9.8 2.5h4.4M12 2.5V6"/><path d="m18.3 6.7 1.5-1.5"/></symbol>
     <symbol id="i-rotate" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.5 18.5h3"/><path d="M2.5 12a9.5 9.5 0 0 1 3-6.9M3.8 3.6l1.7 1.5-1.4 1.8"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="4"/><path d="M4.2 20.6c.6-4.2 3.8-6.8 7.8-6.8s7.2 2.6 7.8 6.8"/></symbol>
   </svg>
 
   <!-- 분위기: 전등 빛기둥 · 담배 연기 · 비네팅 (필름 그레인은 맨 위 .grain) -->
@@ -374,7 +379,7 @@
   <!-- ───────── 타이틀 화면 ───────── -->
   <dialog class="title-screen" id="start-modal" open aria-labelledby="title-heading">
     <div class="title-inner">
-      <!-- 상단 HUD: 내 티어 · 닉네임 · 승률 미니 카드(좌, 누르면 프로필 & 랭킹) / 보유 탄피(BRASS) · 연승(우) -->
+      <!-- 상단 HUD: 내 티어 · 닉네임 · 승률 미니 카드(좌, 누르면 프로필 & 랭킹) / 보유 탄피(BRASS) · 연승 + 계정 버튼(우, 닉네임 변경 · 로그아웃) -->
       <div class="title-hud">
         <button class="player-card" id="player-card" type="button" aria-haspopup="dialog" aria-controls="profile-modal" aria-label="프로필 & 랭킹 열기">
           <span class="tier-badge" id="pc-badge" aria-hidden="true"><b>I</b></span>
@@ -383,10 +388,15 @@
             <span class="pc-line"><b id="pc-name">방랑자</b><i aria-hidden="true">·</i><em id="pc-rate">승률 0.0%</em></span>
           </span>
         </button>
-        <div class="wallet" id="wallet" role="img" aria-label="보유 탄피">
-          <svg class="wallet-icon" aria-hidden="true"><use href="#i-brass"></use></svg>
-          <span class="wallet-text"><small>BRASS</small><b id="wallet-amount">0</b></span>
-          <span class="wallet-streak" id="wallet-streak" hidden></span>
+        <div class="hud-right">
+          <div class="wallet" id="wallet" role="img" aria-label="보유 탄피">
+            <svg class="wallet-icon" aria-hidden="true"><use href="#i-brass"></use></svg>
+            <span class="wallet-text"><small>BRASS</small><b id="wallet-amount">0</b></span>
+            <span class="wallet-streak" id="wallet-streak" hidden></span>
+          </div>
+          <button class="icon-btn account-btn" id="btn-account" type="button" aria-haspopup="dialog" aria-controls="account-modal" aria-label="계정 — 닉네임 변경 · 로그아웃" title="계정">
+            <svg aria-hidden="true"><use href="#i-user"></use></svg>
+          </button>
         </div>
       </div>
 
@@ -717,10 +727,10 @@
         <form class="nick-form" id="nick-form" autocomplete="off">
           <label for="nick-input">닉네임</label>
           <div class="nick-row">
-            <input id="nick-input" name="nickname" type="text" maxlength="12" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="nick-msg" />
+            <input id="nick-input" name="nickname" type="text" maxlength="10" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="done" aria-describedby="nick-msg" />
             <button class="sk-btn sk-equip" type="submit">저장</button>
           </div>
-          <p class="nick-msg" id="nick-msg" role="status" aria-live="polite">1~12자 · 글자, 숫자, 공백, ( _ . - · )</p>
+          <p class="nick-msg" id="nick-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
         </form>
 
         <dl class="pf-stats" id="pf-stats"></dl>
@@ -740,6 +750,69 @@
     </div>
   </dialog>
 
+  <!-- ───────── 시작 화면: 간편 로그인(닉네임 설정) — 앱을 켜면 가장 먼저 뜬다 (src/ui/loginGate.js · loginGate.css) ─────────
+       로그인 기록이 없으면 sessionBoot.js 가 첫 화면 전에 html.needs-login 을 붙여 CSS 가 이 화면부터 보여 준다.
+       method="dialog": 스크립트가 붙기 전(아주 짧은 순간)에 제출해도 페이지가 새로고침되지 않는다 — 열린 dialog 가 아니면 아무 일도 하지 않음 -->
+  <dialog class="login-gate" id="login-modal" aria-labelledby="login-title" aria-describedby="login-lead">
+    <div class="login-card">
+      <div class="title-logo">
+        <p class="title-kicker">UNDERGROUND · NOIR · ROULETTE</p>
+        <h1 class="title-heading" id="login-title">LAST<span>CHAMBER</span></h1>
+        <p class="title-sub" id="login-lead">테이블에 앉기 전, 이름을 남겨라</p>
+      </div>
+      <form class="login-form" id="login-form" method="dialog" autocomplete="off" novalidate>
+        <label class="login-label" for="login-nick">NICKNAME · 닉네임 <span class="login-count" id="login-count" aria-hidden="true">0/10</span></label>
+        <input class="login-input" id="login-nick" name="nickname" type="text" maxlength="10" inputmode="text" enterkeyhint="go"
+          spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="예: 방랑자" aria-describedby="login-msg" required />
+        <p class="login-msg" id="login-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
+        <button class="title-btn title-btn-play login-submit" id="login-submit" type="submit">
+          <span class="title-btn-main">시작하기</span><span class="title-btn-sub">START</span>
+        </button>
+      </form>
+      <p class="login-note">회원가입 없이 바로 플레이 · 닉네임과 유저 ID는 이 기기에 저장되어 다음 접속부터 자동으로 로그인됩니다</p>
+    </div>
+  </dialog>
+
+  <!-- ───────── 계정: 닉네임 변경 · 로그아웃 (타이틀 우상단 #btn-account) ───────── -->
+  <dialog class="acct-modal" id="account-modal" aria-labelledby="acct-title">
+    <div class="acct-card">
+      <header class="acct-head">
+        <div>
+          <p class="acct-kicker">LAST CHAMBER</p>
+          <h2 class="acct-title" id="acct-title">ACCOUNT</h2>
+        </div>
+        <button class="icon-btn acct-close" type="button" data-acct="close" aria-label="닫기">
+          <svg aria-hidden="true"><use href="#i-close"></use></svg>
+        </button>
+      </header>
+      <div class="acct-me">
+        <span class="acct-avatar" aria-hidden="true"><svg><use href="#i-user"></use></svg></span>
+        <div class="acct-who">
+          <b id="acct-name">방랑자</b>
+          <small>유저 ID · <code id="acct-uid">--------</code></small>
+        </div>
+      </div>
+      <form class="nick-form acct-form" id="acct-form" method="dialog" autocomplete="off" novalidate>
+        <label for="acct-nick">닉네임 변경 <span class="acct-count" id="acct-count" aria-hidden="true">0/10</span></label>
+        <div class="nick-row">
+          <input id="acct-nick" name="nickname" type="text" maxlength="10" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" enterkeyhint="done" aria-describedby="acct-msg" />
+          <button class="sk-btn sk-equip" type="submit">변경</button>
+        </div>
+        <p class="nick-msg" id="acct-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
+      </form>
+      <button class="acct-btn is-danger" id="acct-logout" type="button" data-acct="logout">로그아웃</button>
+      <div class="acct-confirm" id="acct-confirm" role="alertdialog" aria-labelledby="acct-confirm-text" hidden>
+        <p id="acct-confirm-text">로그아웃하면 다음에 닉네임을 다시 입력해야 해요. 탄피 · 스킨 · 전적은 이 기기에 그대로 남아요.</p>
+        <div class="acct-confirm-row">
+          <button class="acct-btn" type="button" data-acct="cancel-logout">취소</button>
+          <button class="acct-btn is-danger" type="button" data-acct="confirm-logout">로그아웃</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 로그인 화면 · 계정 창 — app.js 보다 먼저 실행돼 첫 화면의 로그인 판단을 넘겨받는다 -->
+  <script type="module" src="./src/ui/loginGate.js"></script>
   <script type="module" src="./src/ui/app.js"></script>
   <!-- 유료 상품 2종: 타이틀 화면 상품 버튼 · 결제 팝업 · 광고 INSTANT 훅 (app.js 와 독립 — 같은 platformBridge 싱글턴과 localStorage 프로필을 쓴다) -->
   <script type="module" src="./src/ui/monetization.js"></script>

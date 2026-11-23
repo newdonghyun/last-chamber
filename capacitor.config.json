@@ -1,5 +1,6 @@
 {
   "appId": "com.lastchamber.duel",
   "appName": "LAST CHAMBER",
-  "webDir": "www"
+  "webDir": "www",
+  "backgroundColor": "#050506"
 }

@@ -39,6 +39,10 @@
    · #btn-taunt          인게임 도발 버튼 (테이블 우상단, [hidden] 토글 · .is-cooling 쿨타임 · --tn-hi/--tn-main = 도발 색)
    · #taunt-fx           도발 연출 (.is-playing + .is-knock | .is-smoke | .is-flick · .from-me | .from-opponent · --tn-hi/--tn-main)
    · .sim-dialog         플랫폼 어댑터(src/platform/platformBridge.js)가 만드는 광고·결제 시뮬레이션 화면 (.sim-ad / .sim-pay)
+   · #zone-player .nameplate-name  .is-human + small.np-meta   인게임 내 이름표 = 로그인한 닉네임 + 'YOU' (app.js paintMe)
+   · 로그인 화면 #login-modal · 계정 창 #account-modal · html.needs-login · 타이틀 우상단 .hud-right(#wallet + #btn-account) → src/ui/loginGate.css
+   · 모바일 WebView 깜빡임 대책: 장식 레이어에 filter · mix-blend-mode · backdrop-filter 를 쓰지 않는다 · 자주 움직이는 요소는 will-change 로 레이어 고정 ·
+     터치 기기(@media (hover: none) and (pointer: coarse))는 맨 아래 '경량 렌더링' 블록이 상시 장식 애니메이션 · 계단식 깜빡임 · box-shadow 맥동을 끈다
    ========================================================================== */
 
 :root {
@@ -186,12 +190,16 @@ ul, ol { list-style: none; }
 }
 
 /* ── 분위기: 전등 빛기둥 · 연기 · 비네팅 · 그레인 ───────── */
+/* 모바일 WebView 깜빡임 대책: 화면 전체를 덮는 장식 레이어에는 filter · mix-blend-mode · backdrop-filter 를 쓰지 않고,
+   크기를 화면에 가깝게 줄였다 (큰 레이어가 계속 움직이면 GPU 타일이 모자라 화면 일부가 비었다 채워지며 번쩍인다).
+   터치 기기에서는 맨 아래 '터치 기기 경량 렌더링' 블록이 이 레이어들의 상시 애니메이션을 멈춘다. */
 .atmosphere {
   position: fixed;
   inset: 0;
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
+  contain: strict; /* 안쪽 변화가 바깥 레이아웃 · 페인트로 번지지 않게 (크기는 inset: 0 으로 정해진다) */
   background:
     radial-gradient(ellipse 46% 36% at 50% 47%, rgba(var(--spot-rgb), .1), transparent 70%),
     radial-gradient(ellipse 26% 16% at 50% -3%, rgba(var(--spot-rgb), .3), transparent 70%),
@@ -205,9 +213,9 @@ ul, ol { list-style: none; }
   width: 140vmin;
   height: 108%;
   translate: -50% 0;
-  background: conic-gradient(at 50% 0%, transparent 0deg 161deg, rgba(var(--spot-rgb), .07) 171deg, rgba(var(--spot-rgb), .1) 180deg, rgba(var(--spot-rgb), .07) 189deg, transparent 199deg 360deg);
-  filter: blur(10px);
-  animation: var(--lamp-anim); /* 기본 lamp-flicker 7s — 연구소 테마는 더 잦게 깜빡임 */
+  /* 가장자리를 filter: blur(10px) 대신 색 단계를 넓혀 부드럽게 — 화면 높이만 한 레이어에 블러를 걸고 불투명도를 바꾸면 WebView 가 매번 다시 흐리게 만들며 깜빡였다 */
+  background: conic-gradient(at 50% 0%, transparent 0deg 156deg, rgba(var(--spot-rgb), .025) 163deg, rgba(var(--spot-rgb), .065) 171deg, rgba(var(--spot-rgb), .1) 180deg, rgba(var(--spot-rgb), .065) 189deg, rgba(var(--spot-rgb), .025) 197deg, transparent 204deg 360deg);
+  animation: var(--lamp-anim); /* 기본 lamp-flicker 7s — 연구소 테마는 더 잦게 깜빡임 (터치 기기에서는 멈춘다) */
 }
 
 .smoke {
@@ -216,7 +224,7 @@ ul, ol { list-style: none; }
   height: 70vmax;
   border-radius: 50%;
   background: radial-gradient(closest-side, rgba(190, 192, 200, .12), rgba(190, 192, 200, .045) 50%, transparent 72%);
-  mix-blend-mode: screen;
+  /* mix-blend-mode: screen 제거 — 거의 검은 배경 위라 보통 합성과 차이가 없고, 움직이는 블렌드 레이어는 Android WebView 에서 검게 번쩍이는 원인이다 */
   animation: smoke-drift 48s ease-in-out infinite alternate;
   will-change: transform;
 }
@@ -258,12 +266,14 @@ ul, ol { list-style: none; }
 
 .grain {
   position: fixed;
-  inset: -50%;
+  inset: -10%; /* 예전 -50%(화면 4배 넓이의 레이어) → 120%. 아래 keyframes 의 최대 이동(크기의 7% = 화면의 8.4%)보다 여유가 있어 가장자리가 드러나지 않는다 */
   z-index: 120;
   pointer-events: none;
   opacity: .055;
   background-image: var(--noise-grain);
   animation: grain 1s steps(1) infinite;
+  will-change: transform; /* 처음부터 자기 레이어 — 점프할 때마다 다시 그리지 않고 옮기기만 한다 */
+  contain: strict;
 }
 @keyframes grain {
   0% { transform: translate(0, 0); }
@@ -480,6 +490,18 @@ ul, ol { list-style: none; }
   color: var(--brass);
   white-space: nowrap;
 }
+/* PvP: 상대 닉네임 + 티어 · MMR 이 길어도 '단두대' · '구속' 배지를 화면 밖으로 밀어내지 않게 — 이름 칸이 줄어들며 말줄임 (app.js paintFoe 가 is-human 을 붙인다) */
+.nameplate-name.is-human {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: .1em;
+  padding-block: .2em; /* overflow: hidden 이 글자 위아래를 깎지 않게 — 같은 만큼 음수 마진으로 줄 높이는 그대로 */
+  margin-block: -.2em;
+}
+.nameplate .badge { flex: none; }
+/* 내 이름표(하단): 로그인한 닉네임 + 작은 'YOU' (app.js paintMe) */
+.nameplate-name .np-meta { margin-left: .55em; font-size: .78em; font-weight: 600; letter-spacing: .2em; opacity: .7; white-space: nowrap; }
 .dealer-line {
   position: relative;
   min-width: 0;
@@ -665,8 +687,10 @@ ul, ol { list-style: none; }
 }
 
 /* ── 테이블: 마호가니 림 + 흑요석 상판 + 스포트라이트 ── */
+/* 줌 연출은 transform 만 쓴다 (예전에는 격발마다 테이블 전체에 filter: contrast · saturate 를 걸었다 풀었다 해서 — 큰 영역의 필터 레이어가
+   생겼다 사라지는 순간 — 모바일 WebView 화면이 한 번씩 번쩍였다. 조여 오는 느낌은 .table-surface::after 의 어둠이 맡는다) */
 .table,
-.gun-stage { transition: transform .4s cubic-bezier(.3, 0, .2, 1), filter .4s; }
+.gun-stage { transition: transform .4s cubic-bezier(.3, 0, .2, 1); }
 
 .table {
   position: relative;
@@ -731,6 +755,7 @@ ul, ol { list-style: none; }
   opacity: 0;
   transition: opacity .4s;
   pointer-events: none;
+  will-change: opacity; /* 격발마다 켜졌다 꺼진다 — 레이어를 미리 만들어 둬서 그때마다 생겼다 사라지며 깜빡이지 않게 */
 }
 
 /* 테이블 위 HUD: 탄 랙 + 턴 미터 */
@@ -797,6 +822,7 @@ ul, ol { list-style: none; }
   background: linear-gradient(90deg, #a5601a, var(--amber), var(--amber-hi));
   box-shadow: 0 0 10px rgba(255, 181, 71, .9);
   transition: transform 1s linear;
+  will-change: transform; /* 1초마다 줄어드는 게이지 — 매초 레이어가 생겼다 풀렸다 하며 깜빡이지 않게 고정 */
 }
 .timer.is-urgent .timer-fill {
   background: linear-gradient(90deg, #7c0f12, var(--blood), var(--blood-hi));
@@ -833,6 +859,7 @@ ul, ol { list-style: none; }
   height: 100%;
   transform: rotate(-14deg);
   transition: transform .62s cubic-bezier(.3, 1.25, .45, 1); /* 묵직하게 돌다 살짝 넘어갔다 멈춤 */
+  will-change: transform; /* 격발마다 돈다 — 바깥 .gun 의 drop-shadow 가 회전이 끝날 때마다 다른 방식으로 다시 그려지며 깜빡이지 않게 레이어 고정 */
 }
 .gun-rot svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .gun.aim-up .gun-rot { transform: rotate(-90deg); }
@@ -1290,6 +1317,7 @@ button.card:disabled::after { /* 사용 불가 빗금 */
 }
 .trigger-amber .trigger-label { text-shadow: 0 1px 0 rgba(255, 255, 255, .35), 0 -1px 0 rgba(0, 0, 0, .3); }
 .trigger-sub { font: 700 var(--fs-xxs)/1 var(--font-tech); letter-spacing: .24em; opacity: .72; white-space: nowrap; }
+.trigger-sub.is-long { letter-spacing: .12em; } /* PvP 의 'FIRE · OPPONENT' 는 'FIRE · DEALER' 보다 길어서, 자간을 좁혀 버튼 안에 넣는다 (app.js paintFoe 가 붙인다) */
 @media (hover: hover) {
   .trigger:hover:not(:disabled) { filter: brightness(1.1); }
   .trigger:hover:not(:disabled)::after { transform: translateX(120%); }
@@ -1525,9 +1553,7 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
   border: 0;
   color: var(--ink);
-  background: rgba(3, 3, 4, .84);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  background: rgba(3, 3, 4, .93); /* backdrop-filter(블러) 대신 더 짙은 배경 — 뒤에서 계속 움직이는 게임 화면을 매 프레임 다시 흐리게 만들면 모바일 WebView 가 깜빡인다 */
 }
 .codex[open] { display: grid; place-items: center; }
 .codex::backdrop { background: transparent; }
@@ -2182,9 +2208,7 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   border: 0;
   overflow: hidden;
   color: var(--ink);
-  background: radial-gradient(ellipse 60% 50% at 50% 45%, rgba(54, 42, 22, .55), transparent 72%), rgba(2, 2, 3, .95);
-  -webkit-backdrop-filter: blur(5px);
-  backdrop-filter: blur(5px);
+  background: radial-gradient(ellipse 60% 50% at 50% 45%, rgba(54, 42, 22, .55), transparent 72%), rgba(2, 2, 3, .96); /* backdrop-filter 없음 (깜빡임 방지) */
 }
 .sim-dialog[open] { display: grid; place-items: center; animation: sim-in .25s ease-out both; }
 .sim-dialog::backdrop { background: transparent; }
@@ -2303,6 +2327,8 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   pointer-events: none;
   background: radial-gradient(ellipse 72% 66% at 50% 50%, transparent 38%, rgba(217, 38, 38, .32) 68%, rgba(217, 38, 38, .85) 100%);
   box-shadow: inset 0 0 90px 24px rgba(217, 38, 38, .55);
+  will-change: opacity; /* 실탄마다 번쩍인다 — 그 순간에 화면 크기 레이어를 새로 만들며 프레임이 밀리지 않게 미리 만들어 둔다 */
+  contain: strict;
 }
 .flash-red { animation: flash-red calc(.7s * var(--slow, 1)) ease-out both; }
 @keyframes flash-red { /* 처음엔 확 번쩍하고 빨리 걷힌다 (슬로모션에서 늘어나도 화면이 붉게 오래 남지 않게) */
@@ -2313,22 +2339,35 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   100% { opacity: 0; }
 }
 
-/* 격발 직전 0.4초: 테이블이 다가오고 중앙이 더 당겨짐 (#table) */
-.table.zoom-tension { transform: scale(1.02); filter: contrast(1.08) saturate(.9); }
+/* 격발 직전 0.4초: 테이블이 다가오고 중앙이 더 당겨짐 (#table) — transform 만 (필터 없음: 위 '테이블' 주석) */
+.table.zoom-tension { transform: scale(1.02); }
 .table.zoom-tension .gun-stage { transform: scale(1.08); }
 .table.zoom-tension .table-surface::after { opacity: 1; }
 
-/* 실탄 격발 순간: 슬로모션(body.slowmo → --slow 배속) + 총구 쪽으로 확 당겨지는 클로즈업 + 번쩍 */
+/* 실탄 격발 순간: 슬로모션(body.slowmo → --slow 배속) + 총구 쪽으로 확 당겨지는 클로즈업 + 번쩍
+   번쩍임은 예전 filter: brightness(2.5) 애니메이션(총 SVG 전체 + 그림자 필터를 매 프레임 다시 계산) 대신
+   총 위에 얹은 빛 레이어의 불투명도만 바꾼다 — GPU 가 합성만 하므로 모바일에서도 프레임이 밀리지 않는다 */
 body.slowmo { --slow: 1.75; }
-.table.zoom-hit { transform: scale(1.05); filter: contrast(1.1); transition-duration: .12s, .12s; }
+.table.zoom-hit { transform: scale(1.05); transition-duration: .12s; }
 .table.zoom-hit .gun-stage {
   transform: scale(1.17);
-  transition-duration: .12s, .12s;
-  animation: hit-flash calc(.45s * var(--slow, 1)) ease-out both;
+  transition-duration: .12s;
 }
-@keyframes hit-flash {
-  0% { filter: brightness(2.5) contrast(1.2); }
-  100% { filter: none; }
+.gun-stage::after {
+  content: '';
+  position: absolute;
+  inset: 6%;
+  z-index: 1;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(closest-side, rgba(255, 246, 222, .62), rgba(255, 196, 120, .24) 52%, transparent 76%);
+  will-change: opacity;
+}
+.table.zoom-hit .gun-stage::after { animation: hit-glow calc(.45s * var(--slow, 1)) ease-out both; }
+@keyframes hit-glow {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 /* 위기 비네팅 (#crisis): 마지막 1발이면 가장자리가 어두워지고, 내 체력이 1이면 심장박동처럼 붉게 맥동 */
@@ -2340,6 +2379,8 @@ body.slowmo { --slow: 1.75; }
   pointer-events: none;
   background: radial-gradient(ellipse 80% 72% at 50% 48%, transparent 44%, rgba(0, 0, 0, .5) 80%, rgba(0, 0, 0, .9) 100%);
   transition: opacity 1.4s ease;
+  will-change: opacity; /* 화면 전체 레이어 — 위기 상태가 바뀔 때마다 생겼다 사라지지 않게 미리 만들어 둔다 */
+  contain: strict;
 }
 .crisis::after {
   content: '';
@@ -2347,6 +2388,7 @@ body.slowmo { --slow: 1.75; }
   inset: 0;
   opacity: 0;
   background: radial-gradient(ellipse 82% 74% at 50% 48%, transparent 50%, rgba(170, 12, 16, .5) 86%, rgba(120, 0, 8, .88) 100%);
+  will-change: opacity;
 }
 .crisis.is-tense { opacity: .7; }
 .crisis.is-danger { opacity: 1; }
@@ -2627,6 +2669,54 @@ body.slowmo { --slow: 1.75; }
   100% { opacity: 0; translate: 106px 34px; rotate: 1300deg; }
 }
 
+/* ── 터치 기기(휴대폰 · 태블릿 · 앱 WebView) 경량 렌더링 ──────────────
+   Android WebView 깜빡임의 주 원인 정리:
+   ① 화면보다 큰 장식 레이어(연기 3장 · 그레인)가 쉬지 않고 움직이면 GPU 타일 메모리가 모자라 화면 일부가 비었다 채워지며 번쩍인다
+      → 장식 레이어는 그대로 보이되 멈춘다 (한 번 그려 두고 재사용).
+   ② steps() 로 한 번에 어두워졌다 밝아지는 전등 · 형광등(연구소 테마) · 네온 점멸은 휴대폰 화면에서는 그 자체가 '화면 깜빡임'으로 보인다 → 끈다.
+   ③ box-shadow 맥동 애니메이션은 매 프레임 다시 그리기(120Hz 화면이면 초당 120번) → 멈추거나, GPU 합성만 하는 광택 이동으로 바꾼다.
+   ④ 흔들림 · 줌 · 표시/숨김이 잦은 요소는 처음부터 자기 레이어(will-change)를 갖게 해 그때마다 레이어가 생겼다 사라지며 번쩍이지 않게 한다.
+   데스크톱(마우스)은 기존 연출을 그대로 쓴다. */
+@media (hover: none) and (pointer: coarse) {
+  /* ① 장식 레이어: 보이되 멈춘다 */
+  .smoke,
+  .light-cone,
+  .title-screen::before,
+  .title-screen::after { animation: none; }
+  .smoke { will-change: auto; } /* 멈춘 레이어는 따로 들고 있을 필요가 없다 (GPU 메모리 절약) */
+  .grain { inset: 0; animation: none; transform: translate3d(0, 0, 0); } /* 화면 크기 정지 레이어 한 장 */
+
+  /* ② 계단식 깜빡임 끄기 — 전등 · 형광등 · 네온 · 단두대 체력관 */
+  .title-art::before,
+  .table::after,
+  .pv-table::after,
+  .zone.is-guillotine .tube,
+  .zone.is-guillotine .cell.is-on { animation: none; }
+  .headline.is-visible { animation: none; } /* 네온 점멸 대신 transition 으로 부드럽게 켜진다 */
+  .headline.tone-volt.is-visible { animation: volt-jitter .9s steps(1) .3s both; } /* 변환기의 글자 지직거림(작은 흔들림)은 남긴다 */
+
+  /* ③ box-shadow 맥동 → 정지 (격발 버튼은 합성 전용 광택 이동으로 '장전됨'을 알린다) */
+  .title-btn-play,
+  .zone-player.is-active .trigger-danger:not(:disabled),
+  .chest-draw,
+  .pity.is-full .pity-pips i { animation: none; }
+  .zone-player.is-active .trigger-danger:not(:disabled)::after { animation: armed-sheen 2.4s ease-in-out infinite; }
+  .title-cylinder { filter: none; } /* 도는 실린더에 큰 그림자 필터 — 매 프레임 다시 흐리게 만든다 (어두운 배경이라 차이가 거의 없다) */
+  .fx-flash { box-shadow: none; } /* 붉은 섬광은 방사형 그라데이션만으로 (90px 안쪽 그림자는 래스터 비용이 크다) */
+
+  /* ④ 자주 움직이는 요소는 레이어 고정 (translate3d 강제 대신 will-change — 원래 transform 값 · 애니메이션과 충돌하지 않는다) */
+  .app,
+  .table { will-change: transform; } /* 실탄 흔들림(shake-hard) · 격발 줌 */
+  .headline { will-change: transform, opacity; }
+  .subtitle,
+  .reveal,
+  .loupe-popup { will-change: opacity; }
+}
+@keyframes armed-sheen { /* 금속 광택이 천천히 지나간다 — transform 만 움직여 GPU 가 합성만 한다 */
+  0%, 55% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+
 /* ── 모션 줄이기 설정 존중 ───────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .smoke,
@@ -2641,6 +2731,7 @@ body.slowmo { --slow: 1.75; }
   .title-btn-play,
   .zone.is-guillotine .tube,
   .zone-player.is-active .trigger-danger,
+  .zone-player.is-active .trigger-danger::after,
   .gun.shock,
   .card.is-shattered,
   .dslot.is-shattered,
@@ -2674,7 +2765,7 @@ body.slowmo { --slow: 1.75; }
   .table.zoom-tension .gun-stage,
   .table.zoom-hit,
   .table.zoom-hit .gun-stage { transform: none; }
-  .table.zoom-hit .gun-stage { animation: none; }
+  .table.zoom-hit .gun-stage::after { animation: none; }
   .crisis.is-danger::after { animation: none; opacity: .4; }
   .gun-rot,
   .gun-barrel-front { transition-duration: .01s; }

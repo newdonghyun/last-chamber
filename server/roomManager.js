@@ -5,10 +5,12 @@
  *   · 생성 / 입장 / 재접속 토큰(rejoin_room) / 나가기 / 연결 끊김
  *   · 방마다 GameEngine 하나 — 서버 권위. 좌석(P1 · P2)은 서버가 소켓에 붙이고, 각자에게는 자기 시점의 상태와 로그만 보낸다
  *   · 20초 턴 타이머(0초가 되면 서버가 대신 격발) · 15초 연결 끊김 부전승 · 친구를 기다리는 방의 10분 만료 · 끝난 판 결과 60초 보관
- *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile)
+ *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile) · 로그인한 소켓은 서버가 확인한 닉네임으로(profileOf)
+ *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패)을 기록한다 (server/userStore.js) — game_over 에 그 좌석의 record 로 알려 준다
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석, 등급별 대기열은 server/matchmaker.js.
  *
  *   socket.data 약속:  where = null | { kind: 'queue', tier }(matchmaker 가 씀) | { kind: 'room', code }(여기서 씀) · lastEmote = 마지막 이모트 시각(ms)
+ *                      user = null | { id, nickname } (server/index.js identifyUser 가 씀 — 로그인한 소켓)
  */
 
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -82,6 +84,16 @@ export function cleanProfile(raw) {
   };
 }
 
+/**
+ * 좌석에 앉힐 프로필: cleanProfile 로 거른 뒤, 로그인한 소켓(socket.data.user)이면 서버가 확인한 닉네임으로 덮어쓴다
+ * → 상대 화면의 이름표 · 서버 전적 기록이 같은 이름이 된다. 로그인하지 않은 예전 클라이언트는 예전처럼 보낸 닉네임(cleanProfile 규칙)을 쓴다.
+ */
+export function profileOf(socket, raw) {
+  const profile = cleanProfile(raw);
+  const nickname = socket?.data?.user?.nickname;
+  return nickname ? { ...profile, nickname } : profile;
+}
+
 const EMOTE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
 /** 이모트(도발) 페이로드: 키 4개 이하의 평면 객체, 값은 짧은 문자열 · 유한한 숫자 · 불리언 · null 만 */
 function validEmote(p) {
@@ -102,16 +114,18 @@ function validEmote(p) {
  *   cfg    createGameServer 가 만든 설정: turnMs · graceMs · roomTtlMs · resultTtlMs · maxRooms · emoteGapMs · onError
  *   log    quiet 을 지키는 로그 함수          guard  타이머 · 콜백의 예외가 프로세스를 죽이지 않게 감싸는 함수
  *   tiers  등급표 { free: { fee, prize }, ... } (matchmaker 의 QUEUE_TIERS) — 사설 방은 'free' 등급이다
+ *   users  유저 저장소 (server/userStore.js createUserStore) — 없으면 서버 전적을 기록하지 않는다
  * 이벤트 처리 함수는 (socket, payload) → ack 로 돌려줄 { ok, ... } 를 반환한다 (소켓 이벤트와의 연결은 server/index.js).
  */
-export function createRoomManager({ io, cfg, log, guard, tiers }) {
+export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) {
   const rooms = new Map(); // code → room { code, mode, tier, status: 'waiting'|'playing'|'over', seats, engine, sent, turnTimer, turnSeq, deadline, ttlTimer, result }
 
   // ── 좌석 · 소켓 ──
   const socketOf = (seat) => (seat.socketId ? io.sockets.sockets.get(seat.socketId) : undefined);
   const emitTo = (seat, event, payload) => { socketOf(seat)?.emit(event, payload); };
   const otherSeat = (room, seat) => room.seats.find((s) => s !== seat);
-  const makeSeat = (id, socket, profile) => ({ id, token: makeToken(), socketId: socket.id, profile, connected: true, graceTimer: null, graceUntil: 0 });
+  // userId: 앉을 때 로그인한 유저 (재접속으로 소켓이 바뀌어도 좌석의 주인은 그대로 — 판 결과는 이 유저에게 기록된다)
+  const makeSeat = (id, socket, profile) => ({ id, token: makeToken(), socketId: socket.id, userId: socket.data.user?.id ?? null, profile, connected: true, graceTimer: null, graceUntil: 0 });
   const attach = (socket, room) => { socket.data.where = { kind: 'room', code: room.code }; };
   const release = (socket, code) => { // 이 방에 묶여 있을 때만 풀어 준다
     const where = socket?.data.where;
@@ -212,7 +226,21 @@ export function createRoomManager({ io, cfg, log, guard, tiers }) {
     const won = room.result.winner === seat.id;
     const view = room.engine.getPublicState(seat.id);
     const players = Object.fromEntries(room.seats.map((s) => [s.id, { mmr: s.profile.mmr }])); // 입장 때 신고한 양쪽의 초기 MMR — 클라이언트가 Elo 정산에 쓴다
-    return { code: room.code, tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won ? prize : 0, score: { you: view.me.wins, opponent: view.opponent.wins }, players };
+    const record = seat.userId && users ? users.publicView(users.get(seat.userId)) : null; // 이 좌석 유저의 서버 전적 (로그인한 좌석만 — 상대 것은 보내지 않는다)
+    return {
+      code: room.code, tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won ? prize : 0,
+      score: { you: view.me.wins, opponent: view.opponent.wins }, players, ...(record ? { record } : {}),
+    };
+  }
+
+  /** 서버 전적 기록: 로그인한 좌석만. 같은 유저가 두 자리에 앉은 판(창 두 개로 혼자 둔 판)은 세지 않는다 — 전적 부풀리기 방지 */
+  function recordResults(room) {
+    if (!users) return;
+    const [a, b] = room.seats;
+    if (a.userId && a.userId === b.userId) return;
+    for (const seat of room.seats) {
+      if (seat.userId) users.recordResult(seat.userId, seat.id === room.result.winner);
+    }
   }
 
   function finishGame(room, winner, reason) {
@@ -220,6 +248,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers }) {
     room.status = 'over';
     clearRoomTimers(room);
     room.result = { winner: winner.id, reason };
+    recordResults(room); // game_over 보다 먼저 — 알림에 갱신된 전적이 실린다
     for (const seat of room.seats) {
       emitTo(seat, 'game_over', overPayload(room, seat));
       release(socketOf(seat), room.code); // 다시 대기열 · 방에 들어갈 수 있다
@@ -250,7 +279,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers }) {
     if (rooms.size >= cfg.maxRooms) return fail('SERVER_BUSY');
     const room = newRoom('private', 'free');
     if (!room) return fail('SERVER_BUSY');
-    room.seats.push(makeSeat('P1', socket, cleanProfile(payload?.profile ?? payload)));
+    room.seats.push(makeSeat('P1', socket, profileOf(socket, payload?.profile ?? payload)));
     room.ttlTimer = setTimeout(() => guard(() => expireRoom(room)), cfg.roomTtlMs);
     room.ttlTimer.unref?.();
     attach(socket, room);
@@ -272,7 +301,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers }) {
     const room = rooms.get(code);
     if (!room || room.mode !== 'private') return fail('ROOM_NOT_FOUND'); // 매칭으로 만든 방은 코드로 들어올 수 없다
     if (room.status !== 'waiting') return fail('ROOM_FULL');
-    room.seats.push(makeSeat('P2', socket, cleanProfile(raw.profile)));
+    room.seats.push(makeSeat('P2', socket, profileOf(socket, raw.profile)));
     attach(socket, room);
     startGame(room);
     return { ok: true, code };

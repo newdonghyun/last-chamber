@@ -8,6 +8,9 @@ www/
 .env
 .env.*
 
+# 서버 유저 기록 (닉네임 · 전적 · 유저 ID — server/userStore.js 가 만든다, 커밋 금지)
+server/data/
+
 # 로그 · OS 잡파일
 *.log
 npm-debug.log*

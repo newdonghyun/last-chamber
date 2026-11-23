@@ -1,7 +1,12 @@
 // 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 5초 안에 끝난다.
 //   Phase 1 (기본 서버, 클라이언트 2개): 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 무작위 매칭(pro) · 정적 파일
 //   Phase 2 (타이머를 줄인 서버): 20초 턴 타임아웃 강제 격발 · 연결 끊김 부전승 · 재접속 · 새 연결의 자리 인수
+//   Phase 3 (유저 기록 파일을 쓰는 서버): 로그인(handshake auth · hello) · 닉네임 규칙 · 서버가 확인한 닉네임으로 상대에게 표시 · 서버 전적 기록 · 파일 저장/복원
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
 
@@ -16,8 +21,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const onError = (err) => serverErrors.push(err);
 
 const allSockets = [];
-async function client(port) {
-  const socket = connect(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false, forceNew: true });
+async function client(port, auth) { // auth = { userId, nickname } 이면 로그인한 클라이언트 (handshake auth)
+  const socket = connect(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false, forceNew: true, ...(auth ? { auth } : {}) });
   const inbox = []; // 받은 이벤트를 전부 쌓아 둔다 → 이벤트가 리스너보다 먼저 도착해도 놓치지 않는다
   socket.onAny((event, payload) => inbox.push({ event, payload }));
   socket.on('connect_error', (err) => clientErrors.push(`connect_error: ${err.message}`));
@@ -237,9 +242,79 @@ async function phase2() {
   await server.stop();
 }
 
+async function phase3() {
+  const dir = mkdtempSync(join(tmpdir(), 'lastchamber-users-'));
+  const file = join(dir, 'users.json');
+  const server = createGameServer({ quiet: true, onError, userDataFile: file, userSaveDelayMs: 20 });
+  const port = await server.start(0, '127.0.0.1');
+  const idA = randomUUID();
+  const idB = randomUUID();
+  const meA = { userId: idA, nickname: '총잡이' };
+
+  // 14. 로그인: handshake auth 로 등록 · hello 로 서버 전적 · 규칙에 안 맞으면 거절 (연결은 끊지 않는다)
+  const A = await client(port, meA);
+  const B = await client(port, { userId: idB, nickname: 'Ace_7' });
+  eq(server.stats().users, 2, '14 handshake auth 로 유저 2명 등록');
+  eq(await A.call('hello', meA), { ok: true, user: { nickname: '총잡이', wins: 0, losses: 0, games: 0 } }, '14 hello → 서버에 기록된 내 전적');
+  eq((await A.call('hello', { userId: idA, nickname: '총 잡이' })).error, 'INVALID_NICKNAME', '14 공백이 든 닉네임은 거절');
+  eq((await A.call('hello', { userId: idA, nickname: '총' })).error, 'INVALID_NICKNAME', '14 1자 닉네임은 거절');
+  eq((await A.call('hello', { userId: idA, nickname: '열한글자짜리닉네임이요' })).error, 'INVALID_NICKNAME', '14 11자 닉네임은 거절');
+  eq((await A.call('hello', { userId: idA, nickname: 'ㅤㅤ' })).error, 'INVALID_NICKNAME', '14 보이지 않는 채움 문자 닉네임은 거절');
+  eq((await A.call('hello', { userId: 'not-a-uuid', nickname: '총잡이' })).error, 'BAD_REQUEST', '14 UUID 가 아닌 유저 ID 는 거절');
+  const C = await client(port, { userId: 'x', nickname: '익명' }); // 틀린 auth → 익명으로 연결
+  ok(C.socket.connected && server.stats().users === 2, '14 틀린 auth 는 익명 소켓으로 받고 기록하지 않는다');
+
+  // 15. 상대에게는 서버가 확인한 닉네임 (프로필로 다른 이름을 보내도) · 유저 ID 는 상대에게 가지 않는다 · 판이 끝나면 서버 전적 기록
+  const made = await A.call('create_private_room', { profile: { nickname: '가짜이름', mmr: 1200 } });
+  await B.call('join_private_room', { code: made.code, profile: { nickname: 'Ace_7', mmr: 1000 } });
+  const [mA, mB] = await Promise.all([A.waitFor('match_found'), B.waitFor('match_found')]);
+  eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname], ['총잡이', 'Ace_7'], '15 상대 이름표에는 로그인한 닉네임');
+  ok(![mA, mB].some((m) => JSON.stringify(m).includes(idA) || JSON.stringify(m).includes(idB)), '15 유저 ID 는 match_found 어디에도 실리지 않는다');
+  const [overA, overB] = [A.waitFor('game_over'), B.waitFor('game_over')];
+  await B.call('leave_room');
+  const [goA, goB] = await Promise.all([overA, overB]);
+  eq(goA.record, { nickname: '총잡이', wins: 1, losses: 0, games: 1 }, '15 승자 서버 전적 1승');
+  eq(goB.record, { nickname: 'Ace_7', wins: 0, losses: 1, games: 1 }, '15 패자 서버 전적 1패');
+
+  // 16. 익명 상대와의 판은 로그인한 쪽만 · 같은 유저끼리(창 두 개) 둔 판은 세지 않는다
+  const vsAnon = await A.call('create_private_room', { profile: {} });
+  await C.call('join_private_room', vsAnon.code);
+  await Promise.all([A.waitFor('match_found', (p) => p.code === vsAnon.code), C.waitFor('match_found')]);
+  const [overA2, overC] = [A.waitFor('game_over', (p) => p.code === vsAnon.code), C.waitFor('game_over')];
+  await C.call('leave_room');
+  const [goA2, goC] = await Promise.all([overA2, overC]);
+  eq([goA2.record?.wins, 'record' in goC], [2, false], '16 익명 상대 — 로그인한 쪽만 기록되고 익명에게는 record 가 없다');
+  const A2 = await client(port, meA);
+  const self = await A.call('create_private_room', { profile: {} });
+  await A2.call('join_private_room', self.code);
+  await A.waitFor('match_found', (p) => p.code === self.code);
+  const overSelf = A.waitFor('game_over', (p) => p.code === self.code);
+  await A2.call('leave_room');
+  eq((await overSelf).record, { nickname: '총잡이', wins: 2, losses: 0, games: 2 }, '16 같은 유저끼리 둔 판은 전적에 넣지 않는다');
+
+  // 17. 닉네임 변경 (hello) · 대기열 · 판 도중에는 다른 유저 ID 로 못 바꾼다
+  eq((await B.call('hello', { userId: idB, nickname: '에이스' })).user, { nickname: '에이스', wins: 0, losses: 1, games: 1 }, '17 hello 로 닉네임 변경 — 전적은 그대로');
+  await B.call('join_queue', { tier: 'free', profile: {} });
+  eq((await B.call('hello', { userId: randomUUID(), nickname: '다른사람' })).error, 'ALREADY_IN_ROOM', '17 대기 중에는 다른 유저 ID 로 바꿀 수 없다');
+  await B.call('leave_queue');
+
+  // 18. 저장 · 복원: 서버를 닫으면 파일에 쓰고, 다시 켜면 이어서 읽는다
+  await server.stop();
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  eq(saved.users.map((u) => [u.nickname, u.wins, u.losses]).sort(), [['에이스', 0, 1], ['총잡이', 2, 0]].sort(), '18 파일에 바뀐 닉네임 · 전적 저장');
+  const again = createGameServer({ quiet: true, onError, userDataFile: file });
+  const port2 = await again.start(0, '127.0.0.1');
+  const back = await client(port2, meA);
+  eq((await back.call('hello', meA)).user, { nickname: '총잡이', wins: 2, losses: 0, games: 2 }, '18 재시작 뒤에도 서버 전적 유지');
+  eq(again.stats().users, 2, '18 재시작 뒤 유저 수');
+  await again.stop();
+  rmSync(dir, { recursive: true, force: true });
+}
+
 try {
   await phase1();
   await phase2();
+  await phase3();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

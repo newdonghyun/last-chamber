@@ -5,7 +5,8 @@
  *     getPlatform()                              'web' | 'app' | 'toss'
  *     showRewardedAd(placementId)                → Promise<{ rewarded: boolean, reason?: string }>
  *     purchaseProduct(productId, priceKRW, meta) → Promise<{ success: boolean, reason?: string }>   (meta.title: 결제창에 보일 상품명)
- *     triggerHaptic('light' | 'medium' | 'heavy')   미지원 기기에서는 조용히 무시
+ *     triggerHaptic('shot' | 'hit' | 'win' | 'lose')     결정적인 순간에만 짧은 진동 1회 — 실탄 발사 / 피격 / 승리 확정 / 패배 확정 (→ true: 울림, false: 무시)
+ *                   ('medium' | 'heavy' 로 세기를 직접 지정할 수도 있다. 그 밖의 이름 · 300ms 쿨타임 안의 요청 · 미지원 기기는 조용히 무시)
  *
  *   실제 SDK가 연결되기 전(웹 · 개발 중)에는
  *     광고  = 1.5초짜리 '광고 시청 시뮬레이션' 오버레이 뒤에 { rewarded: true }
@@ -30,7 +31,21 @@
 
 export const PLATFORM = Object.freeze({ WEB: 'web', APP: 'app', TOSS: 'toss' });
 export const SIM_AD_MS = 1500; // 광고 시청 시뮬레이션 시간
-const HAPTIC_TYPES = ['light', 'medium', 'heavy'];
+// 진동은 결정적인 순간에만, 짧게 한 번씩 (연타 · 패턴 없음). 이벤트 → 세기 — 이벤트별 진동을 바꾸려면 이 표만 고치면 된다.
+//   shot  실탄 발사 (상대가 맞음)     ImpactStyle.Medium
+//   hit   피격 (내가 데미지를 입음)   ImpactStyle.Heavy
+//   win   게임 승리 확정              ImpactStyle.Medium
+//   lose  게임 패배 확정              ImpactStyle.Heavy
+// 일반 버튼 · 턴 전환 · 대기 · 아이템 · 장전 · 공포탄 · 상점 연출 같은 사소한 이벤트는 표에 없다 → 이름을 넘겨도 울리지 않는다
+// (예전 이름 'light' · 'item' · 'shot_blank' · 'shot_live' 도 마찬가지로 무시된다).
+const HAPTIC_EVENTS = Object.freeze({ shot: 'medium', hit: 'heavy', win: 'medium', lose: 'heavy', medium: 'medium', heavy: 'heavy' });
+/** 진동 쿨타임 — 이 간격 안에 다시 오는 진동 요청은 버린다 (같은 순간에 겹친 이벤트 · 중복 수신으로 두 번 울리지 않게) */
+export const HAPTIC_COOLDOWN_MS = 300;
+
+/** 요청한 이름 → 'medium' | 'heavy' | null(무시). 'toString' 같은 객체 속성 이름도 null */
+function hapticStrength(type) {
+  return Object.prototype.hasOwnProperty.call(HAPTIC_EVENTS, type) ? HAPTIC_EVENTS[type] : null;
+}
 
 // ───────── 1. 실행 환경 감지 ─────────
 
@@ -59,10 +74,12 @@ export function detectPlatform(env = globalThis) {
 
 // ───────── 2. 진동 ─────────
 
-const VIBRATE_PATTERN = { light: 12, medium: 30, heavy: [55, 35, 90] }; // navigator.vibrate (ms)
-const CAP_IMPACT = { light: 'LIGHT', medium: 'MEDIUM', heavy: 'HEAVY' }; // @capacitor/haptics ImpactStyle
+// navigator.vibrate (ms) — 패턴 없이 짧은 한 번
+const VIBRATE_PATTERN = { medium: 20, heavy: 35 };
+// @capacitor/haptics 의 ImpactStyle 값 (Medium = 'MEDIUM' · Heavy = 'HEAVY'). 번들러 없이는 패키지를 import 할 수 없어서 같은 문자열을 직접 쓴다.
+const CAP_IMPACT = { medium: 'MEDIUM', heavy: 'HEAVY' };
 // 앱인토스 generateHapticFeedback type — 실기기에서 강도를 느껴 보고 이 표만 조정하면 된다
-const TOSS_HAPTIC = { light: 'tickWeak', medium: 'tickMedium', heavy: 'basicMedium' };
+const TOSS_HAPTIC = { medium: 'tickMedium', heavy: 'basicMedium' };
 
 function webVibrate(env, type) {
   const nav = env.navigator;
@@ -209,7 +226,7 @@ function simulatePurchase(env, productId, priceKRW, meta) {
 
 /**
  * ① Capacitor 드라이버. 번들러 없이도 쓸 수 있도록 window.Capacitor.Plugins.* 에서 플러그인을 늦게 찾는다.
- *   - haptic : @capacitor/haptics (연결됨)
+ *   - haptic : @capacitor/haptics (연결됨) — 앱에서는 네이티브가 window.Capacitor.Plugins.Haptics 를 만들어 주므로 import 가 필요 없다 (cap sync 로 플러그인이 등록돼 있어야 한다)
  *   - 광고·결제는 아래 [HOOK]을 채우면 된다. 비워 두면 시뮬레이션으로 동작한다.
  */
 export function createCapacitorDriver(cap) {
@@ -342,11 +359,17 @@ export class PlatformBridge {
   #drivers = new Map();
   #busy = false; // 광고·결제 화면은 한 번에 하나만
   #noted = new Set();
+  #hapticCooldownMs;
+  #now;
+  #lastHapticAt = -Infinity;
 
-  constructor({ env = globalThis, platform = null, simulationMs = SIM_AD_MS } = {}) {
+  /** hapticCooldownMs · now(ms 시계)는 테스트용 — 기본은 300ms · performance.now() */
+  constructor({ env = globalThis, platform = null, simulationMs = SIM_AD_MS, hapticCooldownMs = HAPTIC_COOLDOWN_MS, now = null } = {}) {
     this.#env = env;
     this.#platform = platform ?? detectPlatform(env);
     this.#simMs = simulationMs;
+    this.#hapticCooldownMs = hapticCooldownMs;
+    this.#now = now ?? (() => (typeof env.performance?.now === 'function' ? env.performance.now() : Date.now()));
     if (this.#platform === PLATFORM.APP) this.#drivers.set(PLATFORM.APP, createCapacitorDriver(env.Capacitor));
   }
 
@@ -402,19 +425,36 @@ export class PlatformBridge {
     }
   }
 
-  /** 진동. 어떤 환경에서도 예외를 던지지 않고, 지원하지 않으면 아무 일도 하지 않는다. */
-  triggerHaptic(type = 'light') {
-    const kind = HAPTIC_TYPES.includes(type) ? type : 'light';
+  /**
+   * 진동 1회. 'shot'(실탄 발사) | 'hit'(피격) | 'win'(승리 확정) | 'lose'(패배 확정) 또는 'medium' | 'heavy'.
+   *   · 그 밖의 이름(사소한 이벤트)은 무시하고, 마지막 진동에서 HAPTIC_COOLDOWN_MS(300ms)가 지나기 전에 온 요청도 버린다.
+   *   · 어떤 환경에서도 예외를 던지지 않고, 지원하지 않으면 아무 일도 하지 않는다 (웹 브라우저 · 데스크톱 포함).
+   * → 진동을 요청했으면 true, 무시했으면 false
+   */
+  triggerHaptic(type) {
+    const kind = hapticStrength(type);
+    if (!kind) return false;
+    const now = this.#now();
+    if (now - this.#lastHapticAt < this.#hapticCooldownMs) return false; // 쿨타임 — 중복 이벤트로 연달아 두 번 울리지 않게
+    this.#lastHapticAt = now;
     try {
-      const haptic = this.#driver()?.haptic;
-      if (typeof haptic === 'function') {
-        const handled = haptic(kind);
-        if (handled && typeof handled.catch === 'function') handled.catch(() => {});
-        if (handled !== false) return;
-      }
-      webVibrate(this.#env, kind);
+      if (!this.#pulse(kind)) webVibrate(this.#env, kind); // 드라이버가 없거나 못 하면 웹 진동으로
     } catch {
       // 진동 실패는 게임에 영향 없음
+    }
+    return true;
+  }
+
+  /** 드라이버로 충격 한 번. 처리했으면 true — 드라이버가 없거나 false 를 돌려주거나 예외를 던지면 false (부른 쪽이 웹 진동으로 대체) */
+  #pulse(kind) {
+    try {
+      const haptic = this.#driver()?.haptic;
+      if (typeof haptic !== 'function') return false;
+      const handled = haptic(kind);
+      if (handled && typeof handled.catch === 'function') handled.catch(() => {});
+      return handled !== false;
+    } catch {
+      return false;
     }
   }
 

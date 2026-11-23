@@ -7,7 +7,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/server.test.mjs",
+    "test": "node tests/server.test.mjs && node tests/client.test.mjs",
     "build:app": "node scripts/build-www.mjs",
     "cap:sync": "npm run build:app && cap sync"
   },
@@ -15,6 +15,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
     "@capacitor/core": "^8.6.2",
     "@capacitor/haptics": "^8.0.2",
     "express": "^5.3.0",

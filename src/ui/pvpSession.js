@@ -83,6 +83,7 @@ function bind(s) {
     payout: Math.max(0, Math.floor(m?.payout) || 0),
     reason: m?.reason ?? 'normal',
     opponentMmr: opponentMmrOf(s, m?.players), // 서버가 알려 준 상대의 초기 MMR (없으면 null → 입장 때 받은 값을 쓴다)
+    record: readRecord(m?.record), // 서버가 기록한 내 계정의 대전 전적 { wins, losses } (로그인한 경우만 — 아니면 null)
   }));
   on('opponent_status', (m) => onOpponent(s, m));
   on('receive_emote', (m) => { if (S === s && !s.closed) document.dispatchEvent(new CustomEvent(TAUNT_IN, { detail: m })); });
@@ -108,6 +109,14 @@ function opponentMmrOf(s, players) {
   const foeSeat = s.match?.you === 'P1' ? 'P2' : 'P1';
   const v = players?.[foeSeat]?.mmr;
   return Number.isFinite(v) ? v : null;
+}
+
+/** game_over 의 record({ wins, losses, ... }) → { wins, losses } | null (모양이 맞지 않으면 null — 예전 서버는 보내지 않는다) */
+function readRecord(r) {
+  const count = (v) => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
+  const wins = count(r?.wins);
+  const losses = count(r?.losses);
+  return wins === null || losses === null ? null : { wins, losses };
 }
 
 /** 상대 프로필(서버가 걸러 준 값) → 화면용. 모르는 스킨 id 는 기본값으로 */
@@ -255,7 +264,8 @@ export function pvpRemainingMs(fallback) {
 
 /**
  * 판 결과를 저장한다 (전적 · 연승 · MMR · 칭호 + 탄피). 참가비가 있는 테이블은 서버가 내려준 상금(payout)이 탄피 보상이고,
- * 일반 테이블 · 친구 방은 기존 승리/패배 보상이다. 저장 뒤 소켓을 정리한다. → recordResult 의 결과 + { pvp: { tier, mode, fee, payout } }
+ * 일반 테이블 · 친구 방은 기존 승리/패배 보상이다. 저장 뒤 소켓을 정리한다.
+ * → recordResult 의 결과 + { pvp: { tier, mode, fee, payout, record } }   record = 서버에 기록된 내 대전 전적 { wins, losses } | null
  */
 export async function pvpSettle(won) {
   const s = S;
@@ -267,7 +277,7 @@ export async function pvpSettle(won) {
   const opponentMmr = s.over?.opponentMmr ?? s.foe.mmr; // game_over 가 준 값 → 없으면(부전패 · 자리 상실) 입장 때 본 상대 MMR
   const outcome = hooks.profile.recordResult(won, { brass: fee > 0 ? payout : null, opponentMmr });
   pvpEnd();
-  return { ...outcome, pvp: { tier: s.match.tier, mode: s.match.mode, fee, payout } };
+  return { ...outcome, pvp: { tier: s.match.tier, mode: s.match.mode, fee, payout, record: s.over?.record ?? null } };
 }
 
 /** 리스너를 떼고 소켓을 끊는다 (여러 번 불러도 안전). 서버는 끊김을 보고 방을 정리한다 */
