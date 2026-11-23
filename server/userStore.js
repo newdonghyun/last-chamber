@@ -153,8 +153,17 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
   if (db) file = null; // DB 가 원본 — 파일과 둘로 갈라지지 않게
   let client = null;
   let dbOk = null; // 마지막 DB 작업 성공 여부 (/healthz) — null = 아직 없음
+  let dbError = null; // 마지막 DB 오류 메시지 (/healthz — Render 로그를 못 볼 때 원인 확인용, 키는 들어가지 않는다)
+  const markDb = (err) => {
+    dbOk = !err;
+    dbError = err ? String(err.message ?? err).slice(0, 400) : null;
+  };
   const dbReady = db
-    ? Promise.resolve(db).then((c) => { client = c; }, (err) => onError(new Error(`Supabase 클라이언트를 만들지 못해 메모리로 동작합니다: ${err?.message ?? err}`, { cause: err })))
+    ? Promise.resolve(db).then((c) => { client = c; }, (err) => {
+      const e = new Error(`Supabase 클라이언트를 만들지 못해 메모리로 동작합니다: ${err?.message ?? err}`, { cause: err });
+      markDb(e);
+      onError(e);
+    })
     : Promise.resolve();
   const meta = new Map(); // id → { chain, loaded, loading, pending: [won…] } — 유저별 DB 작업 순서 · 불러오기 상태
   const inflight = new Set();
@@ -180,10 +189,10 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       if (!client) return;
       try {
         check(await client.from(TABLE).select(COLUMNS).limit(1), 'players 테이블 확인');
-        dbOk = true;
+        markDb(null);
         log('[DB] players 테이블 확인 완료 — 접속 · register_player 마다 upsert 합니다');
       } catch (err) {
-        dbOk = false;
+        markDb(err);
         onError(err);
       }
     });
@@ -194,13 +203,13 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     await dbReady;
     if (!client) return;
     check(await client.from(TABLE).upsert(toRow(rec), { onConflict: 'user_id' }), `players upsert(${rec.nickname})`);
-    dbOk = true;
+    markDb(null);
     board.at = -Infinity; // 새 행 · 바뀐 닉네임이 랭킹에 바로 보이게
   };
 
   /** 유저별 DB 작업을 차례로 (불러오기 → 결과 저장 → …). 실패해도 게임은 계속 — 오류는 [DB ERROR] 로 알린다 */
   function queue(m, task) {
-    const run = m.chain.then(task).catch((err) => { dbOk = false; onError(err); });
+    const run = m.chain.then(task).catch((err) => { markDb(err); onError(err); });
     m.chain = run;
     inflight.add(run);
     run.finally(() => inflight.delete(run));
@@ -326,12 +335,12 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       if (board.rows && now() - board.at < BOARD_CACHE_MS) return board.rows;
       try {
         const res = check(await client.from(TABLE).select(COLUMNS).order('mmr', { ascending: false }).order('wins', { ascending: false }).limit(limit), 'players leaderboard');
-        dbOk = true;
+        markDb(null);
         const rows = (res.data ?? []).map((row) => (meta.get(row.user_id)?.loaded && users.get(row.user_id)) || { id: row.user_id, nickname: row.nickname, ...fromRow(row) }); // 캐시가 더 최신
         board = { at: now(), rows: rows.sort(byRank) };
         return board.rows;
       } catch (err) {
-        dbOk = false;
+        markDb(err);
         onError(err);
       }
     }
@@ -358,7 +367,13 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     get: (id) => users.get(id) ?? null,
     recordResult,
     leaderboard,
-    health: () => ({ storage: db ? (client ? 'supabase' : 'memory') : (file ? 'file' : 'memory'), dbOk }), // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부
+    // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부 · 마지막 DB 오류 · 접속 중인 Supabase 주소(키 제외)
+    health: () => ({
+      storage: db ? (client ? 'supabase' : 'memory') : (file ? 'file' : 'memory'),
+      dbOk,
+      dbError,
+      dbHost: db ? (() => { try { return new URL(SUPABASE_URL).host; } catch { return `잘못된 URL: ${String(SUPABASE_URL).slice(0, 60)}`; } })() : null,
+    }),
     publicView: publicRecord,
     size: () => users.size,
     flush,
