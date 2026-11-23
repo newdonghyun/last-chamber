@@ -81,7 +81,16 @@ let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보�
 let tickTimer = 0;
 let tickFrom = 0;
 let copyTimer = 0;
-let serverRecord = null; // 서버에 기록된 내 대전 전적 { wins, losses } — hello 응답 (이번 방문 동안 기억)
+let serverRecord = null; // 서버에 기록된 내 전적 { mmr, wins, losses, streak } — hello · get_leaderboard 응답 (이번 방문 동안 기억)
+let connecting = null; // { session, promise } — 로비를 열 때의 랭킹 연결과 버튼 동작이 겹쳐도 소켓은 하나만
+
+/** 로비 랭킹 티어 (서버 MMR 기준) */
+const RANK_TIERS = Object.freeze([[1500, 'MASTER'], [1300, 'DIAMOND'], [1150, 'GOLD'], [1000, 'SILVER'], [0, 'BRONZE']]);
+const rankTier = (mmr) => (RANK_TIERS.find(([min]) => mmr >= min) ?? RANK_TIERS.at(-1))[1];
+/** 서버가 준 전적 → { mmr, wins, losses, streak } | null (예전 서버처럼 mmr 이 없으면 null) */
+const asRecord = (r) => (r && ['mmr', 'wins', 'losses'].every((k) => Number.isFinite(r[k]))
+  ? { mmr: r.mmr, wins: r.wins, losses: r.losses, streak: Number.isFinite(r.streak) ? r.streak : 0 }
+  : null);
 
 // ───────── 화면 (모달을 직접 만든다) ─────────
 
@@ -98,7 +107,7 @@ dialog.innerHTML = `
       </div>
       <button class="mp-close" type="button" data-act="close" aria-label="닫기">&#10005;</button>
     </header>
-    <p class="mp-me"><span class="mp-me-label">PLAYER</span><b data-ui="me-name"></b><small data-ui="me-record"></small></p>
+    <p class="mp-me"><span class="mp-tier" data-ui="me-tier">—</span><b data-ui="me-name"></b><small data-ui="me-record"></small></p>
     <p class="mp-wallet"><span>보유 탄피</span><b data-ui="brass">0</b></p>
 
     <div class="mp-view" data-ui="menu">
@@ -137,6 +146,12 @@ dialog.innerHTML = `
           </button>`).join('')}
         </div>
       </section>
+
+      <section class="mp-sec" aria-labelledby="mp-h-board">
+        <h3 class="mp-sec-title" id="mp-h-board">TOP 10 랭킹 <small>LEADERBOARD</small></h3>
+        <ol class="mp-board" data-ui="board"></ol>
+        <p class="mp-hint" data-ui="board-note">랭킹을 불러오는 중…</p>
+      </section>
     </div>
 
     <div class="mp-view mp-wait" data-ui="room" hidden>
@@ -165,8 +180,11 @@ const q = (name) => dialog.querySelector(`[data-ui="${name}"]`);
 const ui = {
   eyebrow: q('eyebrow'),
   title: q('title'),
+  meTier: q('me-tier'),
   meName: q('me-name'),
   meRecord: q('me-record'),
+  board: q('board'),
+  boardNote: q('board-note'),
   brass: q('brass'),
   menu: q('menu'),
   room: q('room'),
@@ -195,12 +213,60 @@ function say(text, tone = 'info') {
   ui.status.dataset.tone = tone;
 }
 
-/** 로비 맨 위: 로그인한 닉네임 + 서버에 기록된 대전 전적 (hello 응답 전에는 안내 문구) */
+/** 로비 맨 위 내 전적: 티어 · 닉네임 · MMR · 승/패 · 연승 (서버 응답 전에는 안내 문구) */
 function paintMe() {
+  const r = serverRecord;
+  const tier = r ? rankTier(r.mmr) : null;
+  ui.meTier.textContent = tier ?? '—';
+  ui.meTier.dataset.tier = tier?.toLowerCase() ?? '';
   ui.meName.textContent = userSession.user?.nickname ?? profile.nickname;
-  ui.meRecord.textContent = serverRecord
-    ? `서버 대전 전적 ${fmt(serverRecord.wins)}승 ${fmt(serverRecord.losses)}패`
+  ui.meRecord.textContent = r
+    ? `MMR ${fmt(r.mmr)} · ${fmt(r.wins)}승 ${fmt(r.losses)}패 · ${fmt(r.streak)}연승`
     : '대전 서버에 연결되면 서버 전적이 표시돼요';
+}
+
+/** TOP 10 리스트 (닉네임은 사용자 입력이라 textContent 로만) */
+function paintBoard(top) {
+  const cell = (cls, text) => {
+    const node = document.createElement('span');
+    node.className = cls;
+    node.textContent = text;
+    return node;
+  };
+  ui.board.replaceChildren(...top.slice(0, 10).map((r) => {
+    const li = document.createElement('li');
+    li.className = r.isMe ? 'mp-row is-me' : 'mp-row';
+    const tier = rankTier(r.mmr);
+    const pill = cell('mp-tier', tier);
+    pill.dataset.tier = tier.toLowerCase();
+    li.append(cell('mp-row-rank', String(r.rank)), pill, cell('mp-row-name', String(r.nickname ?? '')), cell('mp-row-mmr', fmt(r.mmr)),
+      cell('mp-row-wl', `${fmt(r.wins)}승 ${fmt(r.losses)}패 · ${fmt(r.streak ?? 0)}연승`));
+    return li;
+  }));
+  ui.boardNote.textContent = top.length ? '' : '아직 기록이 없어요 — 첫 승리의 주인공이 되어 보세요';
+}
+
+/** 로비를 열면 서버에 붙어 TOP 10 · 내 전적을 가져온다 (get_leaderboard). 실패해도 AI 딜러 대전 · 버튼은 그대로 */
+async function refreshBoard() {
+  const mine = session;
+  ui.boardNote.textContent = '랭킹을 불러오는 중…';
+  try {
+    await ensureSocket();
+    if (mine !== session) return;
+    const res = await request('get_leaderboard');
+    if (mine !== session) return;
+    if (!res.ok || !Array.isArray(res.top)) throw new Error(res.error ?? 'BAD_RESPONSE');
+    const me = asRecord(res.me);
+    if (me) {
+      serverRecord = me;
+      paintMe();
+    }
+    paintBoard(res.top);
+  } catch (err) {
+    if (mine !== session || err?.message === 'CANCELLED') return;
+    ui.board.replaceChildren();
+    ui.boardNote.textContent = '랭킹을 불러오지 못했어요 · 서버 연결을 확인해 주세요';
+  }
 }
 
 /** 요청 중이거나 탄피가 모자란 버튼을 잠근다 (AI 딜러 · 닫기는 언제나 열어 둔다 — 빠져나갈 길) */
@@ -315,10 +381,9 @@ function sayHello(s) {
   const who = identity();
   if (!who.userId) return;
   s.timeout(ACK_TIMEOUT_MS).emit('hello', who, (err, res) => {
-    const wins = res?.user?.wins;
-    const losses = res?.user?.losses;
-    if (err || !res?.ok || !Number.isFinite(wins) || !Number.isFinite(losses)) return;
-    serverRecord = { wins, losses };
+    const record = err || !res?.ok ? null : asRecord(res.user);
+    if (!record) return;
+    serverRecord = record;
     paintMe();
   });
 }
@@ -347,9 +412,18 @@ function openSocket(io, mine) {
   });
 }
 
-async function ensureSocket() {
-  if (sock) return sock;
-  const mine = session;
+/** 이 로비 세션의 소켓 — 연결 중이면 그 연결을 같이 기다린다 (동시에 불려도 소켓을 둘 만들지 않는다) */
+function ensureSocket() {
+  if (sock) return Promise.resolve(sock);
+  if (connecting?.session !== session) {
+    const mine = session;
+    const promise = connectSocket(mine).finally(() => { if (connecting?.promise === promise) connecting = null; });
+    connecting = { session: mine, promise };
+  }
+  return connecting.promise;
+}
+
+async function connectSocket(mine) {
   let io;
   try {
     io = await loadSocketIoClient(serverUrl());
@@ -621,6 +695,7 @@ document.addEventListener('click', (e) => {
   if (dialog.open) return;
   resetUi();
   dialog.showModal();
+  refreshBoard();
 }, true);
 
 // 로그인 · 닉네임 변경 · 로그아웃: 로비의 내 이름을 바로 고치고, 연결 중이면 서버에도 새 닉네임을 알린다. 로그아웃이면 로비를 닫는다(소켓도 정리)

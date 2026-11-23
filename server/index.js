@@ -18,7 +18,8 @@
  *     · 판이 끝나면 로그인한 좌석의 서버 전적(승/패)을 기록하고 game_over 의 record 로 알려 준다
  *
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
- *   hello({ userId, nickname })                   로그인 · 닉네임 변경 (연결 뒤에 해도 된다) → { ok, user: { nickname, wins, losses, games } }  ← 서버에 기록된 내 전적
+ *   hello({ userId, nickname })                   로그인 · 닉네임 변경 (연결 뒤에 해도 된다) → { ok, user: { nickname, wins, losses, games, streak, maxStreak, mmr } }  ← 서버에 기록된 내 전적
+ *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (mmr 내림차순 10명), me: 내 전적 | null }
  *                                                 판 · 대기열 도중에 다른 유저 ID 로 바꿀 수는 없다 (ALREADY_IN_ROOM)
  *   create_private_room({ profile })              친구 초대 방 → { ok, code }  (+ room_created { code })   code = 4자리 영문/숫자 (예: A7K9)
  *   join_private_room(code | { code, profile })   → { ok, code }  → 곧바로 판이 시작된다
@@ -47,6 +48,7 @@
  *
  *   환경: PORT · HOST(비우면 모든 네트워크 — 이 PC에서만 열려면 127.0.0.1) · CORS_ORIGIN(다른 출처에서 붙을 때 허용할 출처, 쉼표로 여러 개 — '*' 이면 전부 · 비우면 같은 출처 + 앱/토스 웹뷰(capacitor://localhost · http(s)://localhost · *.tossmini.com) · 그 밖의 값이면 적어 준 출처만)
  *         USER_DATA_FILE(유저 닉네임 · 전적을 저장할 JSON 파일 — 기본 server/data/users.json, 빈 값이면 메모리에만. server/ 아래라 정적 파일로는 보이지 않는다)
+ *         SUPABASE_URL · SUPABASE_KEY(service_role) — 둘 다 있으면 유저 기록을 Supabase players 테이블에 (USER_DATA_FILE 대신). 없으면 메모리 · 파일 (server/userStore.js)
  *   상태 확인: GET /health → { ok, uptime } (Render · Railway 헬스체크용) · GET /healthz → 방 · 대기열 · 유저 수 통계까지
  *   정적 파일은 프로젝트 루트를 그대로 서빙하되 server/ · tests/ · node_modules/ · scripts/ · www/ · android/ · ios/ · package*.json · capacitor.config.json · 점(.)으로 시작하는 파일은 404.
  *
@@ -82,7 +84,15 @@ const SERVER_DEFAULTS = {
   userDataFile: null, // 유저 닉네임 · 전적 JSON 파일 (null = 메모리에만 — 직접 실행할 때는 아래 isMainModule 이 server/data/users.json 을 넘긴다)
   maxUsers: USER_DEFAULTS.maxUsers,
   userSaveDelayMs: USER_DEFAULTS.saveDelayMs,
+  supabaseUrl: null, // 둘 다 있으면 Supabase (직접 실행할 때는 isMainModule 이 환경 변수를 넘긴다 — 테스트가 실제 DB 를 건드리지 않게)
+  supabaseKey: null,
+  supabaseClient: null, // 이미 만든 클라이언트 (테스트용 가짜 등)
 };
+const LEADERBOARD_SIZE = 10;
+
+/** Supabase 클라이언트 — 패키지는 키가 있을 때만 불러온다 (실패하면 userStore 가 메모리로 돌아간다) */
+const connectSupabase = (url, key) => import('@supabase/supabase-js')
+  .then(({ createClient }) => createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } }));
 
 // ───────── 정적 파일: 서버 내부 경로는 숨긴다 ─────────
 
@@ -143,7 +153,9 @@ export function createGameServer(options = {}) {
     maxHttpBufferSize: 16 * 1024, // 프로필 · 액션은 아주 작다
   });
 
-  const users = createUserStore({ file: cfg.userDataFile || null, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: cfg.onError });
+  const db = cfg.supabaseClient ?? (cfg.supabaseUrl && cfg.supabaseKey ? connectSupabase(cfg.supabaseUrl, cfg.supabaseKey) : null);
+  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: cfg.onError });
+  if (db) log('유저 기록: Supabase players 테이블');
   const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users });
   const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS });
   const stats = () => ({ ...rooms.stats(), queued: matchmaker.queued(), users: users.size() });
@@ -161,7 +173,20 @@ export function createGameServer(options = {}) {
     if (current && current.id !== id && socket.data.where) return fail('ALREADY_IN_ROOM'); // 판 · 대기열 도중에 다른 사람으로 바꿀 수 없다
     const record = users.identify(id, nickname); // 저장소가 가득 차면 null — 대전은 그대로, 기록만 남지 않는다
     socket.data.user = { id, nickname };
-    return { ok: true, user: users.publicView(record) ?? { nickname, wins: 0, losses: 0, games: 0 } };
+    // DB 모드면 그 유저를 불러온 뒤에 답한다 (메모리 모드는 바로)
+    return users.ready(id).then(() => ({ ok: true, user: users.publicView(record) ?? { nickname, wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }));
+  }
+
+  /** TOP 10 (mmr 내림차순) + 내 전적. 유저 ID 는 응답에 넣지 않는다 (내 줄은 isMe 로만) */
+  async function getLeaderboard(socket) {
+    const me = socket.data.user;
+    if (me) await users.ready(me.id);
+    const top = await users.leaderboard(LEADERBOARD_SIZE);
+    return {
+      ok: true,
+      top: top.map((rec, i) => ({ rank: i + 1, ...users.publicView(rec), isMe: rec.id === me?.id })),
+      me: me ? users.publicView(users.get(me.id)) : null,
+    };
   }
 
   // ── HTTP: 상태 확인 + 정적 파일 ──
@@ -174,6 +199,7 @@ export function createGameServer(options = {}) {
   // ── Socket.io 이벤트 라우팅: 이벤트 이름 → 처리하는 쪽 ──
   const handlers = {
     hello: identifyUser,
+    get_leaderboard: getLeaderboard,
     create_private_room: rooms.createPrivateRoom,
     join_private_room: rooms.joinPrivateRoom,
     join_queue: matchmaker.joinQueue,
@@ -207,6 +233,10 @@ export function createGameServer(options = {}) {
         } catch (err) {
           cfg.onError(err);
           result = fail('SERVER_ERROR');
+        }
+        if (typeof result?.then === 'function') { // DB 를 거치는 처리(hello · get_leaderboard)는 끝난 뒤에 답한다
+          result.then((value) => { if (ack) guard(() => ack(value)); }, (err) => { cfg.onError(err); if (ack) guard(() => ack(fail('SERVER_ERROR'))); });
+          return;
         }
         if (ack) guard(() => ack(result));
       });
@@ -254,7 +284,7 @@ function isMainModule() {
 if (isMainModule()) {
   // 유저 기록 파일: USER_DATA_FILE (빈 값이면 메모리에만) — 기본은 server/data/users.json (server/ 는 정적 파일로 서빙하지 않는 경로)
   const userDataFile = process.env.USER_DATA_FILE ?? path.join(ROOT, 'server', 'data', 'users.json');
-  const server = createGameServer({ userDataFile });
+  const server = createGameServer({ userDataFile, supabaseUrl: process.env.SUPABASE_URL || null, supabaseKey: process.env.SUPABASE_KEY || null });
   server.start(Number(process.env.PORT || 3000), process.env.HOST || undefined).then((port) => {
     console.log(`[LAST CHAMBER] http://localhost:${port}  (정적 파일 + Socket.io · 턴 ${TURN_MS / 1000}초 · 재접속 ${GRACE_MS / 1000}초)`);
   }).catch((err) => {

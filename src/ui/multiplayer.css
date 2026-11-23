@@ -117,7 +117,45 @@
   margin: 0 0 -6px;
   padding: 0 2px;
 }
-.mp-me-label { font: 600 10px/1 var(--font-tech, sans-serif); letter-spacing: .34em; color: var(--brass, #c9a35b); }
+/* 랭킹 티어 배지 (multiplayer.js rankTier — 서버 MMR 1500+ MASTER · 1300+ DIAMOND · 1150+ GOLD · 1000+ SILVER · 그 외 BRONZE) */
+.mp-tier {
+  --tier-c: var(--ink-dim, #9a9284);
+  justify-self: start;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font: 700 10px/1 var(--font-tech, sans-serif);
+  letter-spacing: .14em;
+  white-space: nowrap;
+  color: var(--tier-c);
+  background: rgba(0, 0, 0, .35);
+  box-shadow: inset 0 0 0 1px var(--tier-c);
+}
+.mp-tier[data-tier="master"] { --tier-c: #d7a6ff; }
+.mp-tier[data-tier="diamond"] { --tier-c: #8fe3ff; }
+.mp-tier[data-tier="gold"] { --tier-c: #ffd36a; }
+.mp-tier[data-tier="silver"] { --tier-c: #d3dae5; }
+.mp-tier[data-tier="bronze"] { --tier-c: #d99a5f; }
+
+/* TOP 10 랭킹 보드 */
+.mp-board { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.mp-row {
+  display: grid;
+  grid-template-columns: 1.6em auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .3);
+  font: 700 13px/1.2 var(--font-ui, sans-serif);
+}
+.mp-row-rank { text-align: center; font: 700 13px/1 var(--font-tech, sans-serif); color: var(--brass, #c9a35b); }
+.mp-row:nth-child(-n + 3) .mp-row-rank { color: var(--amber-hi, #ffd88a); }
+.mp-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink, #efe8d8); }
+.mp-row-mmr { font: 700 14px/1 var(--font-type, monospace); color: var(--brass-hi, #f4dda2); }
+.mp-row-wl { grid-column: 3 / -1; font: 600 11px/1.2 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); }
+.mp-row.is-me { border-color: rgba(255, 181, 71, .65); background: rgba(255, 181, 71, .1); }
 .mp-me b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 800 16px/1.2 var(--font-ui, sans-serif); color: var(--ink, #efe8d8); }
 .mp-me small { grid-column: 1 / -1; font: 600 11.5px/1.3 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); }
 

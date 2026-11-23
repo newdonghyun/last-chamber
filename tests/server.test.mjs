@@ -255,7 +255,7 @@ async function phase3() {
   const A = await client(port, meA);
   const B = await client(port, { userId: idB, nickname: 'Ace_7' });
   eq(server.stats().users, 2, '14 handshake auth 로 유저 2명 등록');
-  eq(await A.call('hello', meA), { ok: true, user: { nickname: '총잡이', wins: 0, losses: 0, games: 0 } }, '14 hello → 서버에 기록된 내 전적');
+  eq(await A.call('hello', meA), { ok: true, user: { nickname: '총잡이', wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }, '14 hello → 서버에 기록된 내 전적');
   eq((await A.call('hello', { userId: idA, nickname: '총 잡이' })).error, 'INVALID_NICKNAME', '14 공백이 든 닉네임은 거절');
   eq((await A.call('hello', { userId: idA, nickname: '총' })).error, 'INVALID_NICKNAME', '14 1자 닉네임은 거절');
   eq((await A.call('hello', { userId: idA, nickname: '열한글자짜리닉네임이요' })).error, 'INVALID_NICKNAME', '14 11자 닉네임은 거절');
@@ -273,8 +273,8 @@ async function phase3() {
   const [overA, overB] = [A.waitFor('game_over'), B.waitFor('game_over')];
   await B.call('leave_room');
   const [goA, goB] = await Promise.all([overA, overB]);
-  eq(goA.record, { nickname: '총잡이', wins: 1, losses: 0, games: 1 }, '15 승자 서버 전적 1승');
-  eq(goB.record, { nickname: 'Ace_7', wins: 0, losses: 1, games: 1 }, '15 패자 서버 전적 1패');
+  eq(goA.record, { nickname: '총잡이', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, '15 승자: 1승 · 1연승 · MMR +25');
+  eq(goB.record, { nickname: 'Ace_7', wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 }, '15 패자: 1패 · 연승 0 · MMR −20');
 
   // 16. 익명 상대와의 판은 로그인한 쪽만 · 같은 유저끼리(창 두 개) 둔 판은 세지 않는다
   const vsAnon = await A.call('create_private_room', { profile: {} });
@@ -290,10 +290,15 @@ async function phase3() {
   await A.waitFor('match_found', (p) => p.code === self.code);
   const overSelf = A.waitFor('game_over', (p) => p.code === self.code);
   await A2.call('leave_room');
-  eq((await overSelf).record, { nickname: '총잡이', wins: 2, losses: 0, games: 2 }, '16 같은 유저끼리 둔 판은 전적에 넣지 않는다');
+  eq((await overSelf).record, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '16 같은 유저끼리 둔 판은 전적에 넣지 않는다');
 
-  // 17. 닉네임 변경 (hello) · 대기열 · 판 도중에는 다른 유저 ID 로 못 바꾼다
-  eq((await B.call('hello', { userId: idB, nickname: '에이스' })).user, { nickname: '에이스', wins: 0, losses: 1, games: 1 }, '17 hello 로 닉네임 변경 — 전적은 그대로');
+  // 17. 닉네임 변경 (hello) · 대기열 · 판 도중에는 다른 유저 ID 로 못 바꾼다 · 랭킹
+  eq((await B.call('hello', { userId: idB, nickname: '에이스' })).user, { nickname: '에이스', wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 }, '17 hello 로 닉네임 변경 — 전적은 그대로');
+  const board = await A.call('get_leaderboard');
+  eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '총잡이', 1050, true], [2, '에이스', 980, false]], '17 get_leaderboard: mmr 내림차순 · 내 줄 표시');
+  eq([board.me?.nickname, board.me?.mmr], ['총잡이', 1050], '17 get_leaderboard: 내 전적');
+  ok(!JSON.stringify(board).includes(idA) && !JSON.stringify(board).includes(idB) && !JSON.stringify(board).includes('user_id'), '17 랭킹 응답에 유저 ID 가 없다');
+  eq((await C.call('get_leaderboard')).me, null, '17 익명 소켓은 내 전적 없이 랭킹만');
   await B.call('join_queue', { tier: 'free', profile: {} });
   eq((await B.call('hello', { userId: randomUUID(), nickname: '다른사람' })).error, 'ALREADY_IN_ROOM', '17 대기 중에는 다른 유저 ID 로 바꿀 수 없다');
   await B.call('leave_queue');
@@ -305,16 +310,86 @@ async function phase3() {
   const again = createGameServer({ quiet: true, onError, userDataFile: file });
   const port2 = await again.start(0, '127.0.0.1');
   const back = await client(port2, meA);
-  eq((await back.call('hello', meA)).user, { nickname: '총잡이', wins: 2, losses: 0, games: 2 }, '18 재시작 뒤에도 서버 전적 유지');
+  eq((await back.call('hello', meA)).user, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '18 재시작 뒤에도 서버 전적 유지');
   eq(again.stats().users, 2, '18 재시작 뒤 유저 수');
   await again.stop();
   rmSync(dir, { recursive: true, force: true });
+}
+
+// Supabase 흉내 (players 테이블 하나): from().select().eq().maybeSingle() · .order().limit() · upsert(row) 만
+function fakeSupabase(rows = []) {
+  const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
+  const calls = [];
+  const query = (filters = [], sorts = [], lim = Infinity) => {
+    const run = () => {
+      const out = [...table.values()].filter((r) => filters.every(([c, v]) => r[c] === v));
+      for (const [c, asc] of [...sorts].reverse()) out.sort((a, b) => (asc ? a[c] - b[c] : b[c] - a[c]));
+      return out.slice(0, lim).map((r) => ({ ...r }));
+    };
+    return {
+      eq: (c, v) => query([...filters, [c, v]], sorts, lim),
+      order: (c, o = {}) => query(filters, [...sorts, [c, o.ascending !== false]], lim),
+      limit: (n) => query(filters, sorts, n),
+      maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
+      then: (res, rej) => Promise.resolve({ data: run(), error: null }).then(res, rej),
+    };
+  };
+  return {
+    table,
+    calls,
+    from: () => ({
+      select: () => { calls.push('select'); return query(); },
+      upsert: async (row) => { calls.push('upsert'); table.set(row.user_id, { ...table.get(row.user_id), ...row }); return { data: null, error: null }; },
+    }),
+  };
+}
+
+async function phase4() {
+  const veteran = randomUUID();
+  const rookie = randomUUID();
+  const db = fakeSupabase([{ user_id: veteran, nickname: '고수', wins: 40, losses: 10, streak: 3, max_streak: 9, mmr: 1600 }]);
+  const server = createGameServer({ quiet: true, onError, supabaseClient: db });
+  const port = await server.start(0, '127.0.0.1');
+
+  // 19. 접속/로그인: 있으면 DB 값을 그대로, 없으면 기본값으로 upsert
+  const V = await client(port, { userId: veteran, nickname: '고수' });
+  const R = await client(port, { userId: rookie, nickname: '신입' });
+  eq((await V.call('hello', { userId: veteran, nickname: '고수' })).user, { nickname: '고수', wins: 40, losses: 10, games: 50, streak: 3, maxStreak: 9, mmr: 1600 }, '19 Supabase: 기존 유저는 DB 전적을 불러온다');
+  await R.call('hello', { userId: rookie, nickname: '신입' });
+  eq(db.table.get(rookie), { user_id: rookie, nickname: '신입', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }, '19 Supabase: 없는 유저는 기본값으로 upsert');
+
+  // 20. 승/패 확정 → DB 갱신 (승자 wins+1 · streak+1 · max_streak · mmr+25 / 패자 losses+1 · streak 0 · mmr−20)
+  const made = await V.call('create_private_room', { profile: {} });
+  await R.call('join_private_room', made.code);
+  await Promise.all([V.waitFor('match_found'), R.waitFor('match_found')]);
+  const over = R.waitFor('game_over');
+  await V.call('leave_room'); // 고수가 나감 → 신입 부전승
+  eq((await over).record?.mmr, 1025, '20 game_over 에 갱신된 MMR');
+  await server.users.flush();
+  eq([db.table.get(rookie).wins, db.table.get(rookie).streak, db.table.get(rookie).max_streak, db.table.get(rookie).mmr], [1, 1, 1, 1025], '20 Supabase: 승자 행 갱신');
+  eq([db.table.get(veteran).losses, db.table.get(veteran).streak, db.table.get(veteran).max_streak, db.table.get(veteran).mmr], [11, 0, 9, 1580], '20 Supabase: 패자 행 갱신 (최대 연승은 유지)');
+
+  // 21. get_leaderboard 는 DB 에서 mmr 내림차순
+  const board = await R.call('get_leaderboard');
+  eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '고수', 1580, false], [2, '신입', 1025, true]], '21 Supabase: TOP 10 mmr 내림차순 · 내 줄');
+  eq(board.me?.wins, 1, '21 Supabase: 내 전적');
+  await server.stop();
+
+  // 22. DB 연결이 실패하면 메모리로 계속 돈다
+  const errors = [];
+  const broken = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: Promise.reject(new Error('no network')) });
+  const port2 = await broken.start(0, '127.0.0.1');
+  const solo = await client(port2, { userId: rookie, nickname: '신입' });
+  eq((await solo.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1000, '22 Supabase 연결 실패 → 메모리 폴백');
+  ok((await solo.call('get_leaderboard')).ok && errors.length === 1, `22 오류는 한 번만 알리고 랭킹은 메모리에서 (${errors.map((e) => e.message).join(' | ')})`);
+  await broken.stop();
 }
 
 try {
   await phase1();
   await phase2();
   await phase3();
+  await phase4();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);
