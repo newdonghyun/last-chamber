@@ -33,15 +33,18 @@
     · 총기·테이블 색은 style.css :root 의 CSS 변수 → 상점에서 스킨을 장착하면 src/ui/storeData.js 의 값으로 바뀐다
   -->
 
-  <!-- 아이콘 스프라이트: <svg><use href="#i-loupe"></use></svg> -->
+  <!-- 아이콘 스프라이트: <svg><use href="#i-scope"></use></svg> -->
   <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-    <symbol id="i-loupe" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.2"/><path d="m14.6 14.6 6 6"/><path d="M7.3 8.6a3.1 3.1 0 0 1 2.3-2.2"/></symbol>
-    <symbol id="i-saw" viewBox="0 0 24 24"><rect x="2.5" y="6" width="5.6" height="10.6" rx="2.2"/><rect x="4.35" y="8.7" width="1.9" height="5" rx=".95"/><path d="M8.1 7.2H21v4.6"/><path d="M21 11.8l-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4-.8 1.4-.8-1.4"/></symbol>
-    <symbol id="i-cuffs" viewBox="0 0 24 24"><circle cx="6.6" cy="15.4" r="4.4"/><circle cx="17.4" cy="15.4" r="4.4"/><rect x="4.8" y="8.3" width="3.6" height="2.8" rx=".7"/><rect x="15.6" y="8.3" width="3.6" height="2.8" rx=".7"/><path d="M8.4 9.7h1.5m4.2 0h1.5"/><ellipse cx="12" cy="9.7" rx="2.1" ry="1.2"/></symbol>
-    <symbol id="i-whiskey" viewBox="0 0 24 24"><path d="M6.6 11.4h10.8l-1 7.7a1.4 1.4 0 0 1-1.4 1.2H9a1.4 1.4 0 0 1-1.4-1.2z" fill="currentColor" fill-opacity=".22" stroke="none"/><path d="M4.8 5.5h14.4l-1.7 13.6a2 2 0 0 1-2 1.7H8.5a2 2 0 0 1-2-1.7z"/><path d="M6 11.4h12"/><rect x="9" y="12.6" width="3.8" height="3.8" rx=".9" transform="rotate(-14 10.9 14.5)"/></symbol>
+    <!-- 아이템 7종: 투시경 · 더블샷 · 섬광탄 · 탄제거 · 위스키 한잔 · 소매치기 · 탄종변환 -->
+    <symbol id="i-scope" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7.4"/><circle cx="12" cy="12" r="2.1"/><path d="M12 2v4.3M12 17.7V22M2 12h4.3M17.7 12H22"/></symbol>
+    <symbol id="i-double" viewBox="0 0 24 24"><path d="M7.6 3C6 4.4 5.1 6.4 5.1 8.7V19h5V8.7C10.1 6.4 9.2 4.4 7.6 3z"/><path d="M16.4 3c-1.6 1.4-2.5 3.4-2.5 5.7V19h5V8.7c0-2.3-.9-4.3-2.5-5.7z"/><path d="M5.1 10.4h5m3.8 0h5"/><path d="M4 21.2h7.2m1.6 0H20"/></symbol>
+    <symbol id="i-flash" viewBox="0 0 24 24"><rect x="4.4" y="10" width="9.2" height="11.2" rx="1.8"/><path d="M4.4 13.8h9.2M4.4 17.4h9.2"/><path d="M7 10V7.6h4V10"/><path d="M11 8.2h2.7l1.5 2.4"/><path d="M19 2.6v2.6M22.2 5.2l-2 1.5M22.6 9.4h-2.4M16 3.6l1.1 1.8"/></symbol>
+    <symbol id="i-eject" viewBox="0 0 24 24"><path d="M12 2.6c-1.3 1.1-2 2.6-2 4.4V15h4V7c0-1.8-.7-3.3-2-4.4z"/><path d="M10 8.6h4"/><path d="M5 12.6v6.9A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-6.9"/><path d="M5.6 5.8 7.4 7.4M18.4 5.8l-1.8 1.6"/></symbol>
+    <symbol id="i-drink" viewBox="0 0 24 24"><path d="M6.6 11.4h10.8l-1 7.7a1.4 1.4 0 0 1-1.4 1.2H9a1.4 1.4 0 0 1-1.4-1.2z" fill="currentColor" fill-opacity=".22" stroke="none"/><path d="M4.8 5.5h14.4l-1.7 13.6a2 2 0 0 1-2 1.7H8.5a2 2 0 0 1-2-1.7z"/><path d="M6 11.4h12"/><rect x="9" y="12.6" width="3.8" height="3.8" rx=".9" transform="rotate(-14 10.9 14.5)"/></symbol>
+    <symbol id="i-pickpocket" viewBox="0 0 24 24"><path d="M3 10h13.4a1.6 1.6 0 0 1 1.6 1.6v7.8a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 19.4z"/><path d="m3 10 9.2-4.4L13.6 10"/><path d="M18 13.6h-3a1.6 1.6 0 0 0 0 3.2h3"/><path d="M15.2 4.6c2.4-1.3 4.9-.8 6.3 1.3"/><path d="m21.9 3.2-.3 2.9-2.8-.6"/></symbol>
+    <symbol id="i-convert" viewBox="0 0 24 24"><path d="M12 7.6c-.9.8-1.4 1.9-1.4 3.1v5.6h2.8v-5.6c0-1.2-.5-2.3-1.4-3.1z"/><path d="M4.3 10.2A8 8 0 0 1 18 6"/><path d="M18.4 2.7v3.5H15"/><path d="M19.7 13.8A8 8 0 0 1 6 18"/><path d="M5.6 21.3v-3.5H9"/></symbol>
+    <!-- 도발 '시가 연기 뿜기' 아이콘 (아이템 아님) -->
     <symbol id="i-cigar" viewBox="0 0 24 24"><rect x="2.5" y="12.2" width="16" height="4.6" rx="2.3"/><path d="M12.8 12.2v4.6m1.8-4.6v4.6"/><circle cx="19.4" cy="14.5" r="1.5" fill="currentColor" stroke="none"/><path d="M19.4 10.2c-.9-1 .9-1.9 0-3s.8-1.9 0-3"/></symbol>
-    <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M5.5 4.5v7.6a6.5 6.5 0 0 0 13 0V4.5h-4.2v7.6a2.3 2.3 0 0 1-4.6 0V4.5z"/><path d="M5.5 8.2h4.2m4.6 0h4.2"/></symbol>
-    <symbol id="i-inverter" viewBox="0 0 24 24"><ellipse cx="12" cy="6.4" rx="5.2" ry="2.2"/><path d="M10 8.4v9.8M14 8.4v9.8"/><path d="m10 10.6 4-1.3M10 13l4-1.3M10 15.4l4-1.3M10 17.8l4-1.3"/><path d="M6.8 21.5h10.4M8.6 21.5v-3.3h6.8v3.3"/><path d="m17.4 4.6 2.3-1.5-.7 2.2 2.5-.8-2.4 3"/><path d="M6.6 4.6 4.3 3.1l.7 2.2-2.5-.8 2.4 3"/></symbol>
     <symbol id="i-unknown" viewBox="0 0 12 28"><path d="M6 1C3.6 2.7 2.4 6 2.4 10h7.2C9.6 6 8.4 2.7 6 1z" opacity=".6"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".5"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7" opacity=".7"/><path d="M4.4 13.4a1.6 1.6 0 1 1 2.7 1.2c-.6.5-1.1.8-1.1 1.8" fill="none" stroke="#000" stroke-opacity=".75" stroke-width="1.1" stroke-linecap="round"/><circle cx="6" cy="19.1" r=".75" fill="#000" fill-opacity=".75"/></symbol>
     <symbol id="i-live" viewBox="0 0 12 28"><path d="M6 1C3.6 2.7 2.4 6 2.4 10h7.2C9.6 6 8.4 2.7 6 1z"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".8"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7"/><rect x="3.4" y="11" width="1.3" height="11.4" rx=".65" fill="#fff" opacity=".3"/></symbol>
     <symbol id="i-blank" viewBox="0 0 12 28"><path d="M2.4 10V6.6L4.2 4h3.6l1.8 2.6V10z"/><path d="M4.2 4 6 6.4 7.8 4" fill="none" stroke="#000" stroke-opacity=".45" stroke-width=".8"/><rect x="2.4" y="10" width="7.2" height="13.4" rx=".8" opacity=".8"/><rect x="1.6" y="23" width="8.8" height="3.4" rx=".7"/><rect x="3.4" y="11" width="1.3" height="11.4" rx=".65" fill="#fff" opacity=".3"/></symbol>
@@ -64,7 +67,7 @@
     <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="4"/><path d="M4.2 20.6c.6-4.2 3.8-6.8 7.8-6.8s7.2 2.6 7.8 6.8"/></symbol>
   </svg>
 
-  <!-- 분위기: 전등 빛기둥 · 담배 연기 · 비네팅 (필름 그레인은 맨 위 .grain) -->
+  <!-- 분위기: 전등 빛기둥 · 자욱한 연기 · 비네팅 (필름 그레인은 맨 위 .grain) -->
   <div class="atmosphere" aria-hidden="true">
     <div class="light-cone"></div>
     <div class="smoke smoke-a"></div>
@@ -136,7 +139,7 @@
           <div class="nameplate">
             <span class="nameplate-name">THE DEALER</span>
             <span class="badge badge-guillotine">단두대</span>
-            <span class="badge badge-cuffed"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg>구속</span>
+            <span class="badge badge-stunned"><svg aria-hidden="true"><use href="#i-flash"></use></svg>기절</span>
           </div>
           <div class="tube" id="dealer-hp" role="img" aria-label="딜러 체력">
             <span class="cell is-on"></span><span class="cell is-on"></span><span class="cell is-on"></span>
@@ -165,7 +168,7 @@
                 <span class="rack-icons" id="blank-icons" aria-hidden="true"></span>
                 <b id="blank-count">0</b><small>공포탄</small>
               </div>
-              <!-- 변환기 사용 후: 총 발수만 공개 -->
+              <!-- 탄종변환 사용 후: 총 발수만 공개 -->
               <div class="rack is-unknown" id="unknown-rack" hidden>
                 <span class="rack-icons" id="unknown-icons" aria-hidden="true"></span>
                 <b id="total-count">0</b><small>발 · 탄종 불명</small>
@@ -181,7 +184,7 @@
           </div>
 
           <div class="gun-stage">
-            <!-- #gun: .aim-up(딜러 쪽) / .aim-down(나) / .is-sawed / .barrel-spin / .fire -->
+            <!-- #gun: .aim-up(딜러 쪽) / .aim-down(나) / .is-doubled / .barrel-spin / .fire -->
             <div class="gun" id="gun">
               <div class="gun-rot">
                 <svg viewBox="0 0 320 320" role="img" aria-label="테이블 위의 리볼버">
@@ -220,6 +223,9 @@
                     <radialGradient id="gv-flash" cx="0" cy=".5" r="1">
                       <stop offset="0" style="stop-color: var(--muzzle-core)"/><stop offset=".2" style="stop-color: var(--muzzle-color)"/><stop offset=".55" style="stop-color: var(--muzzle-hot)" stop-opacity=".85"/><stop offset="1" style="stop-color: var(--muzzle-edge)" stop-opacity="0"/>
                     </radialGradient>
+                    <linearGradient id="gv-heat" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0" stop-color="#ff3d00" stop-opacity="0"/><stop offset=".55" stop-color="#ff6a1f" stop-opacity=".42"/><stop offset="1" stop-color="#ffd27a" stop-opacity=".8"/>
+                    </linearGradient>
                     <radialGradient id="gv-hot">
                       <stop offset="0" stop-color="#fff0c0"/><stop offset=".45" stop-color="#ff8a1f" stop-opacity=".8"/><stop offset="1" stop-color="#ff3d00" stop-opacity="0"/>
                     </radialGradient>
@@ -258,7 +264,7 @@
                       <rect x="172" y="120" width="60" height="2.3" fill="url(#gv-spec)"/>
                       <!-- 네온 라인 (사이버 스킨에서만 보임: --gun-neon-opacity) -->
                       <g class="gun-neon" aria-hidden="true"><path class="neon-glow" d="M178 130H228"/><path class="neon-line" d="M178 130H228"/></g>
-                      <!-- 총열 앞부분: SAW(.is-sawed) 시 떨어져 나감 -->
+                      <!-- 총열 앞부분 -->
                       <g class="gun-barrel-front">
                         <rect x="232" y="118" width="62" height="22" fill="url(#gv-steel)"/>
                         <rect x="232" y="138" width="62" height="13" rx="3" fill="url(#gv-steel)"/>
@@ -271,10 +277,10 @@
                         <rect x="232" y="120" width="62" height="2.3" fill="url(#gv-spec)"/>
                         <g class="gun-neon" aria-hidden="true"><path class="neon-glow" d="M238 130H286"/><path class="neon-line" d="M238 130H286"/></g>
                       </g>
-                      <!-- 잘린 단면: 달아오른 금속 -->
-                      <g class="gun-saw-cut">
-                        <ellipse class="gun-saw-glow" cx="234" cy="131" rx="12" ry="24" fill="url(#gv-hot)"/>
-                        <path d="M229 110 235 113 230 117 235 121 230 125 235 129 230 133 235 137 230 141 235 145 230 151H227V110Z" fill="#d8dee7"/>
+                      <!-- 더블샷(.is-doubled): 두 배로 채운 화약에 총열이 달아올라 붉게 빛난다 -->
+                      <g class="gun-double" aria-hidden="true">
+                        <rect x="172" y="113" width="122" height="38" rx="4" fill="url(#gv-heat)"/>
+                        <ellipse class="gun-double-glow" cx="296" cy="131" rx="14" ry="24" fill="url(#gv-hot)"/>
                       </g>
                       <!-- 실린더 (.barrel-spin 시 홈이 굴러감) -->
                       <rect x="118" y="113" width="46" height="42" rx="7" fill="url(#gv-cyl)"/>
@@ -306,7 +312,7 @@
               <span class="taunt-cd" aria-hidden="true"></span>
             </button>
 
-            <!-- 변환기: 푸른 전기 스파크 (.is-active) -->
+            <!-- 탄종변환: 푸른 전기 스파크 (.is-active) -->
             <svg class="sparks" id="sparks" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
               <path d="M18 28 30 37 25 41 38 49 32 53 45 61"/>
               <path d="M82 24 70 33 76 37 62 45 68 49 55 58"/>
@@ -335,10 +341,10 @@
             <p class="reveal-note">순서는 아무도 모른다</p>
           </div>
 
-          <div class="loupe-popup" id="loupe-popup" role="status">
-            <p class="loupe-kicker"><svg aria-hidden="true"><use href="#i-loupe"></use></svg><span id="loupe-kicker">SECRET · 약실 확인</span></p>
-            <p class="loupe-result" id="loupe-result">—</p>
-            <p class="loupe-note">당신만 보고 있다</p>
+          <div class="scope-popup" id="scope-popup" role="status">
+            <p class="scope-kicker"><svg aria-hidden="true"><use href="#i-scope"></use></svg><span id="scope-kicker">SECRET · 약실 확인</span></p>
+            <p class="scope-result" id="scope-result">—</p>
+            <p class="scope-note">당신만 보고 있다</p>
           </div>
         </div>
       </div>
@@ -357,7 +363,7 @@
           <span class="cell is-on"></span><span class="cell is-on"></span><span class="cell is-on"></span>
         </div>
         <span class="badge badge-guillotine">단두대 · 한 발이면 끝</span>
-        <span class="badge badge-cuffed"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg>구속</span>
+        <span class="badge badge-stunned"><svg aria-hidden="true"><use href="#i-flash"></use></svg>기절</span>
       </div>
 
       <div class="trigger-panel">
@@ -519,9 +525,9 @@
               <li>먼저 <em>2판</em>을 이기면 승리. 체력칩을 모두 잃으면 그 판은 끝난다.</li>
               <li>라운드가 오를수록 체력(3·4·4)과 장전 탄 수(3~5 · 5~7 · 6~8발)가 늘어난다.</li>
               <li>장전 때 <em class="t-live">실탄</em>·<em class="t-blank">공포탄</em> <em>개수만</em> 공개되고, 순서는 비밀이다.</li>
-              <li><em class="t-volt">변환기</em>를 쓰면 그 장전이 끝날 때까지 실탄·공포탄 개수가 가려지고 <em>총 발수만</em> 보인다.</li>
+              <li><em class="t-volt">탄종변환</em>을 쓰면 그 장전이 끝날 때까지 실탄·공포탄 개수가 가려지고 <em>총 발수만</em> 보인다.</li>
               <li>탄이 다 떨어지면 재장전 — 재장전은 턴을 바꾸지 않는다. 턴은 마지막 격발의 결과대로 이어지고, 새 라운드가 시작될 때만 <em>마지막으로 쏜 사람의 상대</em>가 먼저 쏜다.</li>
-              <li>장전할 때마다 아이템 지급 — 1라운드 <em>1개</em>, 2·3라운드 <em>2개</em>씩. 최대 6칸, 같은 아이템 최대 2개(수갑은 1개), 라운드마다 초기화. 수갑·시가는 드물게 나온다.</li>
+              <li>장전할 때마다 아이템 지급 — 1라운드 <em>1개</em>, 2·3라운드 <em>2개</em>씩. 최대 6칸, 같은 아이템 최대 2개(섬광탄은 1개), 라운드마다 초기화. 섬광탄·위스키 한잔은 드물게 나온다.</li>
             </ul>
           </div>
         </article>
@@ -543,8 +549,8 @@
             <h3><b>03</b>단두대 — 체력 1칸</h3>
             <ul>
               <li>체력이 1칸 남으면 진공관이 깨진 듯 붉게 지지직거리는 <em class="t-live">단두대</em> 상태.</li>
-              <li>실탄 한 발이면 끝이다 — 쇠톱이 걸린 실탄은 체력 2칸도 한 번에 날린다.</li>
-              <li>단두대에서도 시가로 <em>회복할 수 있다</em>. 살아남고 싶다면 아껴 둬라.</li>
+              <li>실탄 한 발이면 끝이다 — 더블샷이 걸린 실탄은 체력 2칸도 한 번에 날린다.</li>
+              <li>단두대에서도 위스키 한잔으로 <em>회복할 수 있다</em>. 살아남고 싶다면 아껴 둬라.</li>
             </ul>
           </div>
         </article>
@@ -565,46 +571,46 @@
       <section class="codex-panel" id="panel-items" role="tabpanel" aria-labelledby="tab-items" tabindex="0" hidden>
         <div class="item-codex">
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-loupe"></use></svg></span><h3>돋보기<small>LOUPE</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-scope"></use></svg></span><h3>투시경<small>SCOPE</small></h3></div>
             <p class="codex-tag">약실 확인</p>
             <p class="codex-desc">지금 약실에 든 탄이 실탄인지 공포탄인지 나만 몰래 본다.</p>
-            <ul class="codex-limits"><li>턴당 1회</li><li>같은 턴에 쇠톱과 함께 쓸 수 없다 (확정 2데미지 방지)</li><li>상대에게는 결과가 보이지 않는다</li></ul>
+            <ul class="codex-limits"><li>턴당 1회</li><li>같은 턴에 더블샷과 함께 쓸 수 없다 (확정 2데미지 방지)</li><li>상대에게는 결과가 보이지 않는다</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-saw"></use></svg></span><h3>쇠톱<small>SAW</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-double"></use></svg></span><h3>더블샷<small>DOUBLE SHOT</small></h3></div>
             <p class="codex-tag">데미지 ×2</p>
-            <p class="codex-desc">총열을 잘라 이번 한 발의 피해를 2배로 만든다.</p>
-            <ul class="codex-limits"><li>같은 턴에 돋보기·수갑과 함께 쓸 수 없다</li><li>쏘고 나면(공포탄이어도) 효과가 사라진다</li></ul>
+            <p class="codex-desc">화약을 두 배로 채워 이번 한 발의 피해를 2배로 만든다.</p>
+            <ul class="codex-limits"><li>같은 턴에 투시경·섬광탄과 함께 쓸 수 없다</li><li>쏘고 나면(공포탄이어도) 효과가 사라진다</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-cuffs"></use></svg></span><h3>수갑<small>CUFFS</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-flash"></use></svg></span><h3>섬광탄<small>FLASHBANG</small></h3></div>
             <p class="codex-tag">상대 턴 스킵</p>
-            <p class="codex-desc">상대의 다음 턴을 건너뛰게 해 내가 연달아 행동한다.</p>
-            <ul class="codex-limits"><li>다른 아이템보다 드물게 나오고, 한 번에 1개만 가질 수 있다</li><li>같은 턴에 쇠톱과 함께 쓸 수 없다</li><li>상대가 실제로 한 턴을 갖기 전엔 다시 채울 수 없다</li></ul>
+            <p class="codex-desc">눈부신 섬광으로 상대의 다음 턴을 날려 버리고 내가 연달아 행동한다.</p>
+            <ul class="codex-limits"><li>다른 아이템보다 드물게 나오고, 한 번에 1개만 가질 수 있다</li><li>같은 턴에 더블샷과 함께 쓸 수 없다</li><li>상대가 실제로 한 턴을 갖기 전엔 다시 쓸 수 없다</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-whiskey"></use></svg></span><h3>위스키<small>WHISKEY</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-eject"></use></svg></span><h3>탄제거<small>EJECT</small></h3></div>
             <p class="codex-tag">탄 배출·템 파괴</p>
             <p class="codex-desc">지금 약실의 탄을 쏘지 않고 빼내 종류를 공개하고, 상대 아이템 1개를 무작위로 망가뜨린다.</p>
             <ul class="codex-limits"><li>언제든 사용 가능 (상대 아이템이 없으면 탄만 빠진다)</li><li>어떤 아이템이 부서질지는 고를 수 없다</li><li>마지막 한 발을 빼면 바로 재장전된다</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-cigar"></use></svg></span><h3>시가<small>CIGAR</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-drink"></use></svg></span><h3>위스키 한잔<small>ON THE ROCKS</small></h3></div>
             <p class="codex-tag">체력 +1</p>
-            <p class="codex-desc">한 모금에 체력을 1칸 회복한다.</p>
+            <p class="codex-desc">독한 한 잔을 털어 넣고 체력을 1칸 회복한다.</p>
             <ul class="codex-limits"><li>단두대(체력 1)에서도 쓸 수 있다</li><li>체력이 가득 차 있으면 사용 불가</li><li>다른 아이템보다 드물게 나온다 (라운드당 최대 2개)</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-magnet"></use></svg></span><h3>자석<small>MAGNET</small></h3></div>
+            <div class="codex-item-head"><span class="codex-item-icon"><svg aria-hidden="true"><use href="#i-pickpocket"></use></svg></span><h3>소매치기<small>PICKPOCKET</small></h3></div>
             <p class="codex-tag">상대 템 강탈</p>
-            <p class="codex-desc">상대 아이템 하나를 무작위로 빼앗아 그 자리에서 바로 사용한다.</p>
-            <ul class="codex-limits"><li>지금 내가 쓸 수 있는 아이템만 끌려온다</li><li>자석끼리는 빼앗을 수 없다</li><li>쓸 만한 게 없으면 사용 불가</li></ul>
+            <p class="codex-desc">상대 아이템 하나를 몰래 훔쳐 그 자리에서 바로 사용한다.</p>
+            <ul class="codex-limits"><li>지금 내가 쓸 수 있는 아이템만 훔쳐 온다</li><li>소매치기끼리는 훔칠 수 없다</li><li>쓸 만한 게 없으면 사용 불가</li></ul>
           </article>
           <article class="codex-item">
-            <div class="codex-item-head"><span class="codex-item-icon is-volt"><svg aria-hidden="true"><use href="#i-inverter"></use></svg></span><h3>변환기<small>INVERTER</small></h3></div>
-            <p class="codex-tag">약실 반전</p>
-            <p class="codex-desc">지금 약실 탄의 성질을 뒤집는다 — 실탄은 공포탄으로, 공포탄은 실탄으로.</p>
-            <ul class="codex-limits"><li>무엇에서 무엇으로 바뀌었는지는 아무에게도 공개되지 않는다</li><li>돋보기로 미리 본 탄이라면 결과를 알 수 있다</li><li>사용 후 이번 장전의 실탄·공포탄 개수는 가려지고 총 발수만 보인다</li></ul>
+            <div class="codex-item-head"><span class="codex-item-icon is-volt"><svg aria-hidden="true"><use href="#i-convert"></use></svg></span><h3>탄종변환<small>CONVERT</small></h3></div>
+            <p class="codex-tag">실탄↔공포탄</p>
+            <p class="codex-desc">지금 약실 탄의 종류를 바꾼다 — 실탄은 공포탄으로, 공포탄은 실탄으로.</p>
+            <ul class="codex-limits"><li>무엇에서 무엇으로 바뀌었는지는 아무에게도 공개되지 않는다</li><li>투시경으로 미리 본 탄이라면 결과를 알 수 있다</li><li>사용 후 이번 장전의 실탄·공포탄 개수는 가려지고 총 발수만 보인다</li></ul>
           </article>
         </div>
       </section>

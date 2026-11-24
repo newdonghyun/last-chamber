@@ -7,20 +7,20 @@
    · #table              .zoom-tension        격발 직전 0.4초 줌인
    · #gun                .barrel-spin         재장전: 실린더 회전
                          .aim-up / .aim-down  총구 방향 (위 = 딜러, 아래 = 나)
-                         .is-sawed            쇠톱: 총열 절단
+                         .is-doubled          더블샷: 총열이 달아올라 붉게 빛남
                          .fire                총구 화염 + 반동 + 연기
-   · #zone-dealer, #zone-player  .is-active / .is-guillotine / .is-cuffed
+   · #zone-dealer, #zone-player  .is-active / .is-guillotine / .is-stunned(섬광탄)
    · .tube > .cell       .is-on               체력 세그먼트 (.tube-glass = 유리 반사/균열)
    · #round-pips li      .is-current / .is-won / .is-lost
-   · #player-items       button.card(disabled) / .card.is-empty / .is-new / .is-shattered(위스키로 파괴)
+   · #player-items       button.card(disabled) / .card.is-empty / .is-new / .is-shattered(탄제거로 파괴)
    · #dealer-items       .dslot / .dslot.is-empty / .is-new / .is-shattered
    · #turn-timer         --p(0~1) / .is-urgent    · #turn-label .is-dealer
    · #dealer-speech      .is-thinking
    · #headline           .is-visible + .tone-info|danger|blank|volt
    · #subtitle           .is-visible / .is-done + .tone-*
-   · #reveal, #loupe-popup  .is-visible  · #loupe-popup .is-live/.is-blank
-   · #sparks             .is-active           변환기: 푸른 전기 스파크   · #gun .shock  감전 번쩍임
-   · #live-rack · #blank-rack · #unknown-rack  [hidden] 토글 (변환기 후엔 총 발수만)
+   · #reveal, #scope-popup  .is-visible  · #scope-popup .is-live/.is-blank (투시경)
+   · #sparks             .is-active           탄종변환: 푸른 전기 스파크   · #gun .shock  감전 번쩍임
+   · #live-rack · #blank-rack · #unknown-rack  [hidden] 토글 (탄종변환 후엔 총 발수만)
    · #start-modal(타이틀) · #rules-modal(룰 & 도감, 탭 #tab-rules / #tab-items)
    · #crisis             .is-tense(마지막 1발) / .is-danger(내 체력 1)  위기 비네팅
    · body                .slowmo              실탄 격발 슬로모션 (--slow 배속)   · #table .zoom-hit  격발 순간 클로즈업
@@ -634,13 +634,13 @@ ul, ol { list-style: none; }
   box-shadow: 0 0 10px rgba(217, 38, 38, .35);
   animation: blink 1s steps(1) infinite;
 }
-.badge-cuffed {
+.badge-stunned {
   color: var(--brass-hi);
   background: rgba(201, 163, 91, .12);
   border: 1px solid var(--line);
 }
 .zone.is-guillotine .badge-guillotine,
-.zone.is-cuffed .badge-cuffed { display: inline-flex; }
+.zone.is-stunned .badge-stunned { display: inline-flex; }
 @keyframes blink { 50% { opacity: .35; } }
 
 /* ── 딜러 아이템 (작은 슬롯 6칸) ───────────────── */
@@ -866,16 +866,11 @@ ul, ol { list-style: none; }
 .gun.aim-down .gun-rot { transform: rotate(90deg); }
 .gun-body { transform-box: fill-box; transform-origin: 45% 50%; }
 
-.gun-barrel-front {
-  transform-box: fill-box;
-  transform-origin: 0% 50%;
-  transition: transform .5s cubic-bezier(.5, 0, .7, .4), opacity .35s .15s;
-}
-.gun.is-sawed .gun-barrel-front { transform: translate(24px, 34px) rotate(26deg); opacity: 0; }
-.gun-saw-cut { opacity: 0; transition: opacity .2s; }
-.gun.is-sawed .gun-saw-cut { opacity: 1; }
-.gun.is-sawed .gun-saw-glow { animation: hot-cut 2s ease-out both; }
-@keyframes hot-cut { from { opacity: 1; } to { opacity: .35; } }
+/* 더블샷: 총열이 달아올라 붉게 빛나고, 총구 열기가 한 번 확 피었다가 은은하게 남는다 */
+.gun-double { opacity: 0; transition: opacity .25s; }
+.gun.is-doubled .gun-double { opacity: 1; }
+.gun.is-doubled .gun-double-glow { animation: double-charge 2s ease-out both; }
+@keyframes double-charge { from { opacity: 1; } to { opacity: .4; } }
 
 .gun.barrel-spin .gun-flutes { animation: flute-roll 1.1s cubic-bezier(.12, .75, .3, 1) both; }
 .gun.barrel-spin .gun-body { animation: spin-wobble 1.1s cubic-bezier(.3, .7, .4, 1) both; }
@@ -903,9 +898,6 @@ ul, ol { list-style: none; }
 .gun-laser path { fill: none; stroke: var(--gun-laser); stroke-linecap: round; }
 .gun-laser .laser-glow { stroke-width: 7; opacity: .22; }
 .gun-laser .laser-line { stroke-width: 1.5; }
-.gun.is-sawed .gun-laser { translate: -64px 0; }
-.gun.is-sawed .muzzle-flash,
-.gun.is-sawed .gun-smoke { translate: -64px 0; }
 .gun.fire .muzzle-flash { animation: muzzle calc(.22s * var(--slow, 1)) ease-out both; }
 .gun.fire .gun-smoke { animation: smoke-puff calc(.6s * var(--slow, 1)) ease-out both; }
 .gun.fire .gun-body { animation: recoil calc(.42s * var(--slow, 1)) cubic-bezier(.2, .8, .3, 1) both; }
@@ -926,7 +918,7 @@ ul, ol { list-style: none; }
   100% { transform: none; }
 }
 
-/* ── 테이블 연출: 네온 헤드라인 · 타자기 자막 · 장전 공개 · LOUPE · INVERTER ── */
+/* ── 테이블 연출: 네온 헤드라인 · 타자기 자막 · 장전 공개 · 투시경 · 탄종변환 ── */
 .headline {
   position: absolute;
   left: 50%;
@@ -991,7 +983,7 @@ ul, ol { list-style: none; }
 .subtitle.tone-volt .sub-typed::after { color: var(--volt); text-shadow: 0 0 8px var(--volt); }
 
 .reveal,
-.loupe-popup {
+.scope-popup {
   position: absolute;
   opacity: 0;
   visibility: hidden;
@@ -999,7 +991,7 @@ ul, ol { list-style: none; }
   transition: opacity .25s ease, visibility 0s linear .25s, transform .3s ease;
 }
 .reveal.is-visible,
-.loupe-popup.is-visible {
+.scope-popup.is-visible {
   opacity: 1;
   visibility: visible;
   transition: opacity .25s ease, visibility 0s, transform .35s cubic-bezier(.3, 1.4, .5, 1);
@@ -1031,11 +1023,11 @@ ul, ol { list-style: none; }
 .t-live { color: var(--blood-hi); }
 .t-blank { color: var(--steel-hi); }
 .t-volt { color: var(--volt); }
-.card[data-item="INVERTER"] .card-icon,
-.dslot[data-item="INVERTER"] { color: var(--volt-hi); }
-.card[data-item="INVERTER"] .card-icon { box-shadow: inset 0 0 0 1px rgba(95, 212, 255, .45), 0 0 12px rgba(95, 212, 255, .2); }
+.card[data-item="CONVERT"] .card-icon,
+.dslot[data-item="CONVERT"] { color: var(--volt-hi); }
+.card[data-item="CONVERT"] .card-icon { box-shadow: inset 0 0 0 1px rgba(95, 212, 255, .45), 0 0 12px rgba(95, 212, 255, .2); }
 
-.loupe-popup {
+.scope-popup {
   left: 50%;
   bottom: 18%;
   z-index: 8;
@@ -1049,10 +1041,10 @@ ul, ol { list-style: none; }
   translate: -50% 0;
   transform: translateY(12px) scale(.94);
 }
-.loupe-popup.is-visible { transform: none; }
-.loupe-kicker { display: inline-flex; align-items: center; gap: 6px; font: 600 var(--fs-xxs)/1 var(--font-tech); letter-spacing: .26em; color: var(--brass); }
-.loupe-kicker svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
-.loupe-result {
+.scope-popup.is-visible { transform: none; }
+.scope-kicker { display: inline-flex; align-items: center; gap: 6px; font: 600 var(--fs-xxs)/1 var(--font-tech); letter-spacing: .26em; color: var(--brass); }
+.scope-kicker svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+.scope-result {
   margin: 5px 0 3px;
   font-family: var(--font-quote);
   font-size: calc(var(--fs-l) * 1.3);
@@ -1060,11 +1052,11 @@ ul, ol { list-style: none; }
   letter-spacing: .22em;
   text-indent: .22em;
 }
-.loupe-popup.is-live .loupe-result { color: var(--blood-hi); text-shadow: 0 0 18px rgba(217, 38, 38, .8); }
-.loupe-popup.is-blank .loupe-result { color: var(--steel-hi); text-shadow: 0 0 18px rgba(59, 105, 152, .95); }
-.loupe-note { font-size: var(--fs-xxs); letter-spacing: .12em; color: var(--ink-dim); }
+.scope-popup.is-live .scope-result { color: var(--blood-hi); text-shadow: 0 0 18px rgba(217, 38, 38, .8); }
+.scope-popup.is-blank .scope-result { color: var(--steel-hi); text-shadow: 0 0 18px rgba(59, 105, 152, .95); }
+.scope-note { font-size: var(--fs-xxs); letter-spacing: .12em; color: var(--ink-dim); }
 
-/* 변환기: 푸른 전기 스파크 (#sparks.is-active) + 총 감전 번쩍임 (#gun.shock) */
+/* 탄종변환: 푸른 전기 스파크 (#sparks.is-active) + 총 감전 번쩍임 (#gun.shock) */
 .sparks {
   position: absolute;
   left: 4%;
@@ -1185,7 +1177,7 @@ ul, ol { list-style: none; }
 .dslot.is-new { animation: card-pop .45s cubic-bezier(.3, 1.6, .5, 1) both; }
 @keyframes card-pop { from { opacity: 0; transform: translateY(-10px) scale(.75); } }
 
-/* 위스키로 파괴되는 아이템: JS가 .is-shattered를 붙이고 연출이 끝난 뒤 목록을 다시 그린다 */
+/* 탄제거로 파괴되는 아이템: JS가 .is-shattered를 붙이고 연출이 끝난 뒤 목록을 다시 그린다 */
 .card.is-shattered,
 .dslot.is-shattered { animation: shatter .65s ease-in both; pointer-events: none; }
 @keyframes shatter {
@@ -2693,7 +2685,7 @@ body.slowmo { --slow: 1.75; }
   .zone.is-guillotine .tube,
   .zone.is-guillotine .cell.is-on { animation: none; }
   .headline.is-visible { animation: none; } /* 네온 점멸 대신 transition 으로 부드럽게 켜진다 */
-  .headline.tone-volt.is-visible { animation: volt-jitter .9s steps(1) .3s both; } /* 변환기의 글자 지직거림(작은 흔들림)은 남긴다 */
+  .headline.tone-volt.is-visible { animation: volt-jitter .9s steps(1) .3s both; } /* 탄종변환의 글자 지직거림(작은 흔들림)은 남긴다 */
 
   /* ③ box-shadow 맥동 → 정지 (격발 버튼은 합성 전용 광택 이동으로 '장전됨'을 알린다) */
   .title-btn-play,
@@ -2710,7 +2702,7 @@ body.slowmo { --slow: 1.75; }
   .headline { will-change: transform, opacity; }
   .subtitle,
   .reveal,
-  .loupe-popup { will-change: opacity; }
+  .scope-popup { will-change: opacity; }
 }
 @keyframes armed-sheen { /* 금속 광택이 천천히 지나간다 — transform 만 움직여 GPU 가 합성만 한다 */
   0%, 55% { transform: translateX(-120%); }

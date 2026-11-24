@@ -5,21 +5,21 @@
  *   game.useItem('A', 0);          // 자신의 아이템 슬롯 인덱스
  *   game.shoot('A', 'opponent');   // 'self' | 'opponent'
  *   game.getPublicState('A');      // A 시점 공개 상태 (탄 순서는 비공개)
- *   game.getLog('B', since);       // B 시점 로그 (돋보기로 본 탄은 사용자만)
+ *   game.getLog('B', since);       // B 시점 로그 (투시경으로 본 탄은 사용자만)
  *
  * 액션 결과: { ok: true, ...결과, events } | { ok: false, error }
  * 로그 type: ROUND_START, LOAD, DEAL, TURN, SKIP, SHOT, ITEM, ROUND_END, GAME_OVER
  * 비공개 규칙
- *  - LOUPE로 본 약실 탄종은 사용자에게만 (secret)
- *  - INVERTER는 바뀐 탄종을 누구에게도 알리지 않으며, 이번 장전이 끝날 때까지 공개 실탄/공포탄 개수를 가린다
+ *  - SCOPE(투시경)로 본 약실 탄종은 사용자에게만 (secret)
+ *  - CONVERT(탄종변환)는 바뀐 탄종을 누구에게도 알리지 않으며, 이번 장전이 끝날 때까지 공개 실탄/공포탄 개수를 가린다
  *    (live·blank = null, total만 공개 → 개수 변화로 뒤집힌 탄종을 역산할 수 없음)
- * 지급 규칙: 장전마다 1인당 라운드별 1·2·2개 · 최대 6칸 · 같은 아이템 2개(수갑은 1개) · 수갑·시가는 다른 아이템의 절반 확률
- * 시가는 단두대(체력 1)에서도 쓸 수 있다 (가득 찬 체력에서만 불가)
- * 위스키: 현재 탄을 배출(종류 공개)하고 상대 아이템 1개를 무작위로 파괴한다 (ITEM 로그의 destroyed, 상대 아이템이 없으면 배출만)
+ * 지급 규칙: 장전마다 1인당 라운드별 1·2·2개 · 최대 6칸 · 같은 아이템 2개(섬광탄은 1개) · 섬광탄·위스키 한잔은 다른 아이템의 절반 확률
+ * 위스키 한잔(DRINK)은 단두대(체력 1)에서도 쓸 수 있다 (가득 찬 체력에서만 불가)
+ * 탄제거(EJECT): 현재 탄을 배출(종류 공개)하고 상대 아이템 1개를 무작위로 파괴한다 (ITEM 로그의 destroyed, 상대 아이템이 없으면 배출만)
  * 턴 규칙
  *  - 자신에게 쏜 공포탄만 턴을 이어 간다. 그 밖의 격발(상대에게 쏨 · 자신에게 실탄)은 상대에게 턴이 넘어간다.
  *  - 마지막 발이라 재장전이 일어나도 재장전은 턴을 바꾸지 않는다 — 턴은 그 격발의 결과를 그대로 따른다.
- *    (마지막 공포탄을 자신에게 쏘면 재장전 뒤에도 내 턴 · 위스키로 마지막 탄을 빼도 사용자의 턴이 이어진다)
+ *    (마지막 공포탄을 자신에게 쏘면 재장전 뒤에도 내 턴 · 탄제거로 마지막 탄을 빼도 사용자의 턴이 이어진다)
  *  - 새 라운드(누군가 체력 0)가 시작될 때만 '직전 마지막 격발자의 상대'가 선공한다 (게임 첫 라운드는 players[0]).
  *  - TURN 로그는 턴이 새로 시작될 때만 나온다 → 턴이 이어지는 재장전(LOAD · DEAL)에는 TURN이 뒤따르지 않는다.
  */
@@ -27,13 +27,13 @@
 export const SHELL = Object.freeze({ LIVE: 'LIVE', BLANK: 'BLANK' });
 
 export const ITEM = Object.freeze({
-  LOUPE: 'LOUPE',
-  SAW: 'SAW',
-  CUFFS: 'CUFFS',
-  WHISKEY: 'WHISKEY',
-  CIGAR: 'CIGAR',
-  MAGNET: 'MAGNET',
-  INVERTER: 'INVERTER',
+  SCOPE: 'SCOPE', // 투시경: 약실 탄 몰래 확인
+  DOUBLE: 'DOUBLE', // 더블샷: 다음 한 발 피해 2배
+  FLASH: 'FLASH', // 섬광탄: 상대 다음 턴 스킵
+  EJECT: 'EJECT', // 탄제거: 약실 탄 배출 + 상대 아이템 1개 파괴
+  DRINK: 'DRINK', // 위스키 한잔: 체력 +1
+  PICKPOCKET: 'PICKPOCKET', // 소매치기: 상대 아이템을 훔쳐 즉시 사용
+  CONVERT: 'CONVERT', // 탄종변환: 약실 탄 실탄↔공포탄
 });
 
 const ROUNDS = [
@@ -44,20 +44,20 @@ const ROUNDS = [
 const ITEM_TYPES = Object.values(ITEM);
 const MAX_SLOTS = 6;
 const MAX_SAME_ITEM = 2;
-const DROP_WEIGHT = { [ITEM.CUFFS]: 1, [ITEM.CIGAR]: 1 }; // 지급 가중치 (기본 2) → 수갑·시가는 다른 아이템의 절반 확률
-const HOLD_LIMIT = { [ITEM.CUFFS]: 1 }; // 같은 아이템 동시 보유 한도 (기본 MAX_SAME_ITEM) → 수갑은 1개만
-const MAX_CIGAR_DROPS = 2; // 플레이어별, 라운드당
+const DROP_WEIGHT = { [ITEM.FLASH]: 1, [ITEM.DRINK]: 1 }; // 지급 가중치 (기본 2) → 섬광탄·위스키 한잔은 다른 아이템의 절반 확률
+const HOLD_LIMIT = { [ITEM.FLASH]: 1 }; // 같은 아이템 동시 보유 한도 (기본 MAX_SAME_ITEM) → 섬광탄은 1개만
+const MAX_DRINK_DROPS = 2; // 플레이어별, 라운드당
 const WINS_NEEDED = 2;
 const flip = (shell) => (shell === SHELL.LIVE ? SHELL.BLANK : SHELL.LIVE);
 
 export class GameEngine {
   #rng;
-  #players; // [{ id, hp, items, wins, cigars }]
+  #players; // [{ id, hp, items, wins, drinks }]
   #round = 1;
   #chamber = []; // 비공개 탄창, [0] = 현재 약실
-  #obscured = false; // 이번 장전에서 INVERTER가 쓰여 공개 탄 구성이 가려졌는지
-  #turn = null; // { player, loupe, saw, sawUsed, cuffsUsed }
-  #cuffs = null; // { by, pending } : pending이면 by의 상대가 다음 턴 스킵
+  #obscured = false; // 이번 장전에서 CONVERT가 쓰여 공개 탄 구성이 가려졌는지
+  #turn = null; // { player, scope, double, doubleUsed, flashUsed }
+  #flash = null; // { by, pending } : pending이면 by의 상대가 다음 턴 스킵
   #lastShooter = null;
   #winner = null;
   #log = [];
@@ -67,7 +67,7 @@ export class GameEngine {
       throw new Error('서로 다른 플레이어 ID 2개가 필요합니다.');
     }
     this.#rng = rng;
-    this.#players = players.map((id) => ({ id, hp: 0, items: [], wins: 0, cigars: 0 }));
+    this.#players = players.map((id) => ({ id, hp: 0, items: [], wins: 0, drinks: 0 }));
     this.#startRound();
   }
 
@@ -80,8 +80,8 @@ export class GameEngine {
     const from = this.#log.length;
     const victim = target === 'self' ? p : this.#other(p);
     const shell = this.#chamber.shift();
-    const damage = shell === SHELL.LIVE ? (this.#turn.saw ? 2 : 1) : 0;
-    this.#turn.saw = false;
+    const damage = shell === SHELL.LIVE ? (this.#turn.double ? 2 : 1) : 0;
+    this.#turn.double = false;
     this.#lastShooter = p;
     victim.hp = Math.max(0, victim.hp - damage);
     this.#emit({ type: 'SHOT', actor: p.id, target: victim.id, shell, damage });
@@ -106,7 +106,7 @@ export class GameEngine {
     p.items.splice(itemIndex, 1);
     const effect = this.#apply(p, item);
     this.#emit({ type: 'ITEM', actor: p.id, item, ...effect });
-    if (this.#chamber.length === 0) this.#fillChamber(); // WHISKEY로 마지막 탄 배출 시 재장전 (아이템은 턴을 끝내지 않으므로 사용자의 턴이 그대로 이어짐)
+    if (this.#chamber.length === 0) this.#fillChamber(); // EJECT로 마지막 탄 배출 시 재장전 (아이템은 턴을 끝내지 않으므로 사용자의 턴이 그대로 이어짐)
     return { ok: true, item, ...effect, events: this.getLog(playerId, from) };
   }
 
@@ -121,7 +121,7 @@ export class GameEngine {
     return {
       round: this.#round,
       total, // 남은 총 발수 (항상 정확)
-      live, // 변환기로 가려졌으면 null
+      live, // 탄종변환으로 가려졌으면 null
       blank: live === null ? null : total - live,
       obscured: this.#obscured,
       me: side(me),
@@ -129,11 +129,11 @@ export class GameEngine {
       turn: t && {
         player: t.player.id,
         isMine: t.player === me,
-        sawActive: t.saw,
-        sawUsed: t.sawUsed, // 이번 턴 SAW 사용 → 같은 턴 CUFFS·LOUPE 불가
-        loupeUsed: t.loupe, // 이번 턴 LOUPE 사용 → 같은 턴 SAW 불가
-        cuffed: this.#cuffs?.pending ? this.#other(this.#cuffs.by).id : null,
-        cuffsLocked: this.#cuffs !== null, // 수갑 효과 진행 중(스킵 대기 또는 스킵 후 연속 턴) → CUFFS 재사용 불가
+        doubleActive: t.double,
+        doubleUsed: t.doubleUsed, // 이번 턴 DOUBLE 사용 → 같은 턴 FLASH·SCOPE 불가
+        scopeUsed: t.scope, // 이번 턴 SCOPE 사용 → 같은 턴 DOUBLE 불가
+        stunned: this.#flash?.pending ? this.#other(this.#flash.by).id : null,
+        flashLocked: this.#flash !== null, // 섬광탄 효과 진행 중(스킵 대기 또는 스킵 후 연속 턴) → FLASH 재사용 불가
       },
       winner: this.#winner?.id ?? null,
     };
@@ -173,43 +173,43 @@ export class GameEngine {
   #blockReason(p, item) {
     const t = this.#turn;
     switch (item) {
-      case ITEM.LOUPE: return t.loupe ? 'LOUPE_USED' : t.sawUsed ? 'SAW_LOUPE_CONFLICT' : null;
-      case ITEM.SAW: return t.saw ? 'SAW_ACTIVE' : t.cuffsUsed ? 'SAW_CUFFS_CONFLICT' : t.loupe ? 'SAW_LOUPE_CONFLICT' : null;
-      case ITEM.CUFFS: return t.sawUsed ? 'SAW_CUFFS_CONFLICT' : this.#cuffs ? 'CUFFS_LOCKED' : null;
-      case ITEM.CIGAR: return p.hp >= this.#cfg.hp ? 'HP_FULL' : null; // 단두대(체력 1)에서도 사용 가능
-      case ITEM.MAGNET: return this.#stealable(p).length ? null : 'NOTHING_TO_STEAL';
-      default: return null; // WHISKEY, INVERTER
+      case ITEM.SCOPE: return t.scope ? 'SCOPE_USED' : t.doubleUsed ? 'DOUBLE_SCOPE_CONFLICT' : null;
+      case ITEM.DOUBLE: return t.double ? 'DOUBLE_ACTIVE' : t.flashUsed ? 'DOUBLE_FLASH_CONFLICT' : t.scope ? 'DOUBLE_SCOPE_CONFLICT' : null;
+      case ITEM.FLASH: return t.doubleUsed ? 'DOUBLE_FLASH_CONFLICT' : this.#flash ? 'FLASH_LOCKED' : null;
+      case ITEM.DRINK: return p.hp >= this.#cfg.hp ? 'HP_FULL' : null; // 단두대(체력 1)에서도 사용 가능
+      case ITEM.PICKPOCKET: return this.#stealable(p).length ? null : 'NOTHING_TO_STEAL';
+      default: return null; // EJECT, CONVERT
     }
   }
 
   #apply(p, item) {
     const t = this.#turn;
     switch (item) {
-      case ITEM.LOUPE:
-        t.loupe = true;
+      case ITEM.SCOPE:
+        t.scope = true;
         return { shell: this.#chamber[0], secret: true };
-      case ITEM.SAW:
-        t.saw = t.sawUsed = true;
+      case ITEM.DOUBLE:
+        t.double = t.doubleUsed = true;
         return {};
-      case ITEM.CUFFS:
-        t.cuffsUsed = true;
-        this.#cuffs = { by: p, pending: true };
+      case ITEM.FLASH:
+        t.flashUsed = true;
+        this.#flash = { by: p, pending: true };
         return { target: this.#other(p).id };
-      case ITEM.WHISKEY: { // 현재 탄을 배출(종류 공개)하고 상대 아이템 1개를 무작위로 파괴 (파괴는 공개, 상대 아이템이 없으면 배출만)
+      case ITEM.EJECT: { // 현재 탄을 배출(종류 공개)하고 상대 아이템 1개를 무작위로 파괴 (파괴는 공개, 상대 아이템이 없으면 배출만)
         const shell = this.#chamber.shift();
         const foe = this.#other(p);
         if (!foe.items.length) return { shell };
         const [destroyed] = foe.items.splice(this.#int(0, foe.items.length - 1), 1);
         return { shell, destroyed };
       }
-      case ITEM.CIGAR:
+      case ITEM.DRINK:
         return { hp: ++p.hp };
-      case ITEM.MAGNET: {
+      case ITEM.PICKPOCKET: {
         const slots = this.#stealable(p);
         const [stolen] = this.#other(p).items.splice(slots[this.#int(0, slots.length - 1)], 1);
         return { stolen, ...this.#apply(p, stolen) };
       }
-      case ITEM.INVERTER: // 약실 탄 성질 반전. 결과는 아무에게도 알리지 않고 공개 개수를 가린다
+      case ITEM.CONVERT: // 약실 탄 성질 반전. 결과는 아무에게도 알리지 않고 공개 개수를 가린다
         this.#chamber[0] = flip(this.#chamber[0]);
         this.#obscured = true;
         return {};
@@ -218,14 +218,14 @@ export class GameEngine {
     }
   }
 
-  // MAGNET으로 뺏어 즉시 발동 가능한 상대 슬롯 (MAGNET 및 지금 사용 불가한 아이템 제외)
+  // PICKPOCKET으로 훔쳐 즉시 발동 가능한 상대 슬롯 (PICKPOCKET 및 지금 사용 불가한 아이템 제외)
   #stealable(p) {
-    return this.#other(p).items.flatMap((it, i) => (it !== ITEM.MAGNET && !this.#blockReason(p, it) ? [i] : []));
+    return this.#other(p).items.flatMap((it, i) => (it !== ITEM.PICKPOCKET && !this.#blockReason(p, it) ? [i] : []));
   }
 
   #startRound() {
-    for (const p of this.#players) Object.assign(p, { hp: this.#cfg.hp, items: [], cigars: 0 });
-    this.#cuffs = null;
+    for (const p of this.#players) Object.assign(p, { hp: this.#cfg.hp, items: [], drinks: 0 });
+    this.#flash = null;
     this.#emit({ type: 'ROUND_START', hp: this.#cfg.hp });
     this.#fillChamber();
     // 새 라운드 선공: 직전 마지막 격발자의 상대 (게임 첫 라운드는 격발 기록이 없으므로 players[0])
@@ -248,10 +248,10 @@ export class GameEngine {
     const dealt = [];
     for (let n = 0; n < count && p.items.length < MAX_SLOTS; n++) {
       const pool = ITEM_TYPES.filter((it) => p.items.filter((x) => x === it).length < (HOLD_LIMIT[it] ?? MAX_SAME_ITEM)
-        && (it !== ITEM.CIGAR || p.cigars < MAX_CIGAR_DROPS));
+        && (it !== ITEM.DRINK || p.drinks < MAX_DRINK_DROPS));
       if (!pool.length) break;
       const it = this.#weighted(pool);
-      if (it === ITEM.CIGAR) p.cigars++;
+      if (it === ITEM.DRINK) p.drinks++;
       p.items.push(it);
       dealt.push(it);
     }
@@ -266,18 +266,18 @@ export class GameEngine {
   }
 
   #beginTurn(p) {
-    const c = this.#cuffs;
+    const c = this.#flash;
     if (c && c.by !== p) {
       if (c.pending) {
-        // 수갑: 이번 턴 스킵 → 사용자 연속 턴 (상대가 실제 턴을 가질 때까지 수갑 재사용 불가)
+        // 섬광탄: 이번 턴 스킵 → 사용자 연속 턴 (상대가 실제 턴을 가질 때까지 섬광탄 재사용 불가)
         c.pending = false;
         this.#emit({ type: 'SKIP', player: p.id });
         p = c.by;
       } else {
-        this.#cuffs = null;
+        this.#flash = null;
       }
     }
-    this.#turn = { player: p, loupe: false, saw: false, sawUsed: false, cuffsUsed: false };
+    this.#turn = { player: p, scope: false, double: false, doubleUsed: false, flashUsed: false };
     this.#emit({ type: 'TURN', player: p.id });
   }
 
@@ -298,7 +298,7 @@ export class GameEngine {
     this.#log.push(Object.freeze({ seq: this.#log.length, round: this.#round, ...entry }));
   }
 
-  // 시점별 로그: 돋보기로 본 탄종(secret)은 사용자에게만
+  // 시점별 로그: 투시경으로 본 탄종(secret)은 사용자에게만
   #view(e, viewerId) {
     if (!e.secret || e.actor === viewerId) return e;
     const { shell: _hidden, ...rest } = e;

@@ -8,18 +8,18 @@
  *   const action = dealer.decideNextAction(engine.getPublicState('B'), memory);
  *   // action: { type: 'item', slotIndex } | { type: 'shoot', target: 'self' | 'opponent' } | null(내 턴 아님)
  *
- * memory.knownShell  지금 약실 탄 (돋보기로 본 것, 변환기로 뒤집히면 같이 뒤집음)
- * memory.belief      변환기로 공개 개수가 가려졌을 때 쓰는 추정 탄 구성 { live, blank, frontFlipped }
- * memory.drank       이번 턴에 위스키를 이미 썼는지 (정찰 전 위스키는 한 턴에 한 번만)
+ * memory.knownShell  지금 약실 탄 (투시경으로 본 것, 탄종변환으로 뒤집히면 같이 뒤집음)
+ * memory.belief      탄종변환으로 공개 개수가 가려졌을 때 쓰는 추정 탄 구성 { live, blank, frontFlipped }
+ * memory.ejected     이번 턴에 탄제거를 이미 썼는지 (정찰 전 탄제거는 한 턴에 한 번만)
  *
  * - decideNextAction은 memory를 바꾸지 않으며 같은 입력엔 같은 행동을 낸다.
  * - 사용 가능 판정은 엔진 규칙과 같거나 더 엄격하다 → 엔진 에러가 나지 않음.
- * - 쇠톱이 걸린 발은 항상 상대에게 쏜다 (쇠톱을 자기 격발로 날리는 일이 없음).
+ * - 더블샷이 걸린 발은 항상 상대에게 쏜다 (더블샷을 자기 격발로 날리는 일이 없음).
  */
 import { ITEM, SHELL } from './gameEngine.js';
 
 const LEAN = 0.6; // 실탄/공포탄 우세 판단 기준
-const WORTH_STEALING = new Set([ITEM.LOUPE, ITEM.WHISKEY, ITEM.CUFFS, ITEM.CIGAR, ITEM.SAW]);
+const WORTH_STEALING = new Set([ITEM.SCOPE, ITEM.EJECT, ITEM.FLASH, ITEM.DRINK, ITEM.DOUBLE]);
 const flip = (shell) => (shell === SHELL.LIVE ? SHELL.BLANK : SHELL.LIVE);
 const key = (shell) => (shell === SHELL.LIVE ? 'live' : 'blank');
 
@@ -46,39 +46,39 @@ export class AIDealer {
     const can = (item) => me.items.includes(item) && this.#usable(item, s);
     const use = (item) => ({ type: 'item', slotIndex: me.items.indexOf(item) });
     const shoot = (target) => ({ type: 'shoot', target });
-    const sawReady = opp.hp >= 2 && can(ITEM.SAW); // 이번 발을 2배로 만들 수 있는가 (상대 체력 1이면 의미 없음)
-    const shotDamage = turn.sawActive || sawReady ? 2 : 1;
+    const doubleReady = opp.hp >= 2 && can(ITEM.DOUBLE); // 이번 발을 2배로 만들 수 있는가 (상대 체력 1이면 의미 없음)
+    const shotDamage = turn.doubleActive || doubleReady ? 2 : 1;
 
     // 1) 회복: 최대 체력 미만이면 (단두대에서도 가능)
-    if (can(ITEM.CIGAR)) return use(ITEM.CIGAR);
-    // 2) 위스키: 약실을 모를 때(아는 탄을 버리지 않도록) 앞 탄을 배출하며 상대 아이템 1개를 부순다 — 한 턴에 한 번
-    if (!known && s.total >= 2 && opp.items.length >= 1 && !memory?.drank && can(ITEM.WHISKEY)) return use(ITEM.WHISKEY);
-    // 3) 정찰: 약실을 모를 때 돋보기
-    if (!known && can(ITEM.LOUPE)) return use(ITEM.LOUPE);
-    // 쇠톱이 걸린 발은 무조건 상대에게
-    if (turn.sawActive) return shoot('opponent');
-    // 변환기 ①: 공포탄임을 알고, 실탄으로 뒤집으면 이번 발로 끝낼 수 있을 때
-    if (known === SHELL.BLANK && can(ITEM.INVERTER) && opp.hp <= shotDamage) return use(ITEM.INVERTER);
-    // 변환기 ②: 실탄임을 알지만 내가 단두대이고 이번 발로 끝낼 수 없으며 다음 탄들도 실탄 쪽이면
+    if (can(ITEM.DRINK)) return use(ITEM.DRINK);
+    // 2) 탄제거: 약실을 모를 때(아는 탄을 버리지 않도록) 앞 탄을 배출하며 상대 아이템 1개를 부순다 — 한 턴에 한 번
+    if (!known && s.total >= 2 && opp.items.length >= 1 && !memory?.ejected && can(ITEM.EJECT)) return use(ITEM.EJECT);
+    // 3) 정찰: 약실을 모를 때 투시경
+    if (!known && can(ITEM.SCOPE)) return use(ITEM.SCOPE);
+    // 더블샷이 걸린 발은 무조건 상대에게
+    if (turn.doubleActive) return shoot('opponent');
+    // 탄종변환 ①: 공포탄임을 알고, 실탄으로 뒤집으면 이번 발로 끝낼 수 있을 때
+    if (known === SHELL.BLANK && can(ITEM.CONVERT) && opp.hp <= shotDamage) return use(ITEM.CONVERT);
+    // 탄종변환 ②: 실탄임을 알지만 내가 단두대이고 이번 발로 끝낼 수 없으며 다음 탄들도 실탄 쪽이면
     //          → 공포탄으로 뒤집어 자기 격발로 턴을 이어 간다 (위험한 다음 탄을 상대에게 넘기지 않음)
-    if (known === SHELL.LIVE && can(ITEM.INVERTER) && me.hp === 1 && opp.hp > shotDamage
-      && this.#restLiveOdds(s, memory, known) >= 0.5) return use(ITEM.INVERTER);
-    // 4) 실탄 우세: SAW → (SAW 미사용 시) CUFFS → 상대 격발
+    if (known === SHELL.LIVE && can(ITEM.CONVERT) && me.hp === 1 && opp.hp > shotDamage
+      && this.#restLiveOdds(s, memory, known) >= 0.5) return use(ITEM.CONVERT);
+    // 4) 실탄 우세: DOUBLE → (DOUBLE 미사용 시) FLASH → 상대 격발
     if (pLive >= LEAN) {
-      if (sawReady) return use(ITEM.SAW);
-      const finishing = known === SHELL.LIVE && opp.hp <= 1; // 확정 마무리 발이면 수갑 생략
-      if (!finishing && can(ITEM.CUFFS)) return use(ITEM.CUFFS);
+      if (doubleReady) return use(ITEM.DOUBLE);
+      const finishing = known === SHELL.LIVE && opp.hp <= 1; // 확정 마무리 발이면 섬광탄 생략
+      if (!finishing && can(ITEM.FLASH)) return use(ITEM.FLASH);
       return shoot('opponent');
     }
     // 5) 공포탄 우세: 자기 격발 (단두대면 확실한 공포탄일 때만)
     if (pBlank >= LEAN && (known === SHELL.BLANK || me.hp > 1)) return shoot('self');
-    // 6) 애매할 때: WHISKEY → MAGNET(쓸 만한 게 있을 때) → 확률대로 격발
-    if (can(ITEM.WHISKEY)) return use(ITEM.WHISKEY);
-    if (can(ITEM.MAGNET) && this.#stealable(s).some((it) => WORTH_STEALING.has(it))) return use(ITEM.MAGNET);
+    // 6) 애매할 때: EJECT → PICKPOCKET(쓸 만한 게 있을 때) → 확률대로 격발
+    if (can(ITEM.EJECT)) return use(ITEM.EJECT);
+    if (can(ITEM.PICKPOCKET) && this.#stealable(s).some((it) => WORTH_STEALING.has(it))) return use(ITEM.PICKPOCKET);
     return shoot(pLive >= 0.5 || me.hp === 1 ? 'opponent' : 'self');
   }
 
-  /** 엔진 로그(또는 액션 결과)를 반영한다. 상대 행동까지 넘겨야 변환기 이후 추정이 정확하다. */
+  /** 엔진 로그(또는 액션 결과)를 반영한다. 상대 행동까지 넘겨야 탄종변환 이후 추정이 정확하다. */
   observe(result, memory = {}) {
     const events = Array.isArray(result) ? result : (result?.events ?? []);
     for (const e of events) {
@@ -95,16 +95,16 @@ export class AIDealer {
           break;
         case 'TURN':
           memory.knownShell = null;
-          memory.drank = false;
+          memory.ejected = false;
           break;
         case 'ITEM':
-          if (item === ITEM.WHISKEY) {
+          if (item === ITEM.EJECT) {
             this.#reveal(memory, e.shell);
             memory.knownShell = null;
-            if (mine) memory.drank = true;
-          } else if (item === ITEM.LOUPE && mine) {
+            if (mine) memory.ejected = true;
+          } else if (item === ITEM.SCOPE && mine) {
             this.#learn(memory, e.shell);
-          } else if (item === ITEM.INVERTER) {
+          } else if (item === ITEM.CONVERT) {
             const b = memory.belief;
             let front = memory.knownShell;
             if (!front && b && !b.frontFlipped) front = b.live === 0 ? SHELL.BLANK : b.blank === 0 ? SHELL.LIVE : null; // 한 종류만 남았던 경우
@@ -130,20 +130,20 @@ export class AIDealer {
   #usable(item, s) {
     const { me, turn } = s;
     switch (item) {
-      case ITEM.LOUPE: return !turn.loupeUsed && !turn.sawUsed;
-      case ITEM.SAW: return !turn.sawActive && turn.cuffed == null && !turn.loupeUsed;
-      case ITEM.CUFFS: return !turn.sawUsed && !turn.cuffsLocked;
-      case ITEM.WHISKEY: return true;
-      case ITEM.INVERTER: return true;
-      case ITEM.CIGAR: return me.hp < me.maxHp; // 단두대(체력 1)에서도 가능
-      case ITEM.MAGNET: return this.#stealable(s).length > 0;
+      case ITEM.SCOPE: return !turn.scopeUsed && !turn.doubleUsed;
+      case ITEM.DOUBLE: return !turn.doubleActive && turn.stunned == null && !turn.scopeUsed;
+      case ITEM.FLASH: return !turn.doubleUsed && !turn.flashLocked;
+      case ITEM.EJECT: return true;
+      case ITEM.CONVERT: return true;
+      case ITEM.DRINK: return me.hp < me.maxHp; // 단두대(체력 1)에서도 가능
+      case ITEM.PICKPOCKET: return this.#stealable(s).length > 0;
       default: return false;
     }
   }
 
-  // MAGNET으로 뺏어 즉시 발동될 수 있는 상대 아이템 (엔진과 동일하게 MAGNET 제외)
+  // PICKPOCKET으로 훔쳐 즉시 발동될 수 있는 상대 아이템 (엔진과 동일하게 PICKPOCKET 제외)
   #stealable(s) {
-    return s.opponent.items.filter((it) => it !== ITEM.MAGNET && this.#usable(it, s));
+    return s.opponent.items.filter((it) => it !== ITEM.PICKPOCKET && this.#usable(it, s));
   }
 
   // 기억한 탄종이 공개 탄 구성과 모순되면 무시하고, 한 종류만 남았으면 확정으로 취급
@@ -186,7 +186,7 @@ export class AIDealer {
     memory.knownShell = shell;
   }
 
-  // 약실 탄이 공개됨(격발·위스키): 추정 구성에서 원래 탄종을 뺀다
+  // 약실 탄이 공개됨(격발·탄제거): 추정 구성에서 원래 탄종을 뺀다
   #reveal(memory, shell) {
     const b = memory.belief;
     if (!b || (shell !== SHELL.LIVE && shell !== SHELL.BLANK)) return;

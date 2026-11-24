@@ -175,7 +175,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     ...extra,
     state: room.engine.getPublicState(seat.id), // 이 좌석의 시점 — 탄 순서는 들어 있지 않다
     logFrom: since,
-    events, // 이 좌석이 볼 수 있는 로그만 (돋보기 결과는 쓴 사람에게만)
+    events, // 이 좌석이 볼 수 있는 로그만 (투시경 결과는 쓴 사람에게만)
     deadline: room.status === 'playing' ? room.deadline : null,
     now: Date.now(),
     opponentConnected: otherSeat(room, seat).connected,
@@ -340,7 +340,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     else return fail('INVALID_ACTION');
     if (!result.ok) return fail(result.error); // 거절된 입력은 상태를 바꾸지 않고 알리지도 않는다
     settle(room, action.type === 'shoot' ? 'shoot' : 'item', { by: seat.id });
-    return { ok: true }; // 결과는 state_update 로만 — 돋보기 같은 비공개 정보가 ack 에 섞이지 않게
+    return { ok: true }; // 결과는 state_update 로만 — 투시경 같은 비공개 정보가 ack 에 섞이지 않게
   }
 
   function sendEmote(socket, payload) {

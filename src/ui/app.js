@@ -56,7 +56,7 @@ const TYPE_MS = 26; // 자막 한 글자 타이핑 간격
 const TYPE_RUSH = 3; // 밀린 자막이 있으면 한 틱에 3글자씩 (최신 상황을 빨리 따라잡기)
 const LINE_GAP_MS = 700; // 다음 자막 전 읽을 시간
 const LINE_GAP_RUSH_MS = 250; // 2줄 이상 밀렸을 때
-const SHATTER_MS = 650; // 위스키로 아이템이 부서지는 연출 (style.css .is-shattered)
+const SHATTER_MS = 650; // 탄제거로 아이템이 부서지는 연출 (style.css .is-shattered)
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CHEST_SPIN_MS = 1300; // 상자 실린더가 도는 시간 (style.css .chest-stage.is-spinning)
 const TAUNT_COOLDOWN_MS = 6000; // 도발 버튼 쿨타임 — 연타로 딜러 대사·화면 연출이 쌓이지 않게
@@ -66,13 +66,13 @@ const TAUNT_OUT = 'lastchamber:taunt-out'; // 내가 도발을 썼다 → Step B
 const TAUNT_IN = 'lastchamber:taunt-in'; // 상대의 도발이 도착했다 → 같은 연출 재생 (detail 은 validateTauntEvent 로 검증)
 
 const ITEM_INFO = {
-  [ITEM.LOUPE]: { name: '돋보기', tag: '약실 확인', icon: 'i-loupe', desc: '현재 약실의 탄을 나만 몰래 확인 (턴당 1회, 같은 턴 쇠톱 불가)' },
-  [ITEM.SAW]: { name: '쇠톱', tag: '데미지 ×2', icon: 'i-saw', desc: '이번 한 발의 피해 2배 (같은 턴 돋보기·수갑 불가)' },
-  [ITEM.CUFFS]: { name: '수갑', tag: '상대 턴 스킵', icon: 'i-cuffs', desc: '상대의 다음 턴을 건너뜀 (드물게 지급 · 한 번에 1개만 보유)' },
-  [ITEM.WHISKEY]: { name: '위스키', tag: '탄 배출·템 파괴', icon: 'i-whiskey', desc: '현재 약실의 탄을 빼내 공개하고, 상대 아이템 1개를 무작위로 파괴' },
-  [ITEM.CIGAR]: { name: '시가', tag: '체력 +1', icon: 'i-cigar', desc: '체력 1칸 회복 (단두대에서도 가능 · 드물게 지급)' },
-  [ITEM.MAGNET]: { name: '자석', tag: '상대 템 강탈', icon: 'i-magnet', desc: '상대 아이템 하나를 무작위로 빼앗아 즉시 사용' },
-  [ITEM.INVERTER]: { name: '변환기', tag: '약실 반전', icon: 'i-inverter', desc: '현재 약실 탄을 실탄↔공포탄으로 뒤집음 (결과 비공개, 이번 장전 탄종 개수 가려짐)' },
+  [ITEM.SCOPE]: { name: '투시경', tag: '약실 확인', icon: 'i-scope', desc: '현재 약실의 탄을 나만 몰래 확인 (턴당 1회, 같은 턴 더블샷 불가)' },
+  [ITEM.DOUBLE]: { name: '더블샷', tag: '데미지 ×2', icon: 'i-double', desc: '이번 한 발의 피해 2배 (같은 턴 투시경·섬광탄 불가)' },
+  [ITEM.FLASH]: { name: '섬광탄', tag: '상대 턴 스킵', icon: 'i-flash', desc: '상대의 다음 턴을 건너뜀 (드물게 지급 · 한 번에 1개만 보유)' },
+  [ITEM.EJECT]: { name: '탄제거', tag: '탄 배출·템 파괴', icon: 'i-eject', desc: '현재 약실의 탄을 빼내 공개하고, 상대 아이템 1개를 무작위로 파괴' },
+  [ITEM.DRINK]: { name: '위스키 한잔', tag: '체력 +1', icon: 'i-drink', desc: '체력 1칸 회복 (단두대에서도 가능 · 드물게 지급)' },
+  [ITEM.PICKPOCKET]: { name: '소매치기', tag: '상대 템 강탈', icon: 'i-pickpocket', desc: '상대 아이템 하나를 무작위로 훔쳐 즉시 사용' },
+  [ITEM.CONVERT]: { name: '탄종변환', tag: '실탄↔공포탄', icon: 'i-convert', desc: '현재 약실 탄을 실탄↔공포탄으로 바꿈 (결과 비공개, 이번 장전 탄종 개수 가려짐)' },
 };
 const SHELL_NAME = { [SHELL.LIVE]: '실탄', [SHELL.BLANK]: '공포탄' };
 const flip = (shell) => (shell === SHELL.LIVE ? SHELL.BLANK : SHELL.LIVE);
@@ -90,8 +90,8 @@ const LINES = {
   selfBlankDealer: ['“후… 신은 아직 날 버리지 않았군.”'],
   selfLiveDealer: ['“…계산 착오군.”'],
   dealerItem: ['“이걸 쓸 때가 됐군.”', '“잠깐, 준비할 게 있어.”'],
-  inverter: ['“운명을 조금 비틀어 볼까.”', '“이제 아무도 모르지. 나 말고는.”'],
-  whiskeyPour: ['“한 잔 하지. 네 물건에도 한 방울.”', '“취하면 물건을 떨어뜨리기 마련이지.”'], // 딜러가 내 아이템을 부쉈을 때
+  convert: ['“운명을 조금 비틀어 볼까.”', '“이제 아무도 모르지. 나 말고는.”'],
+  ejectBreak: ['“탄 하나 빼는 김에, 네 물건도 치워 주지.”', '“걸리적거리는 건 치우는 게 내 방식이야.”'], // 딜러가 내 아이템을 부쉈을 때
   itemBroken: ['“…내 물건에 무슨 짓이지.”', '“그거, 꽤 비싼 건데 말이야.”'], // 내가 딜러 아이템을 부쉈을 때
   roundWon: ['“이번 판은 네가 가져가라.”'],
   roundLost: ['“이 테이블은 원래 내 거야.”'],
@@ -143,9 +143,9 @@ const el = {
   reveal: $('reveal'),
   revealShells: $('reveal-shells'),
   revealCount: $('reveal-count'),
-  loupe: $('loupe-popup'),
-  loupeKicker: $('loupe-kicker'),
-  loupeResult: $('loupe-result'),
+  scope: $('scope-popup'),
+  scopeKicker: $('scope-kicker'),
+  scopeResult: $('scope-result'),
   btnOpponent: $('btn-shoot-opponent'),
   btnSelf: $('btn-shoot-self'),
   flash: $('fx-flash'),
@@ -268,7 +268,7 @@ let lastLogIndex = 0; // getLog('player', lastLogIndex)로 아직 연출하지 �
 let aiLogIndex = 0; // 딜러에게 아직 알려 주지 않은 로그 위치 (딜러 시점)
 let gameId = 0; // 재시작 시 이전 게임의 비동기 흐름을 끊는 토큰
 let busy = true; // 연출 중 입력 잠금 (게임 시작 전에도 잠김)
-let myKnown = null; // 내가 아는 현재 약실 탄 (돋보기로 봄, 변환기로 뒤집히면 같이 뒤집힘)
+let myKnown = null; // 내가 아는 현재 약실 탄 (투시경으로 봄, 탄종변환으로 바뀌면 같이 바뀜)
 let roundResults = []; // 라운드별 'won' | 'lost' → 상단 램프
 let dealBuffer = {}; // 장전 시 양쪽 지급 아이템을 한 줄 자막으로 묶기
 const fresh = { [PLAYER]: new Set(), [AI]: new Set() }; // 방금 지급된 슬롯 → .is-new 연출
@@ -279,7 +279,7 @@ let sparkTimer = 0;
 let tabHidden = document.hidden; // 다른 탭·창에 나가 있는 동안 게임 일시정지
 let crisisLevel = ''; // '' | 'tense'(마지막 1발) | 'danger'(내 체력 1) → #crisis 위기 비네팅
 let lastTension = -1; // 배경음 긴장도 (바뀔 때만 엔진에 전달)
-const slotKeys = { [PLAYER]: null, [AI]: null }; // 지금 화면에 그려진 아이템 줄 ('loupe|saw|…') — 같으면 슬롯을 다시 만들지 않는다
+const slotKeys = { [PLAYER]: null, [AI]: null }; // 지금 화면에 그려진 아이템 줄 ('SCOPE|DOUBLE|…') — 같으면 슬롯을 다시 만들지 않는다
 let audioUnlockArmed = false; // PvP 시작 때 붙이는 '첫 터치에 오디오 깨우기' 리스너가 이미 대기 중인가 (판마다 쌓이지 않게)
 
 const profile = new PlayerProfile(); // 탄피 · 해금/장착 · 체험 · 연승 (localStorage에 영구 저장)
@@ -1531,7 +1531,7 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   el.headline.classList.remove('is-visible');
   el.reveal.classList.remove('is-visible');
   el.sparks.classList.remove('is-active');
-  el.gun.classList.remove('aim-up', 'aim-down', 'fire', 'barrel-spin', 'is-sawed', 'shock');
+  el.gun.classList.remove('aim-up', 'aim-down', 'fire', 'barrel-spin', 'is-doubled', 'shock');
   el.app.classList.remove('shake-hard');
   el.flash.classList.remove('flash-red');
   el.table.classList.remove('zoom-tension', 'zoom-hit');
@@ -1696,7 +1696,7 @@ async function runAITurn(token) {
     let result = null;
     if (action.type === 'item') {
       result = engine.useItem(AI, action.slotIndex);
-      if (result.ok) sound.playItem(); // 변환기도 사용 사실과 소리는 공개 (진동 없음)
+      if (result.ok) sound.playItem(); // 탄종변환도 사용 사실과 소리는 공개 (진동 없음)
     }
     if (!result?.ok) { // 격발 (아이템 실패 시에도 상대에게 격발로 진행해 멈추지 않게)
       thinking(false);
@@ -1804,7 +1804,7 @@ async function presentEntry(e, rest) {
       }
       break;
     case 'SKIP':
-      subtitle(e.player === PLAYER ? '수갑에 묶여 당신의 턴을 건너뛴다' : '수갑에 묶인 딜러의 턴을 건너뛴다');
+      subtitle(e.player === PLAYER ? '섬광탄에 눈이 멀어 당신의 턴을 건너뛴다' : '섬광탄에 눈이 먼 딜러의 턴을 건너뛴다');
       await headline('SKIP', 'info', 1100);
       break;
     case 'SHOT':
@@ -1849,7 +1849,7 @@ async function presentShot(e, rest) {
     : `공포탄${turnKept ? ' — 한 번 더' : ''}`;
   subtitle(`${josa(shooter, '이', '가')} ${aimed}에게 격발 — ${outcome}`, live ? 'danger' : 'blank');
   say(pick(shotLines(byMe, self, live)));
-  const word = live ? (e.damage > 1 ? `−${e.damage} SAWED` : 'BANG!') : turnKept ? 'CLICK · AGAIN' : 'CLICK';
+  const word = live ? (e.damage > 1 ? `−${e.damage} DOUBLE SHOT` : 'BANG!') : turnKept ? 'CLICK · AGAIN' : 'CLICK';
   await headline(word, live ? 'danger' : 'blank', 1000);
 }
 
@@ -1861,39 +1861,39 @@ function shotLines(byMe, self, live) {
 
 async function presentItem(e) {
   const mine = e.actor === PLAYER;
-  const used = e.stolen ?? e.item; // 자석이면 빼앗아 바로 쓴 아이템
+  const used = e.stolen ?? e.item; // 소매치기면 훔쳐서 바로 쓴 아이템
   const subject = josa(mine ? '당신' : '딜러', '이', '가');
   const head = e.stolen
-    ? `${subject} 자석으로 ${mine ? '딜러' : '당신'}의 ${josa(ITEM_INFO[e.stolen].name, '을', '를')} 빼앗아 사용`
+    ? `${subject} 소매치기로 ${mine ? '딜러' : '당신'}의 ${josa(ITEM_INFO[e.stolen].name, '을', '를')} 훔쳐 사용`
     : `${subject} ${josa(ITEM_INFO[e.item].name, '을', '를')} 사용`;
   let detail = effectText(used, e, mine);
 
-  if (used === ITEM.LOUPE && mine) learn(e.shell, 'SECRET · 약실 확인');
-  if (used === ITEM.WHISKEY) forget();
-  if (used === ITEM.INVERTER) {
-    if (myKnown) { // 미리 알던 탄이라면 반전 결과도 내가 계산해서 안다
+  if (used === ITEM.SCOPE && mine) learn(e.shell, 'SECRET · 약실 확인');
+  if (used === ITEM.EJECT) forget();
+  if (used === ITEM.CONVERT) {
+    if (myKnown) { // 미리 알던 탄이라면 변환 결과도 내가 계산해서 안다
       const before = myKnown;
-      learn(flip(before), 'SECRET · 반전 후 약실');
-      if (mine) detail = `약실의 ${josa(SHELL_NAME[before], '이', '가')} ${josa(SHELL_NAME[myKnown], '으로', '로')} 뒤집혔다 — 당신만 안다`;
+      learn(flip(before), 'SECRET · 변환 후 약실');
+      if (mine) detail = `약실의 ${josa(SHELL_NAME[before], '이', '가')} ${josa(SHELL_NAME[myKnown], '으로', '로')} 바뀌었다 — 당신만 안다`;
     }
     sparkFx();
   }
 
-  const volt = used === ITEM.INVERTER;
-  const pour = used === ITEM.WHISKEY && Boolean(e.destroyed); // 상대 아이템이 부서졌는가
-  const broken = pour && shatterSlot(e.destroyed, mine);
+  const volt = used === ITEM.CONVERT;
+  const smashed = used === ITEM.EJECT && Boolean(e.destroyed); // 상대 아이템이 부서졌는가
+  const broken = smashed && shatterSlot(e.destroyed, mine);
   subtitle(`${head} — ${detail}`, volt ? 'volt' : 'info');
-  if (pour) say(pick(mine ? LINES.itemBroken : LINES.whiskeyPour));
-  else if (!mine) say(pick(volt ? LINES.inverter : LINES.dealerItem));
+  if (smashed) say(pick(mine ? LINES.itemBroken : LINES.ejectBreak));
+  else if (!mine) say(pick(volt ? LINES.convert : LINES.dealerItem));
   const shown = volt
-    ? headline('INVERTED', 'volt', 1200)
+    ? headline('CONVERTED', 'volt', 1200)
     : headline(ITEM_INFO[e.item].tag + (e.stolen ? ` · ${ITEM_INFO[e.stolen].tag}` : ''), 'info', mine ? 850 : 1050);
   if (broken) await wait(SHATTER_MS); // 부서지는 동안은 아이템 목록을 그대로 둔다
   render();
   await shown;
 }
 
-// 위스키로 파괴되는 아이템을 지금 화면에서 찾아 부서지는 연출을 건다 (이미 다시 그려져 없으면 건너뜀)
+// 탄제거로 파괴되는 아이템을 지금 화면에서 찾아 부서지는 연출을 건다 (이미 다시 그려져 없으면 건너뜀)
 function shatterSlot(item, byMe) {
   const node = byMe
     ? el.dealerItems.querySelector(`.dslot[data-item="${item}"]:not(.is-shattered)`)
@@ -1905,17 +1905,17 @@ function shatterSlot(item, byMe) {
 
 function effectText(item, e, mine) {
   switch (item) {
-    case ITEM.LOUPE: return mine ? '약실을 몰래 확인했다' : '약실을 몰래 들여다본다';
-    case ITEM.SAW: return '다음 한 발 피해 2배';
-    case ITEM.CUFFS: return mine ? '딜러의 다음 턴을 건너뛴다' : '당신의 다음 턴을 건너뛴다';
-    case ITEM.WHISKEY: {
+    case ITEM.SCOPE: return mine ? '약실을 몰래 확인했다' : '약실을 몰래 들여다본다';
+    case ITEM.DOUBLE: return '다음 한 발 피해 2배';
+    case ITEM.FLASH: return mine ? '딜러의 다음 턴을 건너뛴다' : '당신의 다음 턴을 건너뛴다';
+    case ITEM.EJECT: {
       const ejected = `약실의 ${josa(SHELL_NAME[e.shell], '을', '를')} 빼냈다`;
       return e.destroyed
         ? `${ejected} — ${mine ? '딜러' : '당신'}의 ${josa(ITEM_INFO[e.destroyed].name, '이', '가')} 파괴됐다`
         : `${ejected} — 파괴할 아이템이 없었다`;
     }
-    case ITEM.CIGAR: return e.hp === 2 ? '체력 +1 — 단두대에서 벗어났다' : '체력 +1';
-    case ITEM.INVERTER: return mine ? '약실의 탄이 뒤집혔다 — 무엇이 됐는지는 아무도 모른다' : '약실의 탄이 뒤집혔다 — 이번 장전의 탄 구성은 이제 가려진다';
+    case ITEM.DRINK: return e.hp === 2 ? '체력 +1 — 단두대에서 벗어났다' : '체력 +1';
+    case ITEM.CONVERT: return mine ? '약실의 탄종이 바뀌었다 — 무엇이 됐는지는 아무도 모른다' : '약실의 탄종이 바뀌었다 — 이번 장전의 탄 구성은 이제 가려진다';
     default: return '';
   }
 }
@@ -1946,7 +1946,7 @@ function markFresh(e) {
   e.items.forEach((_, k) => fresh[e.player].add(count - e.items.length + k)); // 새 아이템은 인벤토리 끝에 붙는다
 }
 
-function patchShells(shell) { // 격발 순간 탄 HUD에서 1발을 바로 뺀다 (변환기로 가려졌으면 총 발수만 → 탄종 역산 불가)
+function patchShells(shell) { // 격발 순간 탄 HUD에서 1발을 바로 뺀다 (탄종변환으로 가려졌으면 총 발수만 → 탄종 역산 불가)
   const [icons, count] = !el.unknownRack.hidden ? [el.unknownIcons, el.totalCount]
     : shell === SHELL.LIVE ? [el.liveIcons, el.liveCount] : [el.blankIcons, el.blankCount];
   icons.lastElementChild?.remove();
@@ -1965,19 +1965,19 @@ function patchHp(tube, zone, damage) { // 라운드가 넘어가기 전, 맞은 
 function learn(shell, kicker) {
   if (shell !== SHELL.LIVE && shell !== SHELL.BLANK) return;
   myKnown = shell;
-  el.loupe.classList.toggle('is-live', shell === SHELL.LIVE);
-  el.loupe.classList.toggle('is-blank', shell === SHELL.BLANK);
-  el.loupeKicker.textContent = kicker;
-  el.loupeResult.textContent = SHELL_NAME[shell];
-  el.loupe.classList.add('is-visible');
+  el.scope.classList.toggle('is-live', shell === SHELL.LIVE);
+  el.scope.classList.toggle('is-blank', shell === SHELL.BLANK);
+  el.scopeKicker.textContent = kicker;
+  el.scopeResult.textContent = SHELL_NAME[shell];
+  el.scope.classList.add('is-visible');
 }
 
 function forget() {
   myKnown = null;
-  el.loupe.classList.remove('is-visible');
+  el.scope.classList.remove('is-visible');
 }
 
-function sparkFx() { // 변환기: 푸른 전기 스파크 + 총 감전
+function sparkFx() { // 탄종변환: 푸른 전기 스파크 + 총 감전
   restartClasses([[el.sparks, 'is-active'], [el.gun, 'shock']]);
   clearTimeout(sparkTimer);
   sparkTimer = setTimeout(() => {
@@ -2088,14 +2088,14 @@ function render() {
   renderHp(el.playerHp, s.me, '내');
   el.zoneDealer.classList.toggle('is-guillotine', s.opponent.guillotine);
   el.zonePlayer.classList.toggle('is-guillotine', s.me.guillotine);
-  el.zoneDealer.classList.toggle('is-cuffed', t?.cuffed === AI);
-  el.zonePlayer.classList.toggle('is-cuffed', t?.cuffed === PLAYER);
+  el.zoneDealer.classList.toggle('is-stunned', t?.stunned === AI);
+  el.zonePlayer.classList.toggle('is-stunned', t?.stunned === PLAYER);
   el.zoneDealer.classList.toggle('is-active', t?.player === AI && !s.winner);
   el.zonePlayer.classList.toggle('is-active', myTurn);
   setText(el.turnLabel, s.winner ? 'GAME OVER' : myTurn ? 'YOUR TURN' : online ? 'OPPONENT' : 'DEALER');
   el.turnLabel.classList.toggle('is-dealer', t?.player === AI);
 
-  // 탄 랙: 변환기로 가려졌으면 총 발수만 (탄종을 역산할 수 없게)
+  // 탄 랙: 탄종변환으로 가려졌으면 총 발수만 (탄종을 역산할 수 없게)
   const obscured = s.live === null;
   setHidden(el.liveRack, obscured);
   setHidden(el.blankRack, obscured);
@@ -2103,7 +2103,7 @@ function render() {
   if (obscured) {
     renderShells(el.unknownIcons, s.total, 'i-unknown');
     setText(el.totalCount, String(s.total));
-    setAttr(el.shells, 'aria-label', `남은 탄 ${s.total}발 — 변환기로 탄종이 가려짐`);
+    setAttr(el.shells, 'aria-label', `남은 탄 ${s.total}발 — 탄종변환으로 탄종이 가려짐`);
   } else {
     renderShells(el.liveIcons, s.live, 'i-live');
     renderShells(el.blankIcons, s.blank, 'i-blank');
@@ -2115,7 +2115,7 @@ function render() {
   renderDealerItems(s.opponent.items);
   renderPlayerItems(s, canAct);
 
-  el.gun.classList.toggle('is-sawed', Boolean(t?.sawActive));
+  el.gun.classList.toggle('is-doubled', Boolean(t?.doubleActive));
   setDisabled(el.btnOpponent, !canAct);
   setDisabled(el.btnSelf, !canAct);
   syncMood(s);
@@ -2248,24 +2248,24 @@ function buildPlayerSlot(item, i) {
   return li;
 }
 
-// 엔진의 사용 불가 조건과 같은 규칙 (SAW의 수갑 충돌만 공개 정보 한계로 조금 더 엄격) → 쓸 수 없으면 사유 문자열
+// 엔진의 사용 불가 조건과 같은 규칙 (DOUBLE의 섬광탄 충돌만 공개 정보 한계로 조금 더 엄격) → 쓸 수 없으면 사유 문자열
 function blockReason(item, s) {
   const { me, turn } = s;
   switch (item) {
-    case ITEM.LOUPE:
-      return turn.loupeUsed ? '이번 턴에 이미 사용했다' : turn.sawUsed ? '쇠톱과 같은 턴에는 쓸 수 없다 (확정 2데미지 방지)' : null;
-    case ITEM.SAW:
-      return turn.sawActive ? '이미 총열을 잘랐다'
-        : turn.cuffed !== null ? '수갑과 같은 턴에는 쓸 수 없다'
-          : turn.loupeUsed ? '돋보기와 같은 턴에는 쓸 수 없다 (확정 2데미지 방지)' : null;
-    case ITEM.CUFFS: return turn.sawUsed ? '쇠톱과 같은 턴에는 쓸 수 없다' : turn.cuffsLocked ? '수갑 효과가 아직 남아 있다' : null;
-    case ITEM.CIGAR: return me.hp >= me.maxHp ? '체력이 가득 찼다' : null; // 단두대에서도 가능
-    case ITEM.MAGNET: return stealable(s).length ? null : '빼앗아 바로 쓸 수 있는 아이템이 없다';
-    default: return null; // WHISKEY · INVERTER는 언제나 가능
+    case ITEM.SCOPE:
+      return turn.scopeUsed ? '이번 턴에 이미 사용했다' : turn.doubleUsed ? '더블샷과 같은 턴에는 쓸 수 없다 (확정 2데미지 방지)' : null;
+    case ITEM.DOUBLE:
+      return turn.doubleActive ? '이미 더블샷이 걸려 있다'
+        : turn.stunned !== null ? '섬광탄과 같은 턴에는 쓸 수 없다'
+          : turn.scopeUsed ? '투시경과 같은 턴에는 쓸 수 없다 (확정 2데미지 방지)' : null;
+    case ITEM.FLASH: return turn.doubleUsed ? '더블샷과 같은 턴에는 쓸 수 없다' : turn.flashLocked ? '섬광탄 효과가 아직 남아 있다' : null;
+    case ITEM.DRINK: return me.hp >= me.maxHp ? '체력이 가득 찼다' : null; // 단두대에서도 가능
+    case ITEM.PICKPOCKET: return stealable(s).length ? null : '훔쳐서 바로 쓸 수 있는 아이템이 없다';
+    default: return null; // EJECT · CONVERT는 언제나 가능
   }
 }
 
-const stealable = (s) => s.opponent.items.filter((it) => it !== ITEM.MAGNET && blockReason(it, s) === null);
+const stealable = (s) => s.opponent.items.filter((it) => it !== ITEM.PICKPOCKET && blockReason(it, s) === null);
 
 function svgUse(className, iconId) {
   const svg = document.createElementNS(SVG_NS, 'svg');
