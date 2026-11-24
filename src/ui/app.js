@@ -34,6 +34,7 @@
 import { GameEngine, ITEM, SHELL } from '../engine/gameEngine.js';
 import { AIDealer } from '../engine/aiDealer.js';
 import { SoundEngine } from './soundEngine.js';
+import { watchLifecycle } from './lifecycle.js';
 import { platformBridge as platform } from '../platform/platformBridge.js';
 import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
@@ -394,15 +395,11 @@ function syncMood(s) {
   }
 }
 
-// 다른 탭·창으로 나가면 모든 소리를 멈추고(배경음 포함) 게임을 일시정지, 돌아오면 이어서 진행
+// 다른 탭·창으로 나가면 게임을 일시정지, 돌아오면 이어서 진행 (소리는 아래 watchLifecycle 이 따로 끄고 켠다)
 function onVisibilityChange() {
   tabHidden = document.hidden;
-  if (tabHidden) {
-    sound.suspend();
-    return;
-  }
+  if (tabHidden) return;
   timer.last = performance.now(); // 숨겨 둔 시간이 턴 타이머에서 깎이지 않게
-  sound.resume();
   profile.reload(); // 다른 탭에서 탄피·스킨·전적이 바뀌었을 수 있다
   syncWallet();
   syncPlayerCard();
@@ -2387,6 +2384,25 @@ initPvp({
 });
 syncSoundUi(); // 저장된 소리 설정을 화면에 반영
 document.addEventListener('visibilitychange', onVisibilityChange);
+// 앱 생명주기 — 화면을 떠나면(백그라운드 전환 · 화면 꺼짐 · 다른 앱/창) 소리를 즉시 멈추고, 보이고 포커스가 돌아오면 이어서.
+// 페이지를 떠나면(창 닫기 · 뒤로 가기 · 새로고침) 오디오 컨텍스트 · 배경음 타이머 · PvP 소켓 리스너를 정리한다 (로비 소켓은 multiplayer.js 가 같은 시점에 정리)
+let pvpLeftBehind = false; // 페이지 이탈로 진행 중이던 PvP 연결을 끊었다 → bfcache 로 돌아오면 새로 불러와 깨끗한 화면에서 다시 시작
+watchLifecycle({
+  onAway: () => guardUi(sound.suspend()),
+  onBack: () => guardUi(sound.resume()),
+  onLeave: () => {
+    guardUi(sound.close());
+    if (online) pvpLeftBehind = true;
+    pvpEnd();
+  },
+  onReturn: () => {
+    if (pvpLeftBehind) window.location.reload();
+  },
+});
+// 닫았다 다시 만든 컨텍스트 · iOS 처럼 제스처가 있어야 켜지는 경우: 화면 안에서의 다음 터치가 소리를 되살린다
+document.addEventListener('pointerdown', () => {
+  if (sound.needsUnlock) guardUi(sound.unlock());
+}, { capture: true, passive: true });
 el.btnSound.addEventListener('click', () => setSoundPanel(el.soundPanel.hidden));
 el.btnMute.addEventListener('click', () => setMuted(!soundPrefs.muted));
 el.sfxRange.addEventListener('input', () => onVolumeInput('sfx'));

@@ -9,7 +9,12 @@
  * - 녹음을 아직 못 불러왔거나 불러오기에 실패하면 합성 총성으로 대신 재생한다 (소리가 비지 않음).
  * - 배경 앰비언트(startAmbient)는 음악이 아니라 저음 드론·실내 소음·전등 험·드문 먼 소리를 합성해 까는 소리 바닥이다.
  *   setTension(0~1)으로 긴장도에 따라 서서히 커지고, duckAmbient()는 총성 때 잠깐 낮춘다.
- *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절하고, suspend()/resume()은 탭을 떠났을 때 모든 소리를 멈춘다.
+ *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절한다.
+ * - 생명주기 (src/ui/lifecycle.js 가 부른다):
+ *   suspend()  화면을 떠남 → 즉시 무음 · 울리던 효과음 끊기 · 배경음 예약 타이머 정지 · 컨텍스트 정지. resume() 전까지는
+ *              효과음 요청을 버리고(돌아왔을 때 몰아서 터지지 않게) 무엇도 컨텍스트를 다시 깨우지 못한다 (unlock() · iOS 'interrupted' 복구 포함).
+ *   resume()   화면으로 돌아옴 → 컨텍스트 재가동 · 음량 복구 · 배경음 예약 재개 (close() 뒤라면 새 컨텍스트를 만들고 배경음도 이어서 켠다)
+ *   close()    페이지 이탈 → 모든 소스 정지 · 타이머 해제 · 컨텍스트 close()
  * - 총성 출처: Freesound "Small pistol gunshot indoors" by acidsnowflake (#402789), CC0 1.0 (저작자 표시 불필요).
  *   미리듣기 MP3에서 한 발(4ms 앞부터 1.5초)을 잘라 25Hz 하이패스 → 피크 −1dBFS 정규화 → 모노 16비트 WAV.
  *   다른 총성으로 바꾸려면 같은 이름으로 파일만 교체하면 된다.
@@ -56,7 +61,12 @@ export class SoundEngine {
   #muted;
   #ambientBus = null; // 배경음 전체 음량 → destination
   #duck = null; // 배경음 순간 낮추기 (총성 때)
-  #ambient = null; // 켜져 있는 앰비언트 { out, nodes, droneLp, droneBus, hum, tensionGain, nextEvent, timer }
+  #ambient = null; // 켜져 있는 앰비언트 { out, nodes, droneLp, droneBus, hum, tensionGain, nextEvent }
+  #ambientTimer = 0; // 드문 먼 소리를 4초마다 이어서 예약하는 setInterval (화면 밖에서는 해제)
+  #ambientWanted = false; // 판이 진행 중이라 배경음이 깔려 있어야 하는가 (컨텍스트를 새로 만들면 이어서 켠다)
+  #voices = new Set(); // 지금 울리고 있는 효과음 소스 — 화면을 떠나면 한꺼번에 끊는다
+  #held = false; // 화면 밖(백그라운드 · 페이지 이탈): 소리를 만들지도, 컨텍스트를 깨우지도 않는다
+  #unlockedOnce = false; // 사용자가 한 번이라도 오디오를 켰는가 (close() 뒤 돌아오면 새 컨텍스트를 만들어도 되는가)
   #tension = 0;
 
   /**
@@ -100,49 +110,106 @@ export class SoundEngine {
     this.#applyVolumes();
   }
 
-  /** 탭을 떠났을 때: 효과음·배경음 모두 멈춘다 (resume()으로 이어서) */
+  /** 화면 밖(백그라운드 · 화면 꺼짐 · 다른 앱)에 있는 동안 true — 이때는 아무 소리도 나지 않는다 */
+  get inBackground() {
+    return this.#held;
+  }
+
+  /** 다음 사용자 터치에서 unlock()을 불러야 소리가 나는 상태인가 (화면 안 · 한 번 켠 적 있음 · 지금 꺼져 있음) */
+  get needsUnlock() {
+    return !this.#held && this.#unlockedOnce && this.#ctx?.state !== 'running';
+  }
+
+  /**
+   * 화면을 떠났을 때: 즉시 무음 → 울리던 효과음 끊기 → 배경음 예약 타이머 정지 → 컨텍스트 정지.
+   * resume() 전까지는 새 효과음을 만들지 않고 컨텍스트를 깨우는 모든 경로를 막는다 (여러 번 불러도 안전).
+   */
   async suspend() {
+    this.#held = true;
+    this.#disarmAmbientTimer();
+    this.#silence();
+    this.#stopVoices();
+    await this.#suspendContext();
+  }
+
+  /** 화면으로 돌아왔을 때: 컨텍스트 재가동 · 음량 복구 · 배경음 예약 재개. close() 뒤라면 새 컨텍스트를 만든다 (판이 진행 중이면 배경음도) */
+  async resume() {
+    this.#held = false;
     const ctx = this.#ctx;
-    if (!ctx || ctx.state !== 'running' || 'startRendering' in ctx) return;
+    if (!ctx) {
+      if (this.#unlockedOnce) await this.unlock(); // 제스처가 필요한 브라우저(iOS)에선 다음 터치의 unlock()에서 켜진다
+      return;
+    }
+    if ('startRendering' in ctx || ctx.state === 'closed') return;
+    this.#applyVolumes(); // 무음(0)에서 원래 음량으로 30ms 램프
+    if (this.#ambient) this.#armAmbientTimer();
+    else if (this.#ambientWanted) this.startAmbient();
+    if (ctx.state !== 'running') {
+      try {
+        await ctx.resume();
+      } catch {
+        // 자동재생 정책 등으로 실패 - 다음 터치의 unlock()에서 다시
+      }
+    }
+    if (this.#held) await this.#suspendContext(); // 깨우는 사이 다시 화면을 떠났다
+  }
+
+  /** 페이지를 떠날 때(창 닫기 · 뒤로 가기 · 새로고침): 모든 소스와 타이머를 멈추고 컨텍스트를 닫는다. bfcache 로 돌아오면 resume()이 새로 만든다 */
+  async close() {
+    this.#held = true;
+    this.#disarmAmbientTimer();
+    this.#silence();
+    this.#stopVoices();
+    const ambient = this.#ambient;
+    this.#ambient = null; // #ambientWanted 는 남긴다 → 돌아와 새 컨텍스트를 만들면 배경음을 이어서 켠다
+    for (const n of ambient?.nodes ?? []) {
+      try {
+        n.stop();
+      } catch {
+        // 이미 멈춤 - 무시
+      }
+    }
+    const ctx = this.#ctx;
+    this.#ctx = this.#master = this.#ambientBus = this.#duck = this.#noise = null;
+    this.#gunshot = null;
+    this.#loading = null;
+    if (!ctx || 'startRendering' in ctx || ctx.state === 'closed') return;
     try {
-      await ctx.suspend();
+      await ctx.close();
     } catch {
       // 이미 닫힘 - 무시
     }
   }
 
-  /** suspend()로 멈춘 소리를 이어서 재생 */
-  async resume() {
-    const ctx = this.#ctx;
-    if (!ctx || ctx.state !== 'suspended' || 'startRendering' in ctx) return;
-    try {
-      await ctx.resume();
-    } catch {
-      // 자동재생 정책 등으로 실패 - 무시
-    }
-  }
-
-  /** 첫 사용자 클릭/터치 핸들러 안에서 호출한다. 오디오 출력이 켜지면 true. 여러 번 불러도 안전하다. */
+  /** 첫 사용자 클릭/터치 핸들러 안에서 호출한다. 오디오 출력이 켜지면 true. 여러 번 불러도 안전하다. 화면 밖에서는 아무것도 하지 않는다. */
   async unlock() {
+    if (this.#held) return false; // 백그라운드에서 매칭이 잡히는 등 제스처 밖 호출이 화면 밖 소리를 깨우지 않게
     if (!this.#ctx) {
       const AudioCtx = globalThis.AudioContext ?? globalThis.webkitAudioContext;
       if (!AudioCtx) return false;
       this.#setup(new AudioCtx());
+      this.#unlockedOnce = true;
       // iOS Safari: 사용자 제스처 안에서 무음 버퍼를 한 번 재생해야 출력이 열린다
       const silence = this.#ctx.createBufferSource();
       silence.buffer = this.#ctx.createBuffer(1, 1, this.#ctx.sampleRate);
       silence.connect(this.#ctx.destination);
       silence.start();
       this.preload(); // 총성 녹음은 백그라운드로 불러온다 (끝나기 전엔 합성 총성으로 대신)
+      if (this.#ambientWanted) this.startAmbient(); // close() 뒤 새 컨텍스트: 진행 중이던 판의 배경음을 이어서
     }
-    if (this.#ctx.state !== 'running' && this.#ctx.state !== 'closed') {
+    const ctx = this.#ctx;
+    if (ctx.state !== 'running' && ctx.state !== 'closed') {
       try {
-        await this.#ctx.resume();
+        await ctx.resume();
       } catch {
         // OfflineAudioContext는 렌더링 전에 resume할 수 없다 - 무시
       }
     }
-    return this.#ctx.state === 'running';
+    if (this.#held) { // 깨우는 사이 화면을 떠났다 → 다시 재운다
+      await this.#suspendContext();
+      return false;
+    }
+    return ctx.state === 'running';
   }
 
   /** 총성 녹음을 불러와 디코드한다 (여러 번 불러도 한 번만). 성공하면 true, 실패하면 false → 합성 총성으로 대신한다. */
@@ -259,6 +326,7 @@ export class SoundEngine {
    * preschedule: 처음에 미리 깔아 둘 '드문 소리'의 길이(초). 실시간에서는 4초마다 이어서 예약한다.
    */
   startAmbient({ preschedule = 12 } = {}) {
+    this.#ambientWanted = true; // 지금 켤 수 없으면(화면 밖 · 컨텍스트 없음) 돌아와서 켠다
     const ctx = this.#ready();
     if (!ctx || this.#ambient) return;
     const t0 = ctx.currentTime;
@@ -334,19 +402,20 @@ export class SoundEngine {
     this.#ambient = {
       out, nodes, droneLp, droneBus, hum, tensionGain,
       nextEvent: t0 + 7 + Math.random() * 6,
-      timer: setInterval(() => this.#scheduleAmbientEvents(this.#ctx.currentTime + 14), 4000),
     };
+    this.#armAmbientTimer();
     this.#applyTension(true);
     this.#scheduleAmbientEvents(t0 + preschedule);
   }
 
   /** 앰비언트를 fade초에 걸쳐 끄고 소스를 정리한다 */
   stopAmbient({ fade = 2 } = {}) {
+    this.#ambientWanted = false;
+    this.#disarmAmbientTimer();
     const a = this.#ambient;
     const ctx = this.#ctx;
     if (!a || !ctx) return;
     this.#ambient = null;
-    clearInterval(a.timer);
     const t = ctx.currentTime;
     const end = t + Math.max(0.05, fade);
     a.out.gain.cancelScheduledValues(t);
@@ -398,8 +467,9 @@ export class SoundEngine {
       param.setValueAtTime(param.value, t);
       param.linearRampToValueAtTime(value, t + 0.03);
     };
-    ramp(this.#master.gain, this.#muted ? 0 : this.#volume);
-    ramp(this.#ambientBus.gain, this.#muted ? 0 : this.#ambientVolume);
+    const off = this.#muted || this.#held; // 화면 밖에서 음량을 바꿔도 무음은 그대로 (돌아올 때 resume()이 올린다)
+    ramp(this.#master.gain, off ? 0 : this.#volume);
+    ramp(this.#ambientBus.gain, off ? 0 : this.#ambientVolume);
   }
 
   #applyTension(instant) {
@@ -412,6 +482,62 @@ export class SoundEngine {
     a.droneLp.frequency.setTargetAtTime(170 + 110 * k, t, tc);
     a.droneBus.gain.setTargetAtTime(AMBIENT.drone * (1 + 0.45 * k), t, tc);
     a.hum.gain.setTargetAtTime(AMBIENT.hum * (1 + 0.5 * k), t, tc);
+  }
+
+  // 드문 먼 소리를 4초마다 14초 앞까지 이어서 예약한다 (화면 밖에서는 해제 → 돌아오면 다시)
+  #armAmbientTimer() {
+    if (this.#ambientTimer || !this.#ambient) return;
+    this.#ambientTimer = setInterval(() => {
+      const ctx = this.#ctx;
+      if (ctx && !this.#held) this.#scheduleAmbientEvents(ctx.currentTime + 14);
+    }, 4000);
+  }
+
+  #disarmAmbientTimer() {
+    if (!this.#ambientTimer) return;
+    clearInterval(this.#ambientTimer);
+    this.#ambientTimer = 0;
+  }
+
+  // 효과음 · 배경음 버스를 지금 바로 0으로 (컨텍스트 suspend 는 비동기라 그사이 새는 소리를 막는다)
+  #silence() {
+    const ctx = this.#ctx;
+    if (!ctx || !this.#master) return;
+    const t = ctx.currentTime;
+    for (const param of [this.#master.gain, this.#ambientBus.gain]) {
+      param.cancelScheduledValues(t);
+      param.setValueAtTime(0, t);
+    }
+  }
+
+  // 울리는 중인 효과음 소스를 기억한다 (끝나면 스스로 빠진다)
+  #track(src, onEnd) {
+    this.#voices.add(src);
+    src.onended = () => {
+      this.#voices.delete(src);
+      onEnd?.();
+    };
+  }
+
+  #stopVoices() {
+    for (const src of this.#voices) {
+      try {
+        src.stop();
+      } catch {
+        // 아직 시작 전이거나 이미 멈춤 - 무시
+      }
+    }
+    this.#voices.clear();
+  }
+
+  async #suspendContext() {
+    const ctx = this.#ctx;
+    if (!ctx || 'startRendering' in ctx || ctx.state === 'closed') return; // 'suspended'여도 부른다 — 진행 중인 resume()을 뒤에서 덮는다
+    try {
+      await ctx.suspend();
+    } catch {
+      // 이미 닫힘 - 무시
+    }
   }
 
   #scheduleAmbientEvents(until) {
@@ -432,10 +558,10 @@ export class SoundEngine {
     let live = 0; // 모든 소스가 끝나면 버스를 정리
     const finish = (src) => {
       live += 1;
-      src.onended = () => {
+      this.#track(src, () => {
         live -= 1;
         if (live === 0) bus.disconnect();
-      };
+      });
     };
     const shape = (g, start, peak, attack, decay) => {
       g.gain.setValueAtTime(SILENT, start);
@@ -504,10 +630,11 @@ export class SoundEngine {
     for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
   }
 
-  // 소리를 낼 수 있는 상태의 컨텍스트 (닫혔거나 아직 없으면 null, iOS에서 interrupted면 되살리고 null)
+  // 소리를 낼 수 있는 상태의 컨텍스트 (화면 밖 · 닫힘 · 아직 없음이면 null, iOS에서 interrupted면 되살리고 null)
+  // 화면 밖에서는 iOS 'interrupted' 복구도 하지 않는다 — 백그라운드에서 들어온 효과음 요청이 컨텍스트를 깨워 소리가 새던 원인
   #ready() {
     const ctx = this.#ctx;
-    if (!ctx || ctx.state === 'closed') return null;
+    if (this.#held || !ctx || ctx.state === 'closed') return null;
     if (ctx.state === 'interrupted') {
       ctx.resume().catch(() => {});
       return null;
@@ -523,10 +650,12 @@ export class SoundEngine {
       if (!res.ok) return false;
       const data = await res.arrayBuffer();
       // 구형 Safari는 decodeAudioData가 Promise를 돌려주지 않아 콜백과 Promise를 함께 받는다
-      this.#gunshot = await new Promise((resolve, reject) => {
+      const buffer = await new Promise((resolve, reject) => {
         const decoding = ctx.decodeAudioData(data, resolve, reject);
         if (typeof decoding?.then === 'function') decoding.then(resolve, reject);
       });
+      if (this.#ctx !== ctx) return false; // 불러오는 사이 close() 됨 — 새 컨텍스트가 다시 불러온다
+      this.#gunshot = buffer;
       return true;
     } catch {
       return false; // 파일이 없거나 디코드에 실패 → 합성 총성으로 대신
@@ -546,6 +675,7 @@ export class SoundEngine {
     src.connect(amp);
     amp.connect(this.#master);
     src.start(t);
+    this.#track(src);
     return t - ctx.currentTime + buffer.duration / rate;
   }
 
@@ -597,6 +727,7 @@ export class SoundEngine {
     if (osc) src.start(t);
     else src.start(t, Math.random() * (NOISE_SECONDS - 0.5)); // 노이즈 버퍼의 임의 지점부터 → 매번 다른 질감
     src.stop(end + 0.02);
+    this.#track(src);
     return end + 0.02;
   }
 }

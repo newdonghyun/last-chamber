@@ -696,6 +696,15 @@ dialog.addEventListener('close', () => {
   resetUi();
 });
 
+// 페이지를 떠날 때(창 닫기 · 뒤로 가기 · 새로고침): 로비를 닫아 소켓 리스너를 떼고 연결을 끊는다 (대기 경과 시간 타이머는 resetUi → 메뉴 전환에서 멈춘다)
+function leavePage() {
+  clearTimeout(copyTimer);
+  if (dialog.open) dialog.close(); // → close 이벤트에서 disposeSocket + resetUi
+  else disposeSocket(); // 열려 있지 않아도 연결 중이던 소켓(랭킹 조회 등)이 있으면 정리
+}
+window.addEventListener('pagehide', leavePage);
+window.addEventListener('beforeunload', leavePage);
+
 // PLAY 가로채기: document 캡처 단계라 app.js 의 클릭 핸들러(타깃/버블 단계)보다 항상 먼저 돌고, 로드 순서에도 영향받지 않는다
 document.addEventListener('click', (e) => {
   if (passThrough) return;

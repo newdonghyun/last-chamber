@@ -7,7 +7,8 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/server.test.mjs && node tests/client.test.mjs && node tests/items.test.mjs",
+    "test": "node tests/server.test.mjs && node tests/client.test.mjs && node tests/items.test.mjs && node tests/lifecycle.test.mjs",
+    "build": "node scripts/build-www.mjs",
     "build:app": "node scripts/build-www.mjs",
     "cap:sync": "npm run build:app && cap sync"
   },
