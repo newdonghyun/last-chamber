@@ -3,11 +3,14 @@
 //   2. 닉네임 규칙(session.js validateNickname): 2~10자 · 공백 없음 · 보이지 않는 문자/이모지 금지 — 서버(userStore.cleanNickname)와 같은 판정
 //   3. 세션(UserSession): 로그인 · UUID 발급 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(ID 유지) · 손상된 저장값 · 저장소 없음
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 기록이 없거나 깨졌으면 html.needs-login
+//   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { PlatformBridge, HAPTIC_COOLDOWN_MS } from '../src/platform/platformBridge.js';
 import { UserSession, validateNickname, createUserId, isUserId, SESSION_KEY } from '../src/ui/session.js';
 import { cleanNickname as serverNickname } from '../server/userStore.js';
+import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
+import { MMR_RULE as SERVER_MMR } from '../server/userStore.js';
 
 const T0 = performance.now();
 let pass = 0;
@@ -182,6 +185,49 @@ function memoryStorage(initial = {}) {
   eq(boot(JSON.stringify({ v: 1, id, nickname: '총잡이', loggedIn: false })), true, '4 로그아웃 상태 → needs-login');
   eq(boot('{broken'), true, '4 손상된 값 → needs-login');
   eq(boot(null, { throws: true }), true, '4 저장소 접근 불가 → needs-login');
+}
+
+// ───────── 5. 모드별 정산 (PlayerProfile) ─────────
+{
+  const store = (initial) => memoryStorage(initial === undefined ? {} : { [STORAGE_KEY]: JSON.stringify(initial) });
+  const ranked = (p) => [p.wins, p.losses, p.streak, p.maxStreak, p.mmr];
+  eq([CLIENT_MMR.start, CLIENT_MMR.win, CLIENT_MMR.loss], [SERVER_MMR.start, SERVER_MMR.win, SERVER_MMR.loss], '5 랭킹 MMR 규칙(+25 / −20 · 시작 1000)이 서버와 같다');
+
+  // 예전(v4) 저장값: AI 대전과 섞여 쌓인 전적 · MMR → 연습 기록으로, 랭킹 기록은 처음부터 · 얻은 칭호는 유지
+  const old = new PlayerProfile({ storage: store({ v: 4, brass: 500, wins: 12, losses: 5, streak: 3, maxStreak: 4, mmr: 1240, titles: ['newcomer', 'silver_gun'] }) });
+  eq(ranked(old), [0, 0, 0, 0, 1000], '5 예전 저장값 → 랭킹 기록은 0승 0패 · MMR 1000 (서버 값으로 다시 맞춘다)');
+  eq([old.practice.wins, old.practice.losses, old.practice.streak, old.practice.maxStreak], [12, 5, 3, 4], '5 예전 전적 · 연승은 AI 연습 기록으로 옮긴다');
+  ok(old.hasTitle('silver_gun') && old.hasTitle('first_blood'), '5 얻어 둔 칭호는 유지 · 연습 승리로도 전적 칭호를 얻는다');
+
+  // AI 딜러 대전 = 연습: 랭킹 MMR · 전적 · 연승은 그대로
+  const p = new PlayerProfile({ storage: store() });
+  const before = ranked(p);
+  const win = p.recordPractice(true);
+  p.recordPractice(true);
+  const loss = p.recordPractice(false);
+  eq(ranked(p), before, '5 AI 딜러 대전은 랭킹 MMR · 전적 · 연승을 건드리지 않는다');
+  eq([p.practice.wins, p.practice.losses, p.practice.maxStreak], [2, 1, 2], '5 AI 대전 승패는 연습 기록에만');
+  eq([win.mode, win.ranked, 'mmrDelta' in win, 'tierChange' in win], ['practice', false, false, false], '5 연습 결과에는 MMR 증감 · 티어 변화가 없다');
+  eq([win.total, loss.total, loss.canProtect], [REWARD.win + REWARD.streakStep, REWARD.loss, true], '5 탄피 보상 · 연습 연승 보너스 · 2연승 뒤 패배는 연승 보호 대상');
+  p.restoreStreak(loss.prevStreak);
+  eq([p.practice.streak, p.streak], [2, 0], '5 연승 보호는 연습 연승만 되돌린다');
+
+  // 랭킹전: 서버 기록이 원본
+  const r1 = p.recordRanked(true, { record: { wins: 1, losses: 0, streak: 1, maxStreak: 1, mmr: 1025 }, mmrDelta: 25 });
+  eq([r1.mode, r1.mmrDelta, r1.mmr, ranked(p)], ['ranked', 25, 1025, [1, 0, 1, 1, 1025]], '5 랭킹전 승 → 서버 기록으로 MMR +25 · 1승 · 1연승');
+  const r2 = p.recordRanked(false, { record: { wins: 1, losses: 1, streak: 0, maxStreak: 1, mmr: 1005 }, mmrDelta: -20 });
+  eq([r2.mmrDelta, r2.canProtect, ranked(p)], [-20, false, [1, 1, 0, 1, 1005]], '5 랭킹전 패 → MMR −20 · 연승 0 (랭킹 연승은 광고로 되돌리지 않는다)');
+  const r3 = p.recordRanked(true, {}); // game_over 를 못 받음 → 서버와 같은 규칙으로 미리
+  eq([r3.mmrDelta, ranked(p)], [25, [2, 1, 1, 1, 1030]], '5 서버 기록을 못 받은 랭킹전 → 같은 규칙(+25)으로 미리 반영');
+  eq([p.syncRanked({ wins: 2, losses: 1, streak: 1, maxStreak: 1, mmr: 1030 }), p.syncRanked({ wins: 2, losses: 1, streak: 1, maxStreak: 3, mmr: 1050 }), ranked(p)], [false, true, [2, 1, 1, 3, 1050]], '5 로비 접속 때 서버 기록으로 다시 맞춘다 (바뀐 때만 true)');
+  eq(p.syncRanked({ wins: 'x' }), false, '5 모양이 틀린 서버 기록은 무시');
+  const stale = new PlayerProfile({ storage: store() }); // 거울이 오래됨 (1000) — 서버는 이미 1290 → 1315
+  eq(stale.recordRanked(true, { record: { wins: 9, losses: 3, streak: 2, maxStreak: 4, mmr: 1315 }, mmrDelta: 25 }).tierChange, 'up', '5 승급 판정은 서버 기준 직전 점수(1290 → 1315, 골드 진입)로');
+
+  // 친선전: 탄피만
+  const brass = p.brass;
+  const f = p.recordFriendly(true);
+  eq([f.mode, f.ranked, f.bonus, p.brass - brass, ranked(p), p.practice.wins], ['friendly', false, 0, REWARD.win, [2, 1, 1, 3, 1050], 2], '5 친선전은 기본 탄피만 — 랭킹 · 연습 기록 모두 그대로');
 }
 
 const ms = Math.round(performance.now() - T0);

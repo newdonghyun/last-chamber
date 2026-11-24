@@ -6,7 +6,8 @@
  *   · 방마다 GameEngine 하나 — 서버 권위. 좌석(P1 · P2)은 서버가 소켓에 붙이고, 각자에게는 자기 시점의 상태와 로그만 보낸다
  *   · 20초 턴 타이머(0초가 되면 서버가 대신 격발) · 15초 연결 끊김 부전승 · 친구를 기다리는 방의 10분 만료 · 끝난 판 결과 60초 보관
  *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile) · 로그인한 소켓은 서버가 확인한 닉네임으로(profileOf)
- *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패)을 기록한다 (server/userStore.js) — game_over 에 그 좌석의 record 로 알려 준다
+ *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패 · 연승 · MMR)을 기록한다 (server/userStore.js) — 랭킹전(무작위 매칭)만. 친구 초대 방은 친선전이라 기록하지 않는다
+ *     game_over 에 그 좌석의 record(현재 서버 전적) · ranked · mmrDelta(랭킹전에서 바뀐 MMR)로 알려 준다
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석, 등급별 대기열은 server/matchmaker.js.
  *
  *   socket.data 약속:  where = null | { kind: 'queue', tier }(matchmaker 가 씀) | { kind: 'room', code }(여기서 씀) · lastEmote = 마지막 이모트 시각(ms)
@@ -37,6 +38,8 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_PATTERN = new RegExp(`^[${CODE_ALPHABET}]{4}$`);
 
 const rand = () => randomInt(2 ** 32) / 2 ** 32; // [0, 1)
+export const RANKED_MODE = 'queue'; // 랭킹전 = 무작위 매칭으로 맺어진 방만 ('private' 친구 방은 친선전)
+const isRanked = (room) => room.mode === RANKED_MODE;
 const makeCode = () => Array.from({ length: 4 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
 const makeToken = () => randomBytes(16).toString('hex');
 const cleanCode = (raw) => {
@@ -166,7 +169,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
   const matchPayload = (room, seat, resume) => {
     const opp = otherSeat(room, seat);
     const { fee, prize } = tiers[room.tier];
-    return { code: room.code, mode: room.mode, tier: room.tier, fee, prize, you: seat.id, token: seat.token, opponent: { id: opp.id, profile: opp.profile }, turnMs: cfg.turnMs, graceMs: cfg.graceMs, resume };
+    return { code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, you: seat.id, token: seat.token, opponent: { id: opp.id, profile: opp.profile }, turnMs: cfg.turnMs, graceMs: cfg.graceMs, resume };
   };
 
   const snapshot = (room, seat, reason, since, events, extra = {}) => ({
@@ -227,19 +230,28 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     const view = room.engine.getPublicState(seat.id);
     const players = Object.fromEntries(room.seats.map((s) => [s.id, { mmr: s.profile.mmr }])); // 입장 때 신고한 양쪽의 초기 MMR — 클라이언트가 Elo 정산에 쓴다
     const record = seat.userId && users ? users.publicView(users.get(seat.userId)) : null; // 이 좌석 유저의 서버 전적 (로그인한 좌석만 — 상대 것은 보내지 않는다)
+    const mmrDelta = room.deltas?.[seat.id]; // 랭킹전에서 실제로 기록된 이번 판 MMR 변동 (친선전 · 기록 안 된 좌석은 없음)
     return {
-      code: room.code, tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won ? prize : 0,
-      score: { you: view.me.wins, opponent: view.opponent.wins }, players, ...(record ? { record } : {}),
+      code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won ? prize : 0,
+      score: { you: view.me.wins, opponent: view.opponent.wins }, players, ...(record ? { record } : {}), ...(Number.isFinite(mmrDelta) ? { mmrDelta } : {}),
     };
   }
 
-  /** 서버 전적 기록: 로그인한 좌석만. 같은 유저가 두 자리에 앉은 판(창 두 개로 혼자 둔 판)은 세지 않는다 — 전적 부풀리기 방지 */
+  /**
+   * 서버 전적 기록 — 랭킹전(무작위 매칭 'queue')만. 친구 초대 방('private')은 친선전이라 MMR · 전적 · 연승을 건드리지 않는다
+   * (지인끼리 점수를 몰아주는 어뷰징 방지). 로그인한 좌석만 · 같은 유저가 두 자리에 앉은 판(창 두 개로 혼자 둔 판)은 세지 않는다.
+   * 좌석별 MMR 변동은 room.deltas 에 남겨 game_over 로 알려 준다.
+   */
   function recordResults(room) {
-    if (!users) return;
+    room.deltas = {};
+    if (!users || !isRanked(room)) return;
     const [a, b] = room.seats;
     if (a.userId && a.userId === b.userId) return;
     for (const seat of room.seats) {
-      if (seat.userId) users.recordResult(seat.userId, seat.id === room.result.winner);
+      if (!seat.userId) continue;
+      const before = users.get(seat.userId)?.mmr;
+      const after = users.recordResult(seat.userId, seat.id === room.result.winner)?.mmr;
+      if (Number.isFinite(before) && Number.isFinite(after)) room.deltas[seat.id] = after - before;
     }
   }
 

@@ -265,30 +265,46 @@ async function phase3() {
   const C = await client(port, { userId: 'x', nickname: '익명' }); // 틀린 auth → 익명으로 연결
   ok(C.socket.connected && server.stats().users === 2, '14 틀린 auth 는 익명 소켓으로 받고 기록하지 않는다');
 
-  // 15. 상대에게는 서버가 확인한 닉네임 (프로필로 다른 이름을 보내도) · 유저 ID 는 상대에게 가지 않는다 · 판이 끝나면 서버 전적 기록
-  const made = await A.call('create_private_room', { profile: { nickname: '가짜이름', mmr: 1200 } });
-  await B.call('join_private_room', { code: made.code, profile: { nickname: 'Ace_7', mmr: 1000 } });
-  const [mA, mB] = await Promise.all([A.waitFor('match_found'), B.waitFor('match_found')]);
+  // 랭킹전(무작위 매칭 '무료 테이블') 한 판 잡기 — 이미 본 방 코드는 건너뛴다
+  const seenCodes = new Set();
+  const queueMatch = async (X, Y, profileX = {}, profileY = {}) => {
+    await X.call('join_queue', { tier: 'free', profile: profileX });
+    await Y.call('join_queue', { tier: 'free', profile: profileY });
+    const mX = await X.waitFor('match_found', (p) => p.mode === 'queue' && !seenCodes.has(p.code));
+    seenCodes.add(mX.code);
+    return [mX, await Y.waitFor('match_found', (p) => p.code === mX.code)];
+  };
+
+  // 15. 랭킹전(무작위 매칭): 상대에게는 서버가 확인한 닉네임 (프로필로 다른 이름을 보내도) · 유저 ID 는 상대에게 가지 않는다 · 판이 끝나면 서버 전적 기록
+  const [mA, mB] = await queueMatch(A, B, { nickname: '가짜이름', mmr: 1200 }, { nickname: 'Ace_7', mmr: 1000 });
+  eq([mA.mode, mA.ranked, mB.ranked], ['queue', true, true], '15 무작위 매칭 = 랭킹전 (match_found.ranked)');
   eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname], ['총잡이', 'Ace_7'], '15 상대 이름표에는 로그인한 닉네임');
   ok(![mA, mB].some((m) => JSON.stringify(m).includes(idA) || JSON.stringify(m).includes(idB)), '15 유저 ID 는 match_found 어디에도 실리지 않는다');
-  const [overA, overB] = [A.waitFor('game_over'), B.waitFor('game_over')];
+  const [overA, overB] = [A.waitFor('game_over', (p) => p.code === mA.code), B.waitFor('game_over', (p) => p.code === mA.code)];
   await B.call('leave_room');
   const [goA, goB] = await Promise.all([overA, overB]);
   eq(goA.record, { nickname: '총잡이', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, '15 승자: 1승 · 1연승 · MMR +25');
   eq(goB.record, { nickname: 'Ace_7', wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 }, '15 패자: 1패 · 연승 0 · MMR −20');
+  eq([goA.ranked, goA.mmrDelta, goB.ranked, goB.mmrDelta], [true, 25, true, -20], '15 game_over: 랭킹전 · 서버가 기록한 이번 판 MMR 변동');
 
-  // 16. 익명 상대와의 판은 로그인한 쪽만 · 같은 유저끼리(창 두 개) 둔 판은 세지 않는다
-  const vsAnon = await A.call('create_private_room', { profile: {} });
-  await C.call('join_private_room', vsAnon.code);
-  await Promise.all([A.waitFor('match_found', (p) => p.code === vsAnon.code), C.waitFor('match_found')]);
-  const [overA2, overC] = [A.waitFor('game_over', (p) => p.code === vsAnon.code), C.waitFor('game_over')];
+  // 15-b. 친선전(방 코드 대전): 끝까지 가도 서버 MMR · 전적 · 연승은 그대로 (지인끼리 점수 몰아주기 방지)
+  const friendly = await A.call('create_private_room', { profile: {} });
+  await B.call('join_private_room', friendly.code);
+  const [fA] = await Promise.all([A.waitFor('match_found', (p) => p.code === friendly.code), B.waitFor('match_found', (p) => p.code === friendly.code)]);
+  eq([fA.mode, fA.ranked], ['private', false], '15 방 코드 대전 = 친선전 (ranked: false)');
+  const [fOverA, fOverB] = [A.waitFor('game_over', (p) => p.code === friendly.code), B.waitFor('game_over', (p) => p.code === friendly.code)];
+  await A.call('leave_room'); // A 항복 → B 승
+  const [fgA, fgB] = await Promise.all([fOverA, fOverB]);
+  eq([fgA.ranked, 'mmrDelta' in fgA, fgA.record?.mmr, fgA.record?.losses, fgB.youWon, fgB.record?.mmr, fgB.record?.wins], [false, false, 1025, 0, true, 980, 0], '15 친선전 결과는 서버 MMR · 전적에 넣지 않는다');
+
+  // 16. 익명 상대와의 랭킹전은 로그인한 쪽만 · 같은 유저끼리(창 두 개) 둔 판은 세지 않는다
+  const [vsAnon] = await queueMatch(A, C);
+  const [overA2, overC] = [A.waitFor('game_over', (p) => p.code === vsAnon.code), C.waitFor('game_over', (p) => p.code === vsAnon.code)];
   await C.call('leave_room');
   const [goA2, goC] = await Promise.all([overA2, overC]);
   eq([goA2.record?.wins, 'record' in goC], [2, false], '16 익명 상대 — 로그인한 쪽만 기록되고 익명에게는 record 가 없다');
   const A2 = await client(port, meA);
-  const self = await A.call('create_private_room', { profile: {} });
-  await A2.call('join_private_room', self.code);
-  await A.waitFor('match_found', (p) => p.code === self.code);
+  const [self] = await queueMatch(A, A2);
   const overSelf = A.waitFor('game_over', (p) => p.code === self.code);
   await A2.call('leave_room');
   eq((await overSelf).record, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '16 같은 유저끼리 둔 판은 전적에 넣지 않는다');
@@ -300,6 +316,10 @@ async function phase3() {
   eq([board.me?.nickname, board.me?.mmr], ['총잡이', 1050], '17 get_leaderboard: 내 전적');
   ok(!JSON.stringify(board).includes(idA) && !JSON.stringify(board).includes(idB) && !JSON.stringify(board).includes('user_id'), '17 랭킹 응답에 유저 ID 가 없다');
   eq((await C.call('get_leaderboard')).me, null, '17 익명 소켓은 내 전적 없이 랭킹만');
+  const idD = randomUUID();
+  const D = await client(port, { userId: idD, nickname: '구경꾼' }); // 로비에만 들렀다 간 계정 (랭킹전 0판 · 1000점)
+  const boardD = await D.call('get_leaderboard');
+  eq([boardD.top.map((r) => r.nickname), boardD.me?.mmr], [['총잡이', '에이스'], 1000], '17 TOP 10 은 랭킹전 1판 이상만 — 0판(1000점) 계정은 빠지고 내 전적으로만');
   await B.call('join_queue', { tier: 'free', profile: {} });
   eq((await B.call('hello', { userId: randomUUID(), nickname: '다른사람' })).error, 'ALREADY_IN_ROOM', '17 대기 중에는 다른 유저 ID 로 바꿀 수 없다');
   await B.call('leave_queue');
@@ -307,12 +327,12 @@ async function phase3() {
   // 18. 저장 · 복원: 서버를 닫으면 파일에 쓰고, 다시 켜면 이어서 읽는다
   await server.stop();
   const saved = JSON.parse(readFileSync(file, 'utf8'));
-  eq(saved.users.map((u) => [u.nickname, u.wins, u.losses]).sort(), [['에이스', 0, 1], ['총잡이', 2, 0]].sort(), '18 파일에 바뀐 닉네임 · 전적 저장');
+  eq(saved.users.map((u) => [u.nickname, u.wins, u.losses]).sort(), [['구경꾼', 0, 0], ['에이스', 0, 1], ['총잡이', 2, 0]].sort(), '18 파일에 바뀐 닉네임 · 전적 저장');
   const again = createGameServer({ quiet: true, onError, userDataFile: file });
   const port2 = await again.start(0, '127.0.0.1');
   const back = await client(port2, meA);
   eq((await back.call('hello', meA)).user, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '18 재시작 뒤에도 서버 전적 유지');
-  eq(again.stats().users, 2, '18 재시작 뒤 유저 수');
+  eq(again.stats().users, 3, '18 재시작 뒤 유저 수');
   await again.stop();
   rmSync(dir, { recursive: true, force: true });
 }
@@ -321,14 +341,22 @@ async function phase3() {
 function fakeSupabase(rows = []) {
   const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
   const calls = [];
+  const orFilter = (expr) => { // PostgREST or 필터 'wins.gt.0,losses.gt.0' 중 gt · eq 만
+    const conds = expr.split(',').map((part) => {
+      const [col, op, val] = part.split('.');
+      return (r) => (op === 'gt' ? r[col] > Number(val) : op === 'eq' ? String(r[col]) === val : false);
+    });
+    return (r) => conds.some((f) => f(r));
+  };
   const query = (filters = [], sorts = [], lim = Infinity) => {
     const run = () => {
-      const out = [...table.values()].filter((r) => filters.every(([c, v]) => r[c] === v));
+      const out = [...table.values()].filter((r) => filters.every((f) => f(r)));
       for (const [c, asc] of [...sorts].reverse()) out.sort((a, b) => (asc ? a[c] - b[c] : b[c] - a[c]));
       return out.slice(0, lim).map((r) => ({ ...r }));
     };
     return {
-      eq: (c, v) => query([...filters, [c, v]], sorts, lim),
+      eq: (c, v) => query([...filters, (r) => r[c] === v], sorts, lim),
+      or: (expr) => { calls.push(`or:${expr}`); return query([...filters, orFilter(expr)], sorts, lim); },
       order: (c, o = {}) => query(filters, [...sorts, [c, o.ascending !== false]], lim),
       limit: (n) => query(filters, sorts, n),
       maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
@@ -358,14 +386,27 @@ async function phase4() {
   eq((await V.call('hello', { userId: veteran, nickname: '고수' })).user, { nickname: '고수', wins: 40, losses: 10, games: 50, streak: 3, maxStreak: 9, mmr: 1600 }, '19 Supabase: 기존 유저는 DB 전적을 불러온다');
   await R.call('hello', { userId: rookie, nickname: '신입' });
   eq(db.table.get(rookie), { user_id: rookie, nickname: '신입', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }, '19 Supabase: 없는 유저는 기본값으로 upsert');
+  eq([(await R.call('get_leaderboard')).top.map((r) => r.nickname), db.calls.includes('or:wins.gt.0,losses.gt.0')], [['고수'], true], '19 TOP 10 쿼리: wins + losses > 0 — 로비만 들른 0판 유저는 빠진다');
 
-  // 20. 승/패 확정 → DB 갱신 (승자 wins+1 · streak+1 · max_streak · mmr+25 / 패자 losses+1 · streak 0 · mmr−20)
-  const made = await V.call('create_private_room', { profile: {} });
-  await R.call('join_private_room', made.code);
-  await Promise.all([V.waitFor('match_found'), R.waitFor('match_found')]);
-  const over = R.waitFor('game_over');
+  // 20-a. 친선전(방 코드)은 끝까지 가도 DB 를 건드리지 않는다
+  const before = JSON.stringify([db.table.get(veteran), db.table.get(rookie)]);
+  const friendly = await V.call('create_private_room', { profile: {} });
+  await R.call('join_private_room', friendly.code);
+  await Promise.all([V.waitFor('match_found', (p) => p.code === friendly.code), R.waitFor('match_found', (p) => p.code === friendly.code)]);
+  const friendlyOver = R.waitFor('game_over', (p) => p.code === friendly.code);
+  await V.call('leave_room');
+  eq([(await friendlyOver).ranked, (await friendlyOver).youWon], [false, true], '20 친선전 game_over: ranked false');
+  await server.users.flush();
+  eq(JSON.stringify([db.table.get(veteran), db.table.get(rookie)]), before, '20 Supabase: 친선전 결과는 players 행을 바꾸지 않는다');
+
+  // 20. 랭킹전(무작위 매칭) 승/패 확정 → DB 갱신 (승자 wins+1 · streak+1 · max_streak · mmr+25 / 패자 losses+1 · streak 0 · mmr−20)
+  await V.call('join_queue', { tier: 'free', profile: {} });
+  await R.call('join_queue', { tier: 'free', profile: {} });
+  const ranked = await R.waitFor('match_found', (p) => p.mode === 'queue');
+  await V.waitFor('match_found', (p) => p.code === ranked.code);
+  const over = R.waitFor('game_over', (p) => p.code === ranked.code);
   await V.call('leave_room'); // 고수가 나감 → 신입 부전승
-  eq((await over).record?.mmr, 1025, '20 game_over 에 갱신된 MMR');
+  eq([(await over).record?.mmr, (await over).mmrDelta], [1025, 25], '20 game_over 에 갱신된 MMR · 변동');
   await server.users.flush();
   eq([db.table.get(rookie).wins, db.table.get(rookie).streak, db.table.get(rookie).max_streak, db.table.get(rookie).mmr], [1, 1, 1, 1025], '20 Supabase: 승자 행 갱신');
   eq([db.table.get(veteran).losses, db.table.get(veteran).streak, db.table.get(veteran).max_streak, db.table.get(veteran).mmr], [11, 0, 9, 1580], '20 Supabase: 패자 행 갱신 (최대 연승은 유지)');
@@ -387,7 +428,7 @@ async function phase4() {
   const newbie = randomUUID();
   const N = await client(port); // handshake auth 없이 이벤트로만 등록
   const reg = await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
-  eq([reg.ok, reg.me?.nickname, reg.me?.mmr, reg.top?.some((r) => r.isMe && r.nickname === '등록왕')], [true, '등록왕', 1000, true], '24 register_player → 내 전적 + TOP 10 (내 줄 포함)');
+  eq([reg.ok, reg.me?.nickname, reg.me?.mmr, reg.top?.length, reg.top?.some((r) => r.nickname === '등록왕')], [true, '등록왕', 1000, 2, false], '24 register_player → 내 전적 + TOP 10 (랭킹전 0판이라 순위에는 아직 없음)');
   eq(db.table.get(newbie)?.nickname, '등록왕', '24 응답이 올 때 이미 players 에 upsert 되어 있다');
   const upserts = db.calls.filter((c) => c === 'upsert').length;
   await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
@@ -412,12 +453,14 @@ async function phase4() {
 async function phase5() {
   const rows = new Map();
   const requests = [];
+  const boardQueries = []; // TOP 10 조회(GET, user_id 조건 없음)의 or 파라미터
   const rest = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       const url = new URL(req.url, 'http://x');
       requests.push(`${req.method} ${url.pathname}`);
+      if (req.method === 'GET' && !url.searchParams.has('user_id')) boardQueries.push(url.searchParams.get('or'));
       res.setHeader('Content-Type', 'application/json');
       if (req.method === 'POST') {
         for (const row of [].concat(JSON.parse(body))) rows.set(row.user_id, { ...rows.get(row.user_id), ...row });
@@ -442,6 +485,7 @@ async function phase5() {
     eq([reg.ok, server.stats().storage], [true, 'supabase'], `25 전역 WebSocket 이 없어도(Node 18/20) Supabase 클라이언트를 만든다 (${errors.map((e) => e.message.split('\n')[0]).join(' | ')})`);
     eq([rows.get(id)?.nickname, rows.get(id)?.mmr], ['노드20', 1000], '25 실제 supabase-js 로 players 에 upsert');
     ok(requests.some((r) => r.startsWith('POST /rest/v1/players')) && errors.length === 0, `25 PostgREST 요청: ${requests.join(', ')} · 오류 ${errors.length}건`);
+    eq([boardQueries.includes('(wins.gt.0,losses.gt.0)'), reg.top?.length], [true, 0], '25 TOP 10 요청에 wins + losses > 0 필터 (가짜 PostgREST 가 무시해도 서버가 한 번 더 거른다)');
   } finally {
     globalThis.WebSocket = nativeWebSocket;
     await server.stop();

@@ -3,7 +3,9 @@
  *
  *   DOM을 건드리지 않는 순수 모듈이다 (저장소만 주입받는다). 화면은 src/ui/app.js가 그린다.
  *   1) 카탈로그: 총기 스킨 4종 · 테이블 테마 4종 — 각 항목의 vars 가 곧 CSS 커스텀 프로퍼티 묶음이다.
- *   2) PlayerProfile: 탄피 · 해금/장착 · 1판 체험 · 광고 누적 · 연승 + 전적(승·패·최대 연승) · MMR · 닉네임 · 칭호 · 암시장(상자 천장 게이지 · 총구 화염 · 도발)을 localStorage에 영구 저장한다.
+ *   2) PlayerProfile: 탄피 · 해금/장착 · 1판 체험 · 광고 누적 · 랭킹 기록(전적 · 연승 · MMR) · AI 연습 기록 · 닉네임 · 칭호 · 암시장(상자 천장 게이지 · 총구 화염 · 도발)을 localStorage에 영구 저장한다.
+ *      모드별 정산 — 랭킹 기록은 온라인 랭킹전(무작위 매칭)만: 서버(Supabase players)가 원본이고 여기는 그 거울 (recordRanked · syncRanked).
+ *                    AI 딜러 대전은 연습 기록(practice)에만 (recordPractice) · 친구 방 코드 대전은 친선전이라 탄피만 (recordFriendly).
  *   3) rewardFor(): 경기 종료 보상 계산 (승리 150 + 연승×30 · 패배 40).
  *   4) 티어(TIERS · tierOf) · 칭호(TITLES) · 닉네임 규칙(cleanNickname) · 승률(formatWinRate)
  *   5) 리더보드: Leaderboard(UI가 쓰는 창구) + VirtualLadder(가상 라이벌 150명). Step B에서 서버 소스로 갈아끼운다 → 아래 '리더보드' 구역 참고.
@@ -29,9 +31,10 @@ export const KIND = Object.freeze({ GUN: 'gun', TABLE: 'table' });
 export const BRASS_START = 300; // 첫 지급 탄피
 export const REWARD = Object.freeze({ win: 150, streakStep: 30, loss: 40 });
 export const STORAGE_KEY = 'lastchamber.profile';
-// 시작 점수 · Elo 가중치 K · 승/패 변동 한계 (0 아래로는 내려가지 않음). win/loss(+25/−15)는 옛 고정값 — 정산엔 안 쓰고, 순위표의 '승리 N번이면 역전' 어림셈에만 남겨 둔다
-export const MMR = Object.freeze({ start: 1000, win: 25, loss: 15, k: 40, minWin: 5, maxWin: 38, minLoss: 5, maxLoss: 38 });
-/** 싱글(AI 딜러) 판의 상대 MMR — 내 티어에 맞춰 딜러가 세진다. 마피아는 최상위 딜러(1850)와 같다 */
+// 랭킹 MMR: 시작 1000 · 랭킹전 승 +25 / 패 −20 (서버 server/userStore.js MMR_RULE 과 같다 — 서버 기록을 못 받았을 때 미리 반영하는 값 · 순위표의 '승리 N번이면 역전' 어림셈)
+// k · min/max 는 calculateEloDelta(Elo 계산 도구)용 — 지금 정산에는 쓰지 않는다
+export const MMR = Object.freeze({ start: 1000, win: 25, loss: 20, k: 40, minWin: 5, maxWin: 38, minLoss: 5, maxLoss: 38 });
+/** 내 티어에 맞춘 AI 딜러의 MMR (참고값 — AI 딜러 대전은 연습이라 랭킹 MMR 정산에 쓰지 않는다). 마피아는 최상위 딜러(1850)와 같다 */
 export const AI_DEALER_MMR = Object.freeze({ bronze: 1050, silver: 1050, gold: 1450, platinum: 1850, master: 1850, mafia: 1850 });
 export const NICKNAME = Object.freeze({ default: '방랑자', maxLength: 12 });
 const MAX_BRASS = 99_999_999;
@@ -376,7 +379,8 @@ const STAT_OF = {
 
 export const getTitle = (id) => TITLES.find((t) => t.id === id) ?? null;
 
-/** 이 전적({ wins, losses, maxStreak, mmr })으로 얻을 수 있는 칭호 id 전부 (카탈로그 순서). 암시장 한정 칭호(chest)는 전적으로는 얻을 수 없다. */
+/** 이 전적({ wins, losses, maxStreak, mmr })으로 얻을 수 있는 칭호 id 전부 (카탈로그 순서). 암시장 한정 칭호(chest)는 전적으로는 얻을 수 없다.
+ *  프로필에서는 titleStats(): 승 · 패 · 최대 연승 = 랭킹전 + AI 연습 합산(수집품이라 연습으로도 얻는다), MMR 칭호 = 랭킹 MMR 만 */
 export function titlesUnlockedBy(stats) {
   return TITLES
     .filter((t) => !t.chest && (!t.req || Object.entries(t.req).every(([stat, min]) => (STAT_OF[stat]?.(stats) ?? 0) >= min)))
@@ -513,17 +517,20 @@ const toInt =(v, fallback, max) => (Number.isFinite(v) ? Math.min(max, Math.max(
 
 function freshData() {
   return {
-    v: 4,
+    v: 5,
     brass: BRASS_START,
     owned: { [KIND.GUN]: [DEFAULT_ID.gun], [KIND.TABLE]: [DEFAULT_ID.table] },
     equipped: { ...DEFAULT_ID },
     trial: { [KIND.GUN]: null, [KIND.TABLE]: null }, // 다음 1판에만 적용되는 체험 스킨
     adViews: {}, // 항목 id → 광고 누적 시청 횟수 (adUnlock 항목만)
+    // 랭킹 기록 = 온라인 랭킹전(무작위 매칭)만. 서버(Supabase players)가 원본 — 판이 끝나거나 로비에 들어갈 때 서버 값으로 맞춘다 (syncRanked)
     streak: 0,
     maxStreak: 0, // 최대 연승 (v1 저장값의 bestStreak 를 이어받는다)
     wins: 0,
     losses: 0,
     mmr: MMR.start,
+    // v5 AI 딜러 대전 = 연습 기록 (랭킹 MMR · 랭킹 전적과 섞이지 않는다). 연습 연승은 탄피 연승 보너스 · 연승 보호에만 쓴다
+    practice: { wins: 0, losses: 0, streak: 0, maxStreak: 0 },
     nickname: NICKNAME.default,
     titles: [DEFAULT_TITLE_ID], // 얻은 칭호 (한 번 얻으면 유지) — 상자에서 나온 한정 칭호도 여기에 들어온다
     equippedTitle: DEFAULT_TITLE_ID,
@@ -560,15 +567,21 @@ function sanitize(raw) {
     const n = raw.adViews?.[item.id];
     if (adGoalOf(item) && Number.isFinite(n) && n > 0) d.adViews[item.id] = toInt(n, 0, adGoalOf(item));
   }
-  d.streak = toInt(raw.streak, 0, MAX_STREAK);
-  d.maxStreak = Math.max(toInt(raw.maxStreak ?? raw.bestStreak, 0, MAX_STREAK), d.streak); // v1 저장값(bestStreak)을 이어받는다
-  d.wins = toInt(raw.wins, 0, MAX_GAMES);
-  d.losses = toInt(raw.losses, 0, MAX_GAMES);
-  d.mmr = toInt(raw.mmr, MMR.start, MAX_MMR);
+  // v4 이하: 전적 · 연승 · MMR 이 AI 딜러 대전과 섞여 쌓였다 → 그 값은 연습 기록으로 옮기고, 랭킹 기록은 처음부터 (다음 로비 접속 · 랭킹전에서 서버 값으로 맞춘다)
+  const legacy = !raw.practice || typeof raw.practice !== 'object';
+  const ranked = legacy ? {} : raw;
+  d.streak = toInt(ranked.streak, 0, MAX_STREAK);
+  d.maxStreak = Math.max(toInt(ranked.maxStreak, 0, MAX_STREAK), d.streak);
+  d.wins = toInt(ranked.wins, 0, MAX_GAMES);
+  d.losses = toInt(ranked.losses, 0, MAX_GAMES);
+  d.mmr = toInt(ranked.mmr, MMR.start, MAX_MMR);
+  const p = legacy ? { wins: raw.wins, losses: raw.losses, streak: raw.streak, maxStreak: raw.maxStreak ?? raw.bestStreak } : raw.practice; // v1 저장값(bestStreak)도 이어받는다
+  const practiceStreak = toInt(p.streak, 0, MAX_STREAK);
+  d.practice = { wins: toInt(p.wins, 0, MAX_GAMES), losses: toInt(p.losses, 0, MAX_GAMES), streak: practiceStreak, maxStreak: Math.max(toInt(p.maxStreak, 0, MAX_STREAK), practiceStreak) };
   const nick = cleanNickname(raw.nickname);
   d.nickname = nick.ok ? nick.nickname : NICKNAME.default;
   // 칭호: 저장된 것 + 지금 전적이 이미 조건을 채운 것 (구버전 프로필도 최대 연승 같은 기록으로 칭호를 이어받는다)
-  const got = new Set([DEFAULT_TITLE_ID, ...(Array.isArray(raw.titles) ? raw.titles.filter((id) => getTitle(id)) : []), ...titlesUnlockedBy(d)]);
+  const got = new Set([DEFAULT_TITLE_ID, ...(Array.isArray(raw.titles) ? raw.titles.filter((id) => getTitle(id)) : []), ...titlesUnlockedBy(titleStats(d))]);
   d.titles = TITLES.map((t) => t.id).filter((id) => got.has(id));
   d.equippedTitle = got.has(raw.equippedTitle) ? raw.equippedTitle : DEFAULT_TITLE_ID;
   // 암시장: 알 수 없는 id 는 버리고, 장착값은 가진 것만 인정한다
@@ -582,6 +595,58 @@ function sanitize(raw) {
   d.hasNoAdsPass = raw.hasNoAdsPass === true;
   d.streakShields = toInt(raw.streakShields, 0, MAX_SHIELDS);
   return d;
+}
+
+// 칭호 조건에 쓰는 전적: 승 · 패 · 최대 연승은 랭킹전 + AI 연습 합산 (수집품), MMR 은 랭킹 MMR 만
+const titleStats = (d) => ({
+  wins: d.wins + d.practice.wins,
+  losses: d.losses + d.practice.losses,
+  maxStreak: Math.max(d.maxStreak, d.practice.maxStreak),
+  mmr: d.mmr,
+});
+
+// 새로 조건을 채운 칭호를 더하고, 이번에 새로 얻은 칭호 id 를 돌려준다
+function grantTitles(d) {
+  const had = new Set(d.titles);
+  const got = new Set([...d.titles, ...titlesUnlockedBy(titleStats(d))]);
+  d.titles = TITLES.map((t) => t.id).filter((id) => got.has(id));
+  return d.titles.filter((id) => !had.has(id));
+}
+
+const fixedReward = (brass) => {
+  const total = Math.max(0, Math.floor(brass) || 0);
+  return { base: total, bonus: 0, total };
+};
+
+/** 서버가 준 랭킹 기록 { wins, losses, mmr, streak?, maxStreak? } 의 모양 검사 → 깨끗한 값 | null */
+export function readServerRecord(r) {
+  if (!r || typeof r !== 'object' || !['wins', 'losses', 'mmr'].every((k) => Number.isFinite(r[k]))) return null;
+  const streak = toInt(r.streak, 0, MAX_STREAK);
+  return {
+    wins: toInt(r.wins, 0, MAX_GAMES),
+    losses: toInt(r.losses, 0, MAX_GAMES),
+    mmr: toInt(r.mmr, MMR.start, MAX_MMR),
+    streak,
+    maxStreak: Math.max(toInt(r.maxStreak, 0, MAX_STREAK), streak),
+  };
+}
+
+function applyServerRecord(d, r) {
+  Object.assign(d, { wins: r.wins, losses: r.losses, mmr: r.mmr, streak: r.streak, maxStreak: r.maxStreak });
+}
+
+// 서버 기록을 받지 못한 랭킹전(연결이 끊겨 game_over 를 놓침): 서버와 같은 규칙으로 미리 반영 — 다음 로비 접속 때 서버 값으로 다시 맞춘다
+function applyRankedRule(d, won) {
+  if (won) {
+    d.wins = Math.min(MAX_GAMES, d.wins + 1);
+    d.streak = Math.min(MAX_STREAK, d.streak + 1);
+    d.maxStreak = Math.max(d.maxStreak, d.streak);
+    d.mmr = toMmr(d.mmr + MMR.win);
+  } else {
+    d.losses = Math.min(MAX_GAMES, d.losses + 1);
+    d.streak = 0;
+    d.mmr = toMmr(d.mmr - MMR.loss);
+  }
 }
 
 function defaultStorage() {
@@ -653,6 +718,11 @@ export class PlayerProfile {
   get winRateText() { return formatWinRate(this.#data.wins, this.#data.losses); } // 'XX.X%'
   get mmr() { return this.#data.mmr; }
   get tier() { return tierOf(this.#data.mmr); }
+  /** AI 딜러 대전(연습) 기록 — 랭킹 MMR · 랭킹 전적과 별개 */
+  get practice() {
+    const p = this.#data.practice;
+    return { ...p, games: p.wins + p.losses, winRateText: formatWinRate(p.wins, p.losses) };
+  }
   get nickname() { return this.#data.nickname; }
   get equippedTitle() { return this.#data.equippedTitle; }
   get titles() { return [...this.#data.titles]; }
@@ -906,59 +976,92 @@ export class PlayerProfile {
     });
   }
 
-  // ── 경기 결과 ──
+  // ── 경기 결과 (판당 한 번만 — 모드별로 하나) ──
+
   /**
-   * 경기 종료: 전적(승·패) · 연승 · MMR(상대 MMR 에 따른 Elo — calculateEloDelta, 0 아래로는 안 내려감) · 탄피 · 칭호를 한 번에 갱신한다. 판당 한 번만 호출할 것.
-   * → { won, base, bonus, total(탄피), streak, prevStreak, maxStreak, brass, canProtect,
-   *     mmr, prevMmr, mmrDelta(실제로 바뀐 점수), opponentMmr(계산에 쓴 상대 MMR), tier, prevTier, tierChange('up' | 'down' | null), wins, losses, newTitles(이번에 새로 얻은 칭호 id) }
+   * AI 딜러 대전 = 연습: 연습 전적(승·패) · 연습 연승 · 탄피(승리/패배 보상 + 연습 연승 보너스) · 칭호만 갱신한다.
+   * 랭킹 MMR · 랭킹 전적 · 랭킹 연승 · 티어는 건드리지 않는다.
+   * → { mode: 'practice', ranked: false, won, base, bonus, total(탄피), brass, streak, prevStreak, maxStreak(연습), canProtect, practice: { wins, losses }, newTitles }
    */
-  // brass: 숫자를 주면 승리/패배 보상 대신 이 탄피를 지급 (PvP 판돈 테이블의 서버 상금)
-  // opponentMmr: PvP 상대의 MMR. 안 주면(싱글) 내 티어에 맞는 AI 딜러 MMR(AI_DEALER_MMR)을 상대로 친다
-  recordResult(won, { brass = null, opponentMmr = null } = {}) {
+  recordPractice(won) {
     return this.#mutate((d) => {
-      const prevStreak = d.streak;
-      const prevMmr = d.mmr;
-      const foeMmr = Number.isFinite(opponentMmr) ? opponentMmr : AI_DEALER_MMR[tierOf(prevMmr).id];
-      d.streak = won ? Math.min(MAX_STREAK, prevStreak + 1) : 0;
-      d.maxStreak = Math.max(d.maxStreak, d.streak);
-      if (won) d.wins = Math.min(MAX_GAMES, d.wins + 1);
-      else d.losses = Math.min(MAX_GAMES, d.losses + 1);
-      d.mmr = toMmr(prevMmr + calculateEloDelta(prevMmr, foeMmr, won));
-      const reward = brass === null ? rewardFor(won, d.streak) : { base: Math.max(0, Math.floor(brass) || 0), bonus: 0, total: Math.max(0, Math.floor(brass) || 0) };
+      const p = d.practice;
+      const prevStreak = p.streak;
+      p.streak = won ? Math.min(MAX_STREAK, prevStreak + 1) : 0;
+      p.maxStreak = Math.max(p.maxStreak, p.streak);
+      if (won) p.wins = Math.min(MAX_GAMES, p.wins + 1);
+      else p.losses = Math.min(MAX_GAMES, p.losses + 1);
+      const reward = rewardFor(won, p.streak);
       d.brass = toInt(d.brass + reward.total, d.brass, MAX_BRASS);
-      const had = new Set(d.titles);
-      const got = new Set([...d.titles, ...titlesUnlockedBy(d)]);
-      d.titles = TITLES.map((t) => t.id).filter((id) => got.has(id));
-      const tier = tierOf(d.mmr);
-      const prevTier = tierOf(prevMmr);
       return {
-        won,
-        ...reward,
-        streak: d.streak,
-        prevStreak,
-        maxStreak: d.maxStreak,
-        brass: d.brass,
-        canProtect: !won && prevStreak >= 2,
-        mmr: d.mmr,
-        prevMmr,
-        mmrDelta: d.mmr - prevMmr,
-        opponentMmr: foeMmr,
-        tier,
-        prevTier,
-        tierChange: tier.index > prevTier.index ? 'up' : tier.index < prevTier.index ? 'down' : null,
-        wins: d.wins,
-        losses: d.losses,
-        newTitles: d.titles.filter((id) => !had.has(id)),
+        mode: 'practice', ranked: false, won, ...reward, brass: d.brass,
+        streak: p.streak, prevStreak, maxStreak: p.maxStreak, canProtect: !won && prevStreak >= 2,
+        practice: { wins: p.wins, losses: p.losses }, newTitles: grantTitles(d),
       };
     });
   }
 
-  /** 연승 보호: 패배로 끊긴 연승을 되돌린다 (보상형 광고 시청 뒤). 전적·MMR은 그대로 — 연승 기록만 지킨다. */
+  /**
+   * 온라인 랭킹전(무작위 매칭): 랭킹 전적 · 연승 · MMR 을 서버 기록(record)으로 맞추고 탄피를 지급한다.
+   *   record   game_over 로 받은 서버(Supabase players)의 내 기록 — 원본. 없으면(연결이 끊겨 못 받음) 서버와 같은 규칙(승 +25 · 패 −20)으로 미리 반영
+   *   mmrDelta 서버가 알려 준 이번 판 MMR 변동 (없으면 기록 차이)
+   *   brass    판돈 테이블의 서버 상금 (없으면 승리/패배 보상 + 랭킹 연승 보너스)
+   * → { mode: 'ranked', ranked: true, won, base, bonus, total, brass, streak, prevStreak, maxStreak, canProtect: false,
+   *     mmr, prevMmr, mmrDelta, tier, prevTier, tierChange('up' | 'down' | null), wins, losses, newTitles }
+   */
+  recordRanked(won, { record = null, mmrDelta = null, brass = null } = {}) {
+    return this.#mutate((d) => {
+      const prevStreak = d.streak;
+      const server = readServerRecord(record);
+      const delta = Number.isFinite(mmrDelta) ? Math.trunc(mmrDelta) : null;
+      const prevMmr = server && delta !== null ? toMmr(server.mmr - delta) : d.mmr; // 서버 기준 직전 점수 (거울이 오래됐어도 승급 · 강등을 바르게)
+      if (server) applyServerRecord(d, server);
+      else applyRankedRule(d, won);
+      const reward = brass === null ? rewardFor(won, won ? d.streak : 0) : fixedReward(brass);
+      d.brass = toInt(d.brass + reward.total, d.brass, MAX_BRASS);
+      const tier = tierOf(d.mmr);
+      const prevTier = tierOf(prevMmr);
+      return {
+        mode: 'ranked', ranked: true, won, ...reward, brass: d.brass,
+        streak: d.streak, prevStreak, maxStreak: d.maxStreak, canProtect: false, // 랭킹 연승은 서버 기록이라 광고로 되돌리지 않는다
+        mmr: d.mmr, prevMmr, mmrDelta: delta ?? d.mmr - prevMmr,
+        tier, prevTier, tierChange: tier.index > prevTier.index ? 'up' : tier.index < prevTier.index ? 'down' : null,
+        wins: d.wins, losses: d.losses, newTitles: grantTitles(d),
+      };
+    });
+  }
+
+  /**
+   * 친구 초대(방 코드) 대전 = 친선전: 랭킹 MMR · 랭킹 전적 · 연승은 그대로, 탄피만 (승리/패배 기본 보상 — 연승 보너스 없음, 판돈이 있으면 상금).
+   * → { mode: 'friendly', ranked: false, won, base, bonus, total, brass, canProtect: false, newTitles: [] }
+   */
+  recordFriendly(won, { brass = null } = {}) {
+    return this.#mutate((d) => {
+      const reward = brass === null ? rewardFor(won, 0) : fixedReward(brass);
+      d.brass = toInt(d.brass + reward.total, d.brass, MAX_BRASS);
+      return { mode: 'friendly', ranked: false, won, ...reward, brass: d.brass, canProtect: false, newTitles: [] };
+    });
+  }
+
+  /** 로비 접속 등에서 받은 서버 랭킹 기록으로 랭킹 전적 · 연승 · MMR 을 맞춘다 (서버가 원본). 바뀌었으면 true */
+  syncRanked(record) {
+    const server = readServerRecord(record);
+    if (!server) return false;
+    return this.#mutate((d) => {
+      const changed = ['wins', 'losses', 'mmr', 'streak', 'maxStreak'].some((k) => d[k] !== server[k]);
+      applyServerRecord(d, server);
+      grantTitles(d);
+      return changed;
+    });
+  }
+
+  /** 연승 보호: 패배로 끊긴 AI 연습 연승을 되돌린다 (보상형 광고 · 연승 보호권). 전적은 그대로 — 연승 기록만 지킨다. 랭킹 연승은 서버 기록이라 대상이 아니다. */
   restoreStreak(prevStreak) {
     return this.#mutate((d) => {
-      d.streak = Math.max(d.streak, toInt(prevStreak, 0, MAX_STREAK));
-      d.maxStreak = Math.max(d.maxStreak, d.streak);
-      return d.streak;
+      const p = d.practice;
+      p.streak = Math.max(p.streak, toInt(prevStreak, 0, MAX_STREAK));
+      p.maxStreak = Math.max(p.maxStreak, p.streak);
+      return p.streak;
     });
   }
 }

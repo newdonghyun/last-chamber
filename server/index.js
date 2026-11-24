@@ -15,12 +15,13 @@
  *   연결할 때 io(url, { auth: { userId, nickname } })   userId = 클라이언트가 처음 로그인할 때 만든 UUID · nickname = 2~10자 · 공백 없음 (server/userStore.js 규칙)
  *     → 그 소켓을 그 유저로 기억한다(socket.data.user). 값이 틀리면 조용히 익명으로 받는다.
  *     · 로그인한 소켓의 프로필 닉네임은 서버가 확인한 닉네임으로 덮어써서 상대에게 보낸다 (유저 ID 는 상대에게 절대 보내지 않는다)
- *     · 판이 끝나면 로그인한 좌석의 서버 전적(승/패)을 기록하고 game_over 의 record 로 알려 준다
+ *     · 랭킹전(무작위 매칭 mode 'queue')이 끝나면 로그인한 좌석의 서버 전적(승/패 · 연승 · MMR +25/−20)을 기록하고 game_over 의 record · mmrDelta 로 알려 준다
+ *       친구 초대 방(mode 'private')은 친선전 — 전적 · MMR 을 기록하지 않는다 (ranked: false)
  *
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
  *   register_player({ user_id, nickname })        로비 접속 즉시: 로그인 + Supabase players upsert(완료 후 응답) → { ok, user, me, top }  (me · top = get_leaderboard 와 같다)
  *   hello({ userId, nickname })                   로그인 · 닉네임 변경 (연결 뒤에 해도 된다) → { ok, user: { nickname, wins, losses, games, streak, maxStreak, mmr } }  ← 서버에 기록된 내 전적
- *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (mmr 내림차순 10명), me: 내 전적 | null }
+ *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (랭킹전 1판 이상 둔 유저만 · mmr 내림차순 10명), me: 내 전적 | null }
  *                                                 판 · 대기열 도중에 다른 유저 ID 로 바꿀 수는 없다 (ALREADY_IN_ROOM)
  *   create_private_room({ profile })              친구 초대 방 → { ok, code }  (+ room_created { code })   code = 4자리 영문/숫자 (예: A7K9)
  *   join_private_room(code | { code, profile })   → { ok, code }  → 곧바로 판이 시작된다
@@ -32,10 +33,10 @@
  *   leave_room()                                  방 나가기: 기다리는 방은 닫히고, 진행 중이면 항복(상대 승)
  *
  *   ── 서버 → 클라이언트 ──
- *   match_found   { code, mode: 'private'|'queue', tier, fee, prize, you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
+ *   match_found   { code, mode: 'private'|'queue', ranked: mode === 'queue', tier, fee, prize, you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
  *   state_update  { code, reason: 'start'|'shoot'|'item'|'timeout'|'rejoin', by?, auto?, state, logFrom, events, deadline, now, opponentConnected }
  *                 state = getPublicState(내 좌석) · events = getLog(내 좌석, logFrom) (rejoin 은 logFrom 0 부터 전체) · deadline = 이 턴이 자동 격발되는 서버 시각(ms) · now = 서버 현재 시각(시계 보정용)
- *   game_over     { code, tier, fee, prize, winner, youWon, reason: 'normal'|'forfeit', payout, score: { you, opponent }, players: { P1: { mmr }, P2: { mmr } }, record? }
+ *   game_over     { code, mode, ranked, tier, fee, prize, winner, youWon, reason: 'normal'|'forfeit', payout, score: { you, opponent }, players: { P1: { mmr }, P2: { mmr } }, record?, mmrDelta? (랭킹전에서 기록된 내 MMR 변동) }
  *                 record = { nickname, wins, losses, games } — 받는 사람이 로그인한 경우에만, 이번 판까지 반영된 서버 전적
  *   opponent_status { connected: false, graceMs, until } | { connected: true }     receive_emote (보낸 객체 그대로)     room_closed { reason }     session_replaced
  *   오류 코드: BAD_REQUEST · RATE_LIMITED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · INVALID_NICKNAME · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …

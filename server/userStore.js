@@ -4,7 +4,8 @@
  *   클라이언트가 처음 로그인할 때 만든 유저 ID(UUID)를 열쇠로 유저 한 명의 기록을 들고 있는다:
  *     { id, nickname, wins, losses, createdAt, updatedAt, lastSeenAt }   (시각은 ms)
  *   · 식별: Socket.io 연결 때 handshake.auth = { userId, nickname } 또는 hello 이벤트 (server/index.js identifyUser)
- *   · 전적: 실시간 PvP 판이 끝나면 roomManager 가 recordResult(userId, won) — AI 딜러 판은 기기 안의 기록(storeData.js)이라 여기 오지 않는다
+ *   · 전적: 온라인 랭킹전(무작위 매칭) 판이 끝나면 roomManager 가 recordResult(userId, won) — 친구 초대 방(친선전)과 AI 딜러 판(연습, 기기 안의 기록)은 여기 오지 않는다
+ *   · TOP 10(leaderboard): 랭킹전을 1판 이상 둔 유저(wins + losses > 0)만
  *   · 저장: file 을 주면 JSON 파일로 남긴다 (바뀐 뒤 saveDelayMs 동안 모아서 한 번 · 임시 파일에 쓴 뒤 바꿔치기 → 쓰다가 꺼져도 파일이 깨지지 않는다).
  *           주지 않으면 메모리에만 (테스트 · 임시 서버). 서버를 시작할 때 파일이 있으면 읽어 온다.
  *   · Supabase: db(Supabase 클라이언트 또는 그 Promise)를 주면 players 테이블이 원본이다 (파일 저장은 끈다). 메모리는 캐시 — 서버 인스턴스 1개 전제.
@@ -136,6 +137,7 @@ const fromRow = (row) => ({
 });
 const toRow = (rec) => ({ user_id: rec.id, nickname: rec.nickname, wins: rec.wins, losses: rec.losses, streak: rec.streak, max_streak: rec.maxStreak, mmr: rec.mmr });
 const byRank = (a, b) => b.mmr - a.mmr || b.wins - a.wins;
+const hasPlayed = (r) => r.wins + r.losses > 0; // 랭킹전을 1판 이상 — TOP 10 에 오를 자격
 
 /**
  * 유저 저장소를 만든다.
@@ -336,23 +338,27 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     return rec;
   }
 
-  /** mmr 내림차순 상위 limit 명 (기록 객체 — id 포함, 밖으로 보낼 때는 publicView). DB 가 안 되면 메모리 캐시로 */
+  /**
+   * mmr 내림차순 상위 limit 명 (기록 객체 — id 포함, 밖으로 보낼 때는 publicView). DB 가 안 되면 메모리 캐시로.
+   * 랭킹전을 1판 이상 둔 유저(wins + losses > 0)만 — 로비에만 들렀다 간 계정(1000점)이 순위를 채우지 않게.
+   */
   async function leaderboard(limit = 10) {
     await dbReady;
     if (client) {
       if (board.rows && now() - board.at < BOARD_CACHE_MS) return board.rows;
       try {
-        const res = check(await client.from(TABLE).select(COLUMNS).order('mmr', { ascending: false }).order('wins', { ascending: false }).limit(limit), 'players leaderboard');
+        const res = check(await client.from(TABLE).select(COLUMNS).or('wins.gt.0,losses.gt.0') // wins + losses > 0 (둘 다 0 이상이라 같은 뜻)
+          .order('mmr', { ascending: false }).order('wins', { ascending: false }).limit(limit), 'players leaderboard');
         markDb(null);
         const rows = (res.data ?? []).map((row) => (meta.get(row.user_id)?.loaded && users.get(row.user_id)) || { id: row.user_id, nickname: row.nickname, ...fromRow(row) }); // 캐시가 더 최신
-        board = { at: now(), rows: rows.sort(byRank) };
+        board = { at: now(), rows: rows.filter(hasPlayed).sort(byRank) };
         return board.rows;
       } catch (err) {
         markDb(err);
         onError(err);
       }
     }
-    return [...users.values()].sort(byRank).slice(0, limit);
+    return [...users.values()].filter(hasPlayed).sort(byRank).slice(0, limit);
   }
 
   /** 지금까지 바뀐 내용을 바로 쓴다 (파일 · DB 진행 중인 쓰기까지 기다린다) */

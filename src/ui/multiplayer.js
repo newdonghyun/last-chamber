@@ -28,7 +28,7 @@
  *   서버가 Supabase players 에 upsert 를 끝내고 내 전적 + TOP 10 으로 답한다 → 로비에 바로 그린다. 로그인 전에는 로비를 열지 않고 로그인 화면을 부른다(window 'lastchamber:need-login').
  */
 
-import { PlayerProfile, getTitle } from './storeData.js';
+import { PlayerProfile, getTitle, MMR as RANKED_MMR } from './storeData.js';
 import { userSession } from './session.js';
 
 const START_BUTTON_ID = 'btn-start';
@@ -48,8 +48,8 @@ const TABLES = Object.freeze([
 
 const HEADINGS = Object.freeze({
   menu: ['SELECT MODE', '대전 모드 선택'],
-  room: ['PRIVATE ROOM', '친구 초대 대전'],
-  queue: ['MATCHMAKING', '상대를 찾는 중'],
+  room: ['FRIENDLY ROOM', '친선 방 코드 (랭킹 MMR 미반영)'],
+  queue: ['RANKED MATCH', '온라인 랭킹전 — 상대를 찾는 중'],
 });
 
 const ERROR_TEXT = Object.freeze({
@@ -72,7 +72,8 @@ const errorText = (code) => ERROR_TEXT[code] ?? (code ? `요청을 처리하지 
 
 // ───────── 상태 ─────────
 
-const profile = new PlayerProfile(); // app.js · monetization.js 와 같은 localStorage 키 — 여기서는 읽기만 한다 (열 때마다 reload)
+const profile = new PlayerProfile(); // app.js · monetization.js 와 같은 localStorage 키 — 서버 랭킹 기록으로 랭킹 전적을 맞출 때(syncRanked)만 쓴다
+const PROFILE_CHANGED = 'lastchamber:profile-changed'; // monetization.js 의 PROFILE_CHANGED 와 같은 이름 — app.js 가 미니 카드 · 프로필을 다시 그린다
 
 let sock = null; // 이번 로비 세션의 소켓 (매칭이 성사되면 pvp:start 로 넘기고 null 로 돌린다)
 let session = 0; // 로비 세션 번호 — 닫히거나 끊길 때마다 올려서, 늦게 도착한 비동기 결과를 버린다
@@ -91,8 +92,15 @@ const RANK_TIERS = Object.freeze([[1500, 'MASTER'], [1300, 'DIAMOND'], [1150, 'G
 const rankTier = (mmr) => (RANK_TIERS.find(([min]) => mmr >= min) ?? RANK_TIERS.at(-1))[1];
 /** 서버가 준 전적 → { mmr, wins, losses, streak } | null (예전 서버처럼 mmr 이 없으면 null) */
 const asRecord = (r) => (r && ['mmr', 'wins', 'losses'].every((k) => Number.isFinite(r[k]))
-  ? { mmr: r.mmr, wins: r.wins, losses: r.losses, streak: Number.isFinite(r.streak) ? r.streak : 0 }
+  ? { mmr: r.mmr, wins: r.wins, losses: r.losses, streak: Number.isFinite(r.streak) ? r.streak : 0, maxStreak: Number.isFinite(r.maxStreak) ? r.maxStreak : 0 }
   : null);
+
+/** 서버(Supabase players)의 내 랭킹 기록을 받았다 → 로비에 그리고, 이 기기의 랭킹 기록(티어 · 미니 카드 · 프로필)도 서버 값으로 맞춘다 */
+function takeServerRecord(record) {
+  serverRecord = record;
+  paintMe();
+  if (profile.syncRanked(record)) document.dispatchEvent(new CustomEvent(PROFILE_CHANGED));
+}
 
 // ───────── 화면 (모달을 직접 만든다) ─────────
 
@@ -113,15 +121,30 @@ dialog.innerHTML = `
     <p class="mp-wallet"><span>보유 탄피</span><b data-ui="brass">0</b></p>
 
     <div class="mp-view" data-ui="menu">
+      <!-- 모드 3가지: AI 딜러 대전(연습) · 온라인 랭킹전(무작위 매칭 — 랭킹 MMR 은 여기서만) · 친선 방 코드(지인끼리 — 랭킹 MMR 미반영) -->
       <section class="mp-sec" aria-labelledby="mp-h-solo">
-        <h3 class="mp-sec-title" id="mp-h-solo">AI 딜러 대전 <small>SINGLE</small></h3>
+        <h3 class="mp-sec-title" id="mp-h-solo">AI 딜러 대전 (연습) <small>PRACTICE</small></h3>
         <button class="mp-btn mp-btn--solo" type="button" data-act="solo" data-ui="solo" autofocus>
-          <span class="mp-btn-main">딜러와 승부하기</span><span class="mp-btn-sub">즉시 시작</span>
+          <span class="mp-btn-main">딜러와 승부하기</span><span class="mp-btn-sub">즉시 시작 · 랭킹 MMR 미반영</span>
         </button>
       </section>
 
+      <section class="mp-sec" aria-labelledby="mp-h-ranked">
+        <h3 class="mp-sec-title" id="mp-h-ranked">온라인 랭킹전 (MMR) <small>RANKED</small></h3>
+        <p class="mp-hint">무작위 매칭만 랭킹에 반영돼요 — 승리 MMR +${RANKED_MMR.win} · 패배 −${RANKED_MMR.loss}</p>
+        <div class="mp-tables">
+          ${TABLES.map((t) => `
+          <button class="mp-table" type="button" data-act="table" data-tier="${t.tier}">
+            <span class="mp-table-name">${t.name}</span>
+            <span class="mp-table-fee">${t.fee > 0 ? `${fmt(t.fee)} 탄피` : '무료'}</span>
+            <span class="mp-table-note"></span>
+          </button>`).join('')}
+        </div>
+      </section>
+
       <section class="mp-sec" aria-labelledby="mp-h-friend">
-        <h3 class="mp-sec-title" id="mp-h-friend">친구 초대 대전 <small>PRIVATE</small></h3>
+        <h3 class="mp-sec-title" id="mp-h-friend">친선 방 코드 <small>FRIENDLY</small></h3>
+        <p class="mp-hint">친구와 두는 친선전 — 랭킹 MMR · 전적에 반영되지 않아요</p>
         <button class="mp-btn" type="button" data-act="create" data-ui="create">
           <span class="mp-btn-main">방 만들기</span><span class="mp-btn-sub">4자리 코드 발급</span>
         </button>
@@ -137,22 +160,11 @@ dialog.innerHTML = `
         </form>
       </section>
 
-      <section class="mp-sec" aria-labelledby="mp-h-ranked">
-        <h3 class="mp-sec-title" id="mp-h-ranked">실시간 랭크 &amp; 판돈 매칭 <small>RANKED</small></h3>
-        <div class="mp-tables">
-          ${TABLES.map((t) => `
-          <button class="mp-table" type="button" data-act="table" data-tier="${t.tier}">
-            <span class="mp-table-name">${t.name}</span>
-            <span class="mp-table-fee">${t.fee > 0 ? `${fmt(t.fee)} 탄피` : '무료'}</span>
-            <span class="mp-table-note"></span>
-          </button>`).join('')}
-        </div>
-      </section>
-
       <section class="mp-sec" aria-labelledby="mp-h-board">
         <h3 class="mp-sec-title" id="mp-h-board">TOP 10 랭킹 <small>LEADERBOARD</small></h3>
         <ol class="mp-board" data-ui="board"></ol>
         <p class="mp-hint" data-ui="board-note">랭킹을 불러오는 중…</p>
+        <p class="mp-hint">온라인 랭킹전을 1판 이상 둔 플레이어만 순위에 올라요</p>
       </section>
     </div>
 
@@ -222,9 +234,9 @@ function paintMe() {
   ui.meTier.textContent = tier ?? '—';
   ui.meTier.dataset.tier = tier?.toLowerCase() ?? '';
   ui.meName.textContent = userSession.user?.nickname ?? profile.nickname;
-  ui.meRecord.textContent = r
-    ? `MMR ${fmt(r.mmr)} · ${fmt(r.wins)}승 ${fmt(r.losses)}패 · ${fmt(r.streak)}연승`
-    : '대전 서버에 연결되면 서버 전적이 표시돼요';
+  ui.meRecord.textContent = !r ? '대전 서버에 연결되면 랭킹전 전적이 표시돼요'
+    : r.wins + r.losses > 0 ? `랭킹 MMR ${fmt(r.mmr)} · ${fmt(r.wins)}승 ${fmt(r.losses)}패 · ${fmt(r.streak)}연승`
+      : `랭킹 MMR ${fmt(r.mmr)} · 아직 랭킹전 기록이 없어요`;
 }
 
 /** TOP 10 리스트 (닉네임은 사용자 입력이라 textContent 로만) */
@@ -245,7 +257,7 @@ function paintBoard(top) {
       cell('mp-row-wl', `${fmt(r.wins)}승 ${fmt(r.losses)}패 · ${fmt(r.streak ?? 0)}연승`));
     return li;
   }));
-  ui.boardNote.textContent = top.length ? '' : '아직 기록이 없어요 — 첫 승리의 주인공이 되어 보세요';
+  ui.boardNote.textContent = top.length ? '' : '아직 랭킹전 기록이 없어요 — 첫 승리의 주인공이 되어 보세요';
 }
 
 /** 로비를 열면 서버에 붙어 TOP 10 · 내 전적을 가져온다 (get_leaderboard). 실패해도 AI 딜러 대전 · 버튼은 그대로 */
@@ -260,10 +272,7 @@ async function refreshBoard() {
     if (mine !== session) return;
     if (!res.ok || !Array.isArray(res.top)) throw new Error(res.error ?? 'BAD_RESPONSE');
     const me = asRecord(res.me);
-    if (me) {
-      serverRecord = me;
-      paintMe();
-    }
+    if (me) takeServerRecord(me);
     paintBoard(res.top);
   } catch (err) {
     if (mine !== session || err?.message === 'CANCELLED') return;
@@ -394,10 +403,7 @@ function registerPlayer(s) {
         return;
       }
       const record = asRecord(res.me ?? res.user);
-      if (record) {
-        serverRecord = record;
-        paintMe();
-      }
+      if (record) takeServerRecord(record);
       resolve(res);
     });
   });
@@ -602,7 +608,7 @@ function startQueue(table) {
       throw new Error('INSUFFICIENT_BRASS');
     }
     ui.queueName.textContent = `${table.name} · ${fee > 0 ? `${fmt(fee)} 탄피` : '무료'}`;
-    ui.queueMeta.textContent = prize > 0 ? `승자 상금 ${fmt(prize)} 탄피` : '참가비 · 상금 없음';
+    ui.queueMeta.textContent = `${prize > 0 ? `승자 상금 ${fmt(prize)} 탄피` : '참가비 · 상금 없음'} · 랭킹 MMR 승 +${RANKED_MMR.win} / 패 −${RANKED_MMR.loss}`;
     setPhase('queue');
     startTicker();
     say('');

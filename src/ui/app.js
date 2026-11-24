@@ -9,7 +9,8 @@
  * 분위기: 앰비언트 배경음(긴장하면 커짐) · 위기 비네팅(마지막 1발 / 내 체력 1) · 실탄 격발 슬로모션 · 소리 설정(#sound-panel, 설정은 기억)
  * 단축키(PC): ↑ 상대에게 격발 · ↓ 나에게 격발 · 1~6 아이템 · M 음소거 · ? 도감
  *
- * 프로필·티어: 경기가 끝나면 전적(승·패·최대 연승)과 MMR(상대 MMR 에 따른 Elo — 승 +5~+38 · 패 −5~−38)이 갱신되고, 티어(브론즈 칩 ~ 마피아)는 MMR에서 바로 계산된다.
+ * 모드별 정산: AI 딜러 대전 = 연습(연습 전적 · 탄피만, 랭킹 MMR 미반영) · 온라인 랭킹전(무작위 매칭) = 서버 랭킹 기록(MMR +25 / −20 · 전적 · 연승) · 친선 방 코드 = 탄피만.
+ * 프로필·티어: 랭킹전이 끝나면 랭킹 전적(승·패·최대 연승)과 MMR 이 서버 기록으로 갱신되고, 티어(브론즈 칩 ~ 마피아)는 MMR에서 바로 계산된다.
  *   타이틀 좌상단 미니 카드(티어 · 닉네임 · 승률)를 누르면 프로필 & 랭킹 모달: [내 기록] 닉네임 · 전적 · 칭호 / [순위표] 가상 라이벌 15명 + 내 실시간 순위.
  *   순위 데이터는 storeData.js 의 leaderboard 소스가 준다 (Step B 서버 연동 시 leaderboard.useSource() 로 교체).
  *
@@ -180,6 +181,7 @@ const el = {
   rewardTotal: $('reward-total'),
   rewardLines: $('reward-lines'),
   rewardStreak: $('reward-streak'),
+  rewardMode: $('reward-mode'),
   rewardActions: $('reward-actions'),
   rewardNote: $('reward-note'),
   btnDouble: $('btn-double'),
@@ -510,6 +512,7 @@ function resetRewardUi() {
   el.btnDouble.hidden = false;
   el.rewardRank.hidden = true;
   el.rewardRank.replaceChildren();
+  el.rewardMode.textContent = '';
   rewardNote('');
   for (const btn of [el.btnDouble, el.btnProtect]) {
     btn.disabled = false;
@@ -536,17 +539,17 @@ function showReward(outcome) {
   el.rewardLines.replaceChildren();
   const stakes = (outcome.pvp?.fee ?? 0) > 0; // PvP 판돈 테이블: 탄피 보상은 서버 상금뿐 (광고 2배 없음)
   if (outcome.base > 0) addRewardLine(stakes ? '판돈 상금' : outcome.won ? '승리 보상' : '위로 보상', outcome.base);
-  if (outcome.bonus) addRewardLine(`${outcome.streak}연승 보너스 (×${REWARD.streakStep})`, outcome.bonus);
-  el.rewardStreak.textContent = `${outcome.won
-    ? `${outcome.streak}연승 중 · 최대 ${outcome.maxStreak}연승`
-    : outcome.prevStreak > 0 ? `${outcome.prevStreak}연승이 끊겼다` : '다음 판엔 이길 수 있다'} · ${mmrText(outcome)}`;
-  // 티어가 바뀌었거나 새 칭호를 얻었을 때만 한 줄씩 더
+  if (outcome.bonus) addRewardLine(`${outcome.mode === 'practice' ? '연습 ' : ''}${outcome.streak}연승 보너스 (×${REWARD.streakStep})`, outcome.bonus);
+  el.rewardStreak.textContent = streakText(outcome);
+  el.rewardMode.dataset.mode = outcome.mode;
+  el.rewardMode.textContent = modeText(outcome); // 랭킹전: MMR 증감 / 연습 · 친선전: 'MMR 미반영' 배지
+  // 티어가 바뀌었거나(랭킹전만) 새 칭호를 얻었을 때 · 모드별 기록 한 줄
   const notes = [];
   if (outcome.tierChange) notes.push(h('p', outcome.tierChange === 'up' ? 'is-up' : 'is-down', `${outcome.tierChange === 'up' ? '▲ 승급' : '▼ 강등'} — ${outcome.tier.label}`));
   const gained = outcome.newTitles.map((id) => getTitle(id)?.name).filter(Boolean);
   if (gained.length) notes.push(h('p', 'is-title', `새 칭호 — ${gained.join(', ')}`));
-  const server = outcome.pvp?.record; // PvP: 서버가 기록한 이 계정(유저 ID)의 대전 전적 (game_over.record — 로그인한 경우만)
-  if (server) notes.push(h('p', '', `서버 대전 전적 ${fmt(server.wins)}승 ${fmt(server.losses)}패`));
+  if (outcome.mode === 'ranked') notes.push(h('p', '', `랭킹전 전적 ${fmt(outcome.wins)}승 ${fmt(outcome.losses)}패`));
+  else if (outcome.mode === 'practice') notes.push(h('p', '', `AI 연습 전적 ${fmt(outcome.practice.wins)}승 ${fmt(outcome.practice.losses)}패`));
   el.rewardRank.replaceChildren(...notes);
   el.rewardRank.hidden = notes.length === 0;
   el.doubleSub.textContent = `+${fmt(outcome.total)} 탄피 추가 지급`;
@@ -560,7 +563,7 @@ function showReward(outcome) {
   el.reward.hidden = false;
   el.rewardActions.hidden = false;
   tweenNumber(el.rewardTotal, 0, outcome.total, { prefix: '+', ms: 750 });
-  el.srLog.textContent = `탄피 ${outcome.total}개를 얻었다. ${mmrText(outcome)}.${outcome.tierChange ? ` ${outcome.tierChange === 'up' ? '승급' : '강등'}: ${outcome.tier.label}.` : ''} ${gained.length ? `새 칭호: ${gained.join(', ')}.` : ''} ${outcome.won ? `${outcome.streak}연승 중.` : outcome.canProtect ? '광고를 보면 연승 기록을 지킬 수 있다.' : ''}`.replace(/\s+/g, ' ').trim();
+  el.srLog.textContent = `탄피 ${outcome.total}개를 얻었다. ${modeText(outcome)}.${outcome.tierChange ? ` ${outcome.tierChange === 'up' ? '승급' : '강등'}: ${outcome.tier.label}.` : ''} ${gained.length ? `새 칭호: ${gained.join(', ')}.` : ''} ${outcome.won ? `${outcome.streak}연승 중.` : outcome.canProtect ? '광고를 보면 연승 기록을 지킬 수 있다.' : ''}`.replace(/\s+/g, ' ').trim();
 }
 
 function comingSoon(btn, sub, on) { // 결과 화면 광고 버튼을 '준비 중'으로 잠근다 (resetRewardUi 가 판마다 되돌린다)
@@ -635,17 +638,22 @@ async function onProtect() { // [광고 보고 연승 기록 보호하기] → �
   sound.playItem();
   syncWallet();
   if (outcome !== lastOutcome) return;
-  el.rewardStreak.textContent = `${outcome.prevStreak}연승 기록이 보호됐다 · 최대 ${profile.maxStreak}연승 · ${mmrText(outcome)}`;
+  el.rewardStreak.textContent = `AI 연습 ${outcome.prevStreak}연승 기록이 보호됐다 · 최대 ${profile.practice.maxStreak}연승`;
   markDone(el.btnProtect, '연승 기록 보호 완료', `${outcome.prevStreak}연승 유지`);
 }
 
 // ───────── 프로필 · 티어 · 순위표 ─────────
 
-// Elo 로 계산된 실제 변동값. 나보다 100 이상 높은 상대를 이기면 '언더독 승리'
-const UNDERDOG_GAP = 100;
-const mmrText = (outcome) => {
-  const underdog = outcome.won && Number.isFinite(outcome.opponentMmr) && outcome.opponentMmr - outcome.prevMmr >= UNDERDOG_GAP;
-  return `MMR ${outcome.mmrDelta > 0 ? '+' : outcome.mmrDelta < 0 ? '−' : '±'}${Math.abs(outcome.mmrDelta)}${underdog ? ' (언더독 승리)' : ''} → ${fmt(outcome.mmr)}`;
+// 결과 화면의 모드 배지: 랭킹전만 MMR 증감(서버가 기록한 값), 연습 · 친선전은 랭킹에 반영되지 않는다는 표시
+const MODE_BADGE = { practice: '연습 모드 (랭킹 MMR 미반영)', friendly: '친선전 (랭킹 MMR 미반영)' };
+const modeText = (outcome) => (outcome.mode === 'ranked'
+  ? `랭킹전 · MMR ${outcome.mmrDelta > 0 ? '+' : outcome.mmrDelta < 0 ? '−' : '±'}${Math.abs(outcome.mmrDelta)} → ${fmt(outcome.mmr)}`
+  : MODE_BADGE[outcome.mode] ?? MODE_BADGE.friendly);
+const streakText = (outcome) => {
+  if (outcome.mode === 'friendly') return '친선전 — 전적 · 연승에 넣지 않는다';
+  const label = outcome.mode === 'practice' ? 'AI 연습 ' : '랭킹 ';
+  if (outcome.won) return `${label}${outcome.streak}연승 중 · 최대 ${outcome.maxStreak}연승`;
+  return outcome.prevStreak > 0 ? `${label}${outcome.prevStreak}연승이 끊겼다` : '다음 판엔 이길 수 있다';
 };
 
 // 티어 색을 CSS 변수로 칠한다 (뱃지 · 진행 바 · 빛무리가 이 값을 쓴다)
@@ -673,8 +681,8 @@ function syncPlayerCard() {
   setText(el.pcBadge.firstElementChild, tier.roman);
   setText(el.pcTier, tier.ko);
   setText(el.pcName, profile.nickname);
-  setText(el.pcRate, `승률 ${profile.winRateText}`);
-  setAttr(el.playerCard, 'aria-label', `프로필 & 랭킹 열기 — ${profile.nickname}, ${tier.label}, MMR ${fmt(profile.mmr)}, 승률 ${profile.winRateText}`);
+  setText(el.pcRate, profile.games ? `랭킹 ${profile.winRateText}` : '랭킹전 기록 없음'); // 짧게 — 닉네임이 말줄임되지 않게 (전체 뜻은 aria-label)
+  setAttr(el.playerCard, 'aria-label', `프로필 & 랭킹 열기 — ${profile.nickname}, ${tier.label}, 랭킹 MMR ${fmt(profile.mmr)}, 랭킹 승률 ${profile.winRateText}`);
 }
 
 // 인게임 내 이름표(하단): 로그인한 닉네임 + 작은 'YOU' — 사람 상대(PvP)든 딜러든 같은 이름표 (상대 이름표는 paintFoe)
@@ -726,9 +734,9 @@ function renderRecord() {
   const tier = profile.tier;
   paintTier(el.pfHero, tier);
   const text = h('div', 'pf-hero-text');
-  text.append(h('small', '', 'CURRENT TIER'), h('b', '', tier.ko), h('span', '', tier.en));
+  text.append(h('small', '', 'RANKED TIER · 온라인 랭킹전'), h('b', '', tier.ko), h('span', '', tier.en));
   const mmr = h('div', 'pf-mmr');
-  mmr.append(h('b', '', fmt(profile.mmr)), h('small', '', 'MMR'));
+  mmr.append(h('b', '', fmt(profile.mmr)), h('small', '', 'RANKED MMR'));
   const progress = h('div', 'pf-progress');
   const bar = h('div', 'pf-bar');
   const fill = h('i');
@@ -737,11 +745,14 @@ function renderRecord() {
   progress.append(bar, h('p', '', tier.next ? `다음 티어 ${tier.next.ko} (${tier.next.en}) · ${fmt(tier.toNext)} MMR 남음` : '최고 티어에 올랐다'));
   el.pfHero.replaceChildren(tierBadge(tier, 'is-xl'), text, mmr, progress);
 
-  const stats = [
-    ['총 전적', `${profile.wins}승 ${profile.losses}패`],
-    ['승률', profile.winRateText],
-    ['현재 연승', `${profile.streak}연승`],
-    ['최대 연승', `${profile.maxStreak}연승`],
+  const practice = profile.practice;
+  const stats = [ // 랭킹전(서버 기록)과 AI 연습을 따로 — 섞어서 보여 주지 않는다
+    ['랭킹전 전적', `${profile.wins}승 ${profile.losses}패`],
+    ['랭킹 승률', profile.winRateText],
+    ['랭킹 연승', `${profile.streak}연승 · 최대 ${profile.maxStreak}`],
+    ['AI 연습 전적', `${practice.wins}승 ${practice.losses}패`],
+    ['연습 승률', practice.winRateText],
+    ['연습 연승', `${practice.streak}연승 · 최대 ${practice.maxStreak}`],
   ];
   el.pfStats.replaceChildren(...stats.map(([name, value]) => {
     const box = h('div', 'pf-stat');
@@ -1593,7 +1604,7 @@ async function endGame(s, token) {
   let outcome = null;
   if (recordedGame !== token) {
     recordedGame = token;
-    outcome = online ? await pvpSettle(won) : profile.recordResult(won); // PvP: 서버 상금(payout) 반영 + 소켓 정리
+    outcome = online ? await pvpSettle(won) : profile.recordPractice(won); // PvP: 랭킹전/친선전별 정산 + 소켓 정리 · AI 딜러: 연습 기록만 (랭킹 MMR 미반영)
   }
   say(pick(won ? LINES.gameWon : LINES.gameLost));
   subtitle(won ? '딜러가 쓰러졌다 — 당신의 승리' : '당신이 쓰러졌다 — 딜러의 승리', won ? 'info' : 'danger');
@@ -2383,6 +2394,13 @@ initPvp({
   onAbort: (text) => { el.titleSub.textContent = text; }, // 참가비를 내지 못해 시작하지 못함 → 타이틀 화면에 이유를 보여 준다
 });
 syncSoundUi(); // 저장된 소리 설정을 화면에 반영
+// 다른 모듈이 프로필을 바꿨다 (로비가 서버 랭킹 기록으로 맞춤 · 결제 지급 — monetization.js PROFILE_CHANGED 와 같은 이름) → 미니 카드 · 지갑 · 열린 프로필을 다시 그린다
+document.addEventListener('lastchamber:profile-changed', () => {
+  profile.reload();
+  syncWallet();
+  syncPlayerCard();
+  if (el.profile.open) renderRecord();
+});
 document.addEventListener('visibilitychange', onVisibilityChange);
 // 앱 생명주기 — 화면을 떠나면(백그라운드 전환 · 화면 꺼짐 · 다른 앱/창) 소리를 즉시 멈추고, 보이고 포커스가 돌아오면 이어서.
 // 페이지를 떠나면(창 닫기 · 뒤로 가기 · 새로고침) 오디오 컨텍스트 · 배경음 타이머 · PvP 소켓 리스너를 정리한다 (로비 소켓은 multiplayer.js 가 같은 시점에 정리)

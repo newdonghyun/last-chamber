@@ -7,12 +7,13 @@
  *   · 내 입력은 pvpEngine().shoot / useItem 이 game_action 으로 보내고, 서버가 확정한 결과(그 행동이 만든 state_update)를 돌려준다.
  *   · 도발: app.js 가 쏘는 document 'lastchamber:taunt-out' → send_emote / 서버의 receive_emote → document 'lastchamber:taunt-in'.
  *   · 참가비 차감 · 전적/MMR/상금 정산은 app.js 가 initPvp 로 넘겨 준 PlayerProfile 로 한다 (같은 인스턴스 → 탄피 배지가 어긋나지 않는다).
+ *     모드별: 랭킹전(무작위 매칭 · match.ranked) → recordRanked(서버 기록으로 랭킹 MMR · 전적 · 연승을 맞춤) / 친선전(방 코드) → recordFriendly(탄피만).
  *   · 이벤트 이름은 server/index.js 규약 그대로: state_update · game_over · opponent_status · receive_emote · room_closed · session_replaced · match_found(재접속 때 다시 옴).
  *
  * 'pvp:start' 핸들러는 소켓 리스너를 '동기로' 먼저 붙인다 (서버가 match_found 직후 첫 state_update 를 보내므로). 첫 state_update 가 도착하면 hooks.onStart() 로 판을 연다.
  */
 
-import { KIND, DEFAULT_ID, DEFAULT_FLAME_ID, getItem, getFlame, tierOf } from './storeData.js';
+import { KIND, DEFAULT_ID, DEFAULT_FLAME_ID, getItem, getFlame, tierOf, readServerRecord } from './storeData.js';
 
 const ME = 'player'; // app.js 의 PLAYER / AI 와 같은 값
 const FOE = 'ai';
@@ -82,8 +83,8 @@ function bind(s) {
     youWon: Boolean(m?.youWon),
     payout: Math.max(0, Math.floor(m?.payout) || 0),
     reason: m?.reason ?? 'normal',
-    opponentMmr: opponentMmrOf(s, m?.players), // 서버가 알려 준 상대의 초기 MMR (없으면 null → 입장 때 받은 값을 쓴다)
-    record: readRecord(m?.record), // 서버가 기록한 내 계정의 대전 전적 { wins, losses } (로그인한 경우만 — 아니면 null)
+    record: readServerRecord(m?.record), // 서버(Supabase players)의 내 랭킹 기록 { wins, losses, mmr, streak, maxStreak } (로그인한 경우만 — 아니면 null)
+    mmrDelta: Number.isFinite(m?.mmrDelta) ? m.mmrDelta : null, // 랭킹전에서 서버가 실제로 기록한 이번 판 MMR 변동 (친선전 · 기록 실패면 없음)
   }));
   on('opponent_status', (m) => onOpponent(s, m));
   on('receive_emote', (m) => { if (S === s && !s.closed) document.dispatchEvent(new CustomEvent(TAUNT_IN, { detail: m })); });
@@ -102,21 +103,6 @@ function bind(s) {
       else finish(s, { youWon: false, payout: 0, reason: 'disconnect' }); // 자리를 잃었다 → 부전패
     });
   });
-}
-
-/** game_over 의 players({ P1: { mmr }, P2: { mmr } }) 에서 상대 좌석의 MMR 을 꺼낸다. 모양이 맞지 않으면 null */
-function opponentMmrOf(s, players) {
-  const foeSeat = s.match?.you === 'P1' ? 'P2' : 'P1';
-  const v = players?.[foeSeat]?.mmr;
-  return Number.isFinite(v) ? v : null;
-}
-
-/** game_over 의 record({ wins, losses, ... }) → { wins, losses } | null (모양이 맞지 않으면 null — 예전 서버는 보내지 않는다) */
-function readRecord(r) {
-  const count = (v) => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
-  const wins = count(r?.wins);
-  const losses = count(r?.losses);
-  return wins === null || losses === null ? null : { wins, losses };
 }
 
 /** 상대 프로필(서버가 걸러 준 값) → 화면용. 모르는 스킨 id 는 기본값으로 */
@@ -262,22 +248,37 @@ export function pvpRemainingMs(fallback) {
 
 // ───────── 정산 · 정리 ─────────
 
+/** 지금 판이 랭킹전(무작위 매칭)인가 — 친구 방 코드 대전은 친선전 (예전 서버는 ranked 를 안 보내므로 mode 로도 판단) */
+const isRankedMatch = (match) => (typeof match?.ranked === 'boolean' ? match.ranked : match?.mode === 'queue');
+
+/** 지금(또는 방금 끝난) PvP 판의 모드: 'ranked' | 'friendly' | null(PvP 아님) */
+export function pvpMode() {
+  if (!S) return null;
+  return isRankedMatch(S.match) ? 'ranked' : 'friendly';
+}
+
 /**
- * 판 결과를 저장한다 (전적 · 연승 · MMR · 칭호 + 탄피). 참가비가 있는 테이블은 서버가 내려준 상금(payout)이 탄피 보상이고,
- * 일반 테이블 · 친구 방은 기존 승리/패배 보상이다. 저장 뒤 소켓을 정리한다.
- * → recordResult 의 결과 + { pvp: { tier, mode, fee, payout, record } }   record = 서버에 기록된 내 대전 전적 { wins, losses } | null
+ * 판 결과를 저장하고 소켓을 정리한다. 모드별로 나눠 정산한다:
+ *   랭킹전 → profile.recordRanked: 서버(Supabase)가 기록한 내 랭킹 기록(game_over.record)으로 MMR · 전적 · 연승을 맞춘다 + 탄피
+ *   친선전 → profile.recordFriendly: 랭킹 기록은 그대로, 탄피만
+ * 참가비가 있는 테이블은 서버가 내려준 상금(payout)이 탄피 보상이고, 일반 테이블 · 친구 방은 기본 승리/패배 보상이다.
+ * → 정산 결과 + { pvp: { tier, mode, ranked, fee, payout, record } }   record = 서버의 내 랭킹 기록 | null
  */
 export async function pvpSettle(won) {
   const s = S;
-  if (!s) return hooks.profile.recordResult(won);
+  if (!s) return hooks.profile.recordFriendly(won); // 세션을 잃었다 — 랭킹 기록은 서버가 원본이니 건드리지 않는다 (다음 로비 접속 때 맞춰진다)
   const until = performance.now() + OVER_WAIT_MS;
   while (!s.over && !s.closed && performance.now() < until) await nextUpdate(s, until - performance.now());
   const fee = s.match.fee > 0 ? s.match.fee : 0;
   const payout = s.over ? s.over.payout : (won ? Number(s.match.prize) || 0 : 0);
-  const opponentMmr = s.over?.opponentMmr ?? s.foe.mmr; // game_over 가 준 값 → 없으면(부전패 · 자리 상실) 입장 때 본 상대 MMR
-  const outcome = hooks.profile.recordResult(won, { brass: fee > 0 ? payout : null, opponentMmr });
+  const brass = fee > 0 ? payout : null;
+  const ranked = isRankedMatch(s.match);
+  const record = s.over?.record ?? null;
+  const outcome = ranked
+    ? hooks.profile.recordRanked(won, { record, mmrDelta: s.over?.mmrDelta ?? null, brass })
+    : hooks.profile.recordFriendly(won, { brass });
   pvpEnd();
-  return { ...outcome, pvp: { tier: s.match.tier, mode: s.match.mode, fee, payout, record: s.over?.record ?? null } };
+  return { ...outcome, pvp: { tier: s.match.tier, mode: s.match.mode, ranked, fee, payout, record } };
 }
 
 /** 리스너를 떼고 소켓을 끊는다 (여러 번 불러도 안전). 서버는 끊김을 보고 방을 정리한다 */
