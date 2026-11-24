@@ -180,6 +180,16 @@ function mountUi({ profile, bridge = platformBridge, doc = document }) {
   const status = h('p', 'mz-status'); // 보유 현황: VIP 활성 · 연승 보호권 N회
   const offers = h('div', 'mz-offers');
   offers.append(starterBtn, vipBtn, status);
+  // 결제 SDK 가 아직 없는 곳(공개 웹 등): 상품 버튼은 보이되 '준비 중'으로 잠근다 — 결제창이 뜨지 않으니 무료로 지급될 일도 없다
+  if (typeof bridge.isAvailable === 'function' && !bridge.isAvailable('purchase')) {
+    starterBtn.querySelector('.mz-badge').textContent = '준비 중';
+    vipBtn.querySelector('b').textContent = '준비 중';
+    for (const btn of [starterBtn, vipBtn]) {
+      btn.disabled = true;
+      btn.classList.add('is-soon');
+      btn.setAttribute('aria-label', `${btn.getAttribute('aria-label')} — 결제 준비 중`);
+    }
+  }
   btnStart.after(offers);
 
   // ── 결과 화면: 광고 버튼 위 안내 한 줄 ──

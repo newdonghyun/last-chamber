@@ -8,10 +8,10 @@
  *     triggerHaptic('shot' | 'hit' | 'win' | 'lose')     결정적인 순간에만 짧은 진동 1회 — 실탄 발사 / 피격 / 승리 확정 / 패배 확정 (→ true: 울림, false: 무시)
  *                   ('medium' | 'heavy' 로 세기를 직접 지정할 수도 있다. 그 밖의 이름 · 300ms 쿨타임 안의 요청 · 미지원 기기는 조용히 무시)
  *
- *   실제 SDK가 연결되기 전(웹 · 개발 중)에는
- *     광고  = 1.5초짜리 '광고 시청 시뮬레이션' 오버레이 뒤에 { rewarded: true }
- *     결제  = '모의 결제' 확인 모달에서 [결제하기]를 누르면 { success: true }
- *   가 돌려진다. 실제 SDK 드라이버가 연결된 플랫폼에서는 SDK가 실패하면 절대 보상·결제를 성공으로 만들지 않는다.
+ *   실제 SDK가 연결되기 전에는
+ *     · 개발 PC(localhost 웹)에서만 시뮬레이션: 광고 = 1.5초 오버레이 뒤 { rewarded: true } · 결제 = '모의 결제' 모달에서 [결제하기] → { success: true }
+ *     · 그 밖(공개 웹 · 앱 · 토스)에서는 { rewarded/success: false, reason: 'unavailable' } — 화면은 isAvailable('ads' | 'purchase') 로 '준비 중'을 그린다
+ *   실제 SDK 드라이버가 연결된 플랫폼에서는 SDK가 실패하면 절대 보상·결제를 성공으로 만들지 않는다.
  *
  * ┌─ ★ 실제 SDK 연결 지점 ──────────────────────────────────────────────────────────────
  * │ ① Capacitor(app)  : createCapacitorDriver() — 진동(Haptics)은 연결됨. 보상형 광고(AdMob)·인앱결제는 [HOOK] 두 곳을 채우면 된다.
@@ -31,6 +31,7 @@
 
 export const PLATFORM = Object.freeze({ WEB: 'web', APP: 'app', TOSS: 'toss' });
 export const SIM_AD_MS = 1500; // 광고 시청 시뮬레이션 시간
+const DEV_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']); // 시뮬레이션을 허용하는 개발 PC 주소
 // 진동은 결정적인 순간에만, 짧게 한 번씩 (연타 · 패턴 없음). 이벤트 → 세기 — 이벤트별 진동을 바꾸려면 이 표만 고치면 된다.
 //   shot  실탄 발사 (상대가 맞음)     ImpactStyle.Medium
 //   hit   피격 (내가 데미지를 입음)   ImpactStyle.Heavy
@@ -395,8 +396,9 @@ export class PlatformBridge {
         const res = await run(placementId);
         return res?.rewarded === true ? { rewarded: true } : { rewarded: false, reason: res?.reason ?? 'not_rewarded' };
       }
+      if (!this.#simulationAllowed()) return { rewarded: false, reason: 'unavailable' }; // 공개 웹 · 앱: 광고 SDK 연결 전 → '준비 중'
       this.#noteSimulated('광고');
-      return await simulateAd(this.#env, placementId, this.#simMs); // ← 실제 SDK 연결 전 시뮬레이션
+      return await simulateAd(this.#env, placementId, this.#simMs); // ← 개발 PC 에서만: 실제 SDK 연결 전 시뮬레이션
     } catch {
       return { rewarded: false, reason: 'error' };
     } finally {
@@ -416,8 +418,9 @@ export class PlatformBridge {
         const res = await run(productId, priceKRW, meta);
         return res?.success === true ? { success: true } : { success: false, reason: res?.reason ?? 'failed' };
       }
+      if (!this.#simulationAllowed()) return { success: false, reason: 'unavailable' }; // 공개 웹 · 앱: 결제 연결 전 → '준비 중' (무료 지급 방지)
       this.#noteSimulated('결제');
-      return await simulatePurchase(this.#env, productId, priceKRW, meta); // ← 실제 결제 연결 전 모의 결제
+      return await simulatePurchase(this.#env, productId, priceKRW, meta); // ← 개발 PC 에서만: 실제 결제 연결 전 모의 결제
     } catch {
       return { success: false, reason: 'error' };
     } finally {
@@ -456,6 +459,17 @@ export class PlatformBridge {
     } catch {
       return false;
     }
+  }
+
+  /** 'ads' | 'purchase' 를 지금 쓸 수 있는가 — 실제 SDK 드라이버가 연결됐거나, 개발 PC(localhost) 의 시뮬레이션. 아니면 화면은 '준비 중' */
+  isAvailable(kind) {
+    const method = kind === 'ads' ? 'showRewardedAd' : 'purchase';
+    return typeof this.#driver()?.[method] === 'function' || this.#simulationAllowed();
+  }
+
+  /** 무료 광고 · 모의 결제 시뮬레이션은 내 PC 에서 띄운 웹(localhost)에서만 — 공개 웹 · 앱 · 토스에서 공짜로 지급되지 않게 */
+  #simulationAllowed() {
+    return this.#platform === PLATFORM.WEB && DEV_HOSTS.has(this.#env.location?.hostname ?? '');
   }
 
   #driver() {

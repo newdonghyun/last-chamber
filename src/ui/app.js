@@ -516,7 +516,7 @@ function resetRewardUi() {
   rewardNote('');
   for (const btn of [el.btnDouble, el.btnProtect]) {
     btn.disabled = false;
-    btn.classList.remove('is-busy', 'is-done');
+    btn.classList.remove('is-busy', 'is-done', 'is-soon');
   }
 }
 
@@ -556,14 +556,26 @@ function showReward(outcome) {
   el.btnProtect.hidden = !outcome.canProtect;
   el.btnDouble.hidden = stakes;
   el.protectSub.textContent = `${outcome.prevStreak}연승 기록 유지`;
+  // 광고 SDK 가 아직 없는 곳(공개 웹 등): 버튼은 보이되 '준비 중' — VIP 패스 · 연승 보호권은 광고 없이 되므로 그대로 쓸 수 있다
+  const adsReady = platform.isAvailable('ads') || profile.hasNoAdsPass;
+  comingSoon(el.btnDouble, el.doubleSub, !adsReady);
+  comingSoon(el.btnProtect, el.protectSub, !adsReady && profile.streakShields < 1);
   el.reward.hidden = false;
   el.rewardActions.hidden = false;
   tweenNumber(el.rewardTotal, 0, outcome.total, { prefix: '+', ms: 750 });
   el.srLog.textContent = `탄피 ${outcome.total}개를 얻었다. ${mmrText(outcome)}.${outcome.tierChange ? ` ${outcome.tierChange === 'up' ? '승급' : '강등'}: ${outcome.tier.label}.` : ''} ${gained.length ? `새 칭호: ${gained.join(', ')}.` : ''} ${outcome.won ? `${outcome.streak}연승 중.` : outcome.canProtect ? '광고를 보면 연승 기록을 지킬 수 있다.' : ''}`.replace(/\s+/g, ' ').trim();
 }
 
+function comingSoon(btn, sub, on) { // 결과 화면 광고 버튼을 '준비 중'으로 잠근다 (resetRewardUi 가 판마다 되돌린다)
+  btn.classList.toggle('is-soon', on);
+  if (!on) return;
+  btn.disabled = true;
+  sub.textContent = '준비 중 — 곧 열려요';
+}
+
 function adFailText(reason) {
   switch (reason) {
+    case 'unavailable': return '광고 보상은 준비 중이에요';
     case 'dismissed': return '광고를 끝까지 보지 않아 보상이 지급되지 않았어요';
     case 'busy': return '이미 광고가 진행 중이에요';
     case 'unsupported': return '이 기기에서는 광고를 볼 수 없어요';
@@ -912,16 +924,21 @@ function skinCard(kind, item) {
         aria: `${item.name} 구매 — 탄피 ${fmt(item.price.brass)}${short ? ` (${fmt(item.price.brass - profile.brass)} 부족)` : ''}`,
       }));
     }
+    // 결제 · 광고 SDK 가 아직 없는 곳(공개 웹 등)에서는 버튼을 '준비 중'으로 잠근다 (VIP 패스는 광고 없이 체험이 되므로 그대로)
     if (item.price.krw) {
-      actions.append(skinButton('sk-btn sk-krw', 'buy-krw', '구매', { strong: `₩${fmt(item.price.krw)}`, aria: `${item.name} 구매 — ${fmt(item.price.krw)}원` }));
+      actions.append(platform.isAvailable('purchase')
+        ? skinButton('sk-btn sk-krw', 'buy-krw', '구매', { strong: `₩${fmt(item.price.krw)}`, aria: `${item.name} 구매 — ${fmt(item.price.krw)}원` })
+        : skinButton('sk-btn sk-krw is-soon', 'noop', '준비 중', { strong: `₩${fmt(item.price.krw)}`, disabled: true, aria: `${item.name} 결제 — 준비 중` }));
     }
     const views = profile.adViews(item.id);
-    actions.append(skinButton('sk-btn sk-trial', 'trial', trialing && !goal ? '체험 예약됨' : '1판 무료 체험(광고)', {
-      icon: 'i-ad',
-      small: goal ? `${views}/${goal}` : undefined,
-      disabled: trialing && !goal,
-      aria: `${item.name} 1판 무료 체험, 보상형 광고 시청${goal ? ` — 누적 ${views}/${goal}회, ${goal}회 시청하면 영구 해금` : ''}`,
-    }));
+    actions.append(platform.isAvailable('ads') || profile.hasNoAdsPass
+      ? skinButton('sk-btn sk-trial', 'trial', trialing && !goal ? '체험 예약됨' : '1판 무료 체험(광고)', {
+        icon: 'i-ad',
+        small: goal ? `${views}/${goal}` : undefined,
+        disabled: trialing && !goal,
+        aria: `${item.name} 1판 무료 체험, 보상형 광고 시청${goal ? ` — 누적 ${views}/${goal}회, ${goal}회 시청하면 영구 해금` : ''}`,
+      })
+      : skinButton('sk-btn sk-trial is-soon', 'noop', '광고 체험 준비 중', { icon: 'i-ad', disabled: true, aria: `${item.name} 1판 무료 체험 — 준비 중` }));
   }
 
   const body = h('div', 'skin-body');
@@ -995,6 +1012,8 @@ async function onStoreAction(act, kind, id) {
         next = 'equip';
       } else if (res.reason === 'cancelled') {
         toast('결제를 취소했어요');
+      } else if (res.reason === 'unavailable') {
+        toast('결제는 준비 중이에요');
       } else {
         toast('결제에 실패했어요. 잠시 후 다시 시도해 주세요', true);
       }

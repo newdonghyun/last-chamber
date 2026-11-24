@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'www');
-const INCLUDE = ['index.html', 'style.css', 'src', 'assets'];
+const INCLUDE = ['index.html', 'style.css', 'manifest.webmanifest', 'src', 'assets'];
 
 const missing = INCLUDE.filter((name) => !existsSync(path.join(ROOT, name)));
 if (missing.length) {

@@ -69,6 +69,19 @@ function memoryStorage(initial = {}) {
   ok(!threw, '1 플러그인이 예외를 던져도 게임은 계속');
 }
 
+// ───────── 1-b. 결제 · 광고: SDK 연결 전에는 개발 PC(localhost)에서만 시뮬레이션, 공개 웹 · 앱은 '준비 중' ─────────
+{
+  const dev = new PlatformBridge({ env: { location: { hostname: 'localhost', search: '' } } });
+  const pub = new PlatformBridge({ env: { location: { hostname: 'last-chamber-aaz9.onrender.com', search: '' } } });
+  const app = new PlatformBridge({ env: { location: { hostname: 'localhost', search: '' }, Capacitor: { isNativePlatform: () => true, Plugins: {} } } });
+  eq([dev.isAvailable('ads'), dev.isAvailable('purchase')], [true, true], '1b 개발 PC(localhost 웹)는 시뮬레이션 가능');
+  eq([pub.isAvailable('ads'), pub.isAvailable('purchase'), app.isAvailable('ads'), app.isAvailable('purchase')], [false, false, false, false], '1b 공개 웹 · 앱은 준비 중');
+  eq(await pub.purchaseProduct('starter_pack', 1900), { success: false, reason: 'unavailable' }, '1b 공개 웹 결제 → 무료 지급 없이 unavailable');
+  eq(await pub.showRewardedAd('double_reward'), { rewarded: false, reason: 'unavailable' }, '1b 공개 웹 광고 → unavailable');
+  pub.registerDriver('web', { purchase: async () => ({ success: true }) });
+  eq([pub.isAvailable('purchase'), (await pub.purchaseProduct('starter_pack', 1900)).success], [true, true], '1b 실제 결제 드라이버가 붙으면 바로 열린다');
+}
+
 // ───────── 2. 닉네임 규칙 ─────────
 {
   const cases = [

@@ -340,3 +340,10 @@
   .mz-seal,
   .mz-dialog.is-busy .mz-pay { animation: none; }
 }
+
+/* 결제 SDK 연결 전(공개 웹 등): '준비 중'으로 잠긴 상품 버튼 (monetization.js mountUi) */
+.mz-starter.is-soon,
+.mz-vip.is-soon,
+.mz-starter.is-soon:hover,
+.mz-vip.is-soon:hover { cursor: default; filter: grayscale(.6) brightness(.7); }
+.mz-starter.is-soon .mz-badge { background: #3b3f47; }
