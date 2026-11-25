@@ -342,6 +342,78 @@
 
 /* ── 모션 ── */
 
+/* ── 온라인 랭킹전: 소제목 · 공개 방 목록 (multiplayer.js paintRooms) ── */
+.mp-sub {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 -2px;
+  font: 700 12.5px/1 var(--font-ui, sans-serif);
+  letter-spacing: .04em;
+  color: var(--ink, #efe8d8);
+}
+.mp-sub small { font: 600 10px/1 var(--font-tech, sans-serif); letter-spacing: .18em; color: var(--ink-faint, #5f594f); }
+.mp-rooms { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 232px; overflow-y: auto; overscroll-behavior: contain; }
+.mp-rooms:empty { display: none; }
+.mp-room {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "tier host go" "tier meta go";
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(255, 181, 71, .06), rgba(255, 255, 255, 0)), #0f0c0b;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mp-room .mp-tier { grid-area: tier; }
+.mp-room-host { grid-area: host; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; font-size: 15px; }
+.mp-room-mmr,
+.mp-room-count { grid-area: meta; font: 600 11px/1.2 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); }
+.mp-room-mmr { justify-self: start; }
+.mp-room-count { justify-self: end; color: var(--amber-hi, #ffd88a); }
+.mp-room-go {
+  grid-area: go;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font: 800 12.5px/1 var(--font-ui, sans-serif);
+  color: #1a1206;
+  background: linear-gradient(180deg, var(--brass-hi, #f4dda2), var(--brass, #c9a35b));
+}
+.mp-room.is-mine .mp-room-go { color: var(--ink-dim, #9a9284); background: rgba(255, 255, 255, .08); }
+@media (hover: hover) { .mp-room:hover:not(:disabled) { border-color: var(--brass, #c9a35b); filter: brightness(1.15); } }
+.mp-room:active:not(:disabled) { transform: translateY(1px); }
+.mp-room:focus-visible { outline: 2px solid var(--brass-hi, #f4dda2); outline-offset: 2px; }
+.mp-room:disabled { cursor: default; opacity: .7; }
+
+/* ── 손님(로그인 안 함): 온라인 칸 잠금 안내 · 버튼은 흐리게 (누르면 로그인 화면) ── */
+.mp-lock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font: 600 12px/1.35 var(--font-ui, sans-serif);
+  color: var(--amber-hi, #ffd88a);
+  background: rgba(255, 181, 71, .08);
+  border: 1px dashed rgba(255, 181, 71, .45);
+}
+.mp-lock[hidden] { display: none; }
+.mp-btn--login { flex: none; width: auto; min-height: 36px; padding: 0 12px; justify-content: center; font-weight: 800; font-size: 12.5px; border-color: var(--brass, #c9a35b); color: var(--brass-hi, #f4dda2); }
+.mp-modal.is-guest [data-online],
+.mp-modal.is-guest .mp-join { opacity: .5; filter: grayscale(.5); }
+
 @keyframes mp-in { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes mp-blink { 50% { opacity: .25; } }
 @keyframes mp-ping { 0% { transform: scale(.3); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }

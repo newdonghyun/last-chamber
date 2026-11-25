@@ -1,26 +1,28 @@
 /**
- * LAST CHAMBER - 계정 API (닉네임 + 4자리 PIN) — 서버 server/index.js 의 POST /api/login · POST /api/rename
+ * LAST CHAMBER - 계정 API (아이디 · 비밀번호 · 닉네임) — 서버 server/index.js 의 POST /api/signup · /api/login · /api/rename
  *
- *   loginWithPin(nickname, pin)  닉네임 + PIN 으로 계정을 만들거나 불러온다 → 성공하면 이 기기 세션(session.js)에 user_id · 닉네임 · PIN 저장
- *     · 처음 보는 닉네임 → 서버가 새 user_id 를 만든다 (클라이언트는 더 이상 UUID 를 만들지 않는다 → 다시 들어와도 계정이 새로 생기지 않는다)
- *     · 이미 있는 닉네임 → PIN 이 맞으면 그 계정(전적 · MMR)을 이 기기로 불러온다, 틀리면 NICKNAME_TAKEN
- *     · 이 기기에 남아 있던 user_id 도 함께 보낸다 → PIN 없던 예전 계정이면 거기에 PIN 을 붙인다
- *   changeNickname(nickname)     서버에서 먼저 확인(남의 PIN 닉네임이면 거절)한 뒤 이 기기 세션도 바꾼다
- *   서버 주소는 multiplayer.js 와 같다: window.LAST_CHAMBER_SERVER → 페이지를 서빙한 서버 → 클라우드 기본 주소
+ *   signUp({ username, password, nickname })  회원가입 → 성공하면 바로 로그인 (session.signIn — 토큰 · user_id · 아이디 · 닉네임을 이 기기에)
+ *   logIn({ username, password })             로그인 → 같은 계정의 전적 · MMR 을 이어서 (다른 기기 · 브라우저에서도)
+ *   changeNickname(nickname)                  닉네임 변경 — 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절) → 이 기기 세션도
+ *   토큰이 틀리거나 만료되면(AUTH_REQUIRED) 로그아웃하고 로그인 화면을 다시 연다 (window 'lastchamber:need-login').
+ *   서버 주소는 multiplayer.js 와 같다: window.LAST_CHAMBER_SERVER → 페이지를 서빙한 서버 → 클라우드 기본 주소. 비밀번호는 이 기기에 저장하지 않는다.
  */
-import { userSession, validateNickname, nicknameErrorText, cleanPin } from './session.js';
+import { userSession, validateNickname, validateUsername, validatePassword, nicknameErrorText } from './session.js';
 
 const DEFAULT_SERVER = 'https://last-chamber-aaz9.onrender.com';
 const TIMEOUT_MS = 75_000; // 무료 서버가 잠들어 있으면 첫 응답까지 1분 가까이 걸린다
 
 export const ACCOUNT_ERROR_TEXT = Object.freeze({
-  NICKNAME_TAKEN: '이미 사용 중인 닉네임입니다. 본인 계정이라면 PIN 번호를 확인해 주세요.',
-  NICKNAME_IN_USE: '이미 사용 중인 닉네임입니다. 이 닉네임으로 플레이하던 기기에서 계정 메뉴의 [PIN 설정]을 먼저 해 주세요.',
-  PIN_LOCKED: 'PIN을 여러 번 틀렸어요. 잠시 뒤에 다시 시도해 주세요.',
-  INVALID_PIN: 'PIN은 숫자 4자리로 입력해 주세요.',
+  USERNAME_TAKEN: '이미 사용 중인 아이디예요.',
+  NICKNAME_TAKEN: '이미 사용 중인 닉네임이에요.',
+  BAD_CREDENTIALS: '아이디 또는 비밀번호가 맞지 않아요.',
+  LOGIN_LOCKED: '비밀번호를 여러 번 틀렸어요. 잠시 뒤에 다시 시도해 주세요.',
+  INVALID_USERNAME: '아이디는 영문 소문자 · 숫자 · _ 4~16자로 정해 주세요.',
+  INVALID_PASSWORD: '비밀번호는 6자 이상이어야 해요.',
   INVALID_NICKNAME: '닉네임 규칙에 맞지 않아요.',
+  AUTH_REQUIRED: '로그인이 풀렸어요. 다시 로그인해 주세요.',
   RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤에 다시 시도해 주세요.',
-  PIN_SETUP_REQUIRED: '서버 계정 설정이 아직 끝나지 않았어요. 잠시 뒤에 다시 시도해 주세요.',
+  ACCOUNT_SETUP_REQUIRED: '서버 계정 설정이 아직 끝나지 않았어요. 잠시 뒤에 다시 시도해 주세요.',
   SERVER_BUSY: '서버가 바빠요. 잠시 뒤에 다시 시도해 주세요.',
   OFFLINE: '서버에 연결할 수 없어요. 인터넷 연결을 확인하고 다시 시도해 주세요.',
   TIMEOUT: '서버가 응답하지 않아요. 잠시 뒤에 다시 시도해 주세요.',
@@ -31,7 +33,7 @@ export const ACCOUNT_ERROR_TEXT = Object.freeze({
 
 /** 오류 코드 → 화면 문장 (잠금이면 남은 시간까지) */
 export function accountErrorText(code, res = {}) {
-  if (code === 'PIN_LOCKED' && res.retryAfterSec > 0) return `PIN을 여러 번 틀렸어요. ${Math.ceil(res.retryAfterSec / 60)}분 뒤에 다시 시도해 주세요.`;
+  if (code === 'LOGIN_LOCKED' && res.retryAfterSec > 0) return `비밀번호를 여러 번 틀렸어요. ${Math.ceil(res.retryAfterSec / 60)}분 뒤에 다시 시도해 주세요.`;
   return ACCOUNT_ERROR_TEXT[code] ?? ACCOUNT_ERROR_TEXT.SERVER_ERROR;
 }
 
@@ -69,30 +71,52 @@ async function post(route, body, { fetchImpl = globalThis.fetch, base = serverBa
   }
 }
 
-/**
- * 닉네임 + PIN 로그인 → { ok: true, user, created, recovered, secured, me } | { ok: false, error, message }
- * 성공하면 session.signIn 으로 이 기기에 저장한다 (다른 기기의 계정을 불러왔으면 이 기기의 user_id 도 그것으로 바뀐다)
- */
-export async function loginWithPin(nickname, pin, { session = userSession, ...opts } = {}) {
-  const nick = validateNickname(nickname);
-  if (!nick.ok) return { ok: false, error: 'INVALID_NICKNAME', message: nicknameErrorText(nick.reason) };
-  const p = cleanPin(pin);
-  if (!p) return { ok: false, error: 'INVALID_PIN', message: ACCOUNT_ERROR_TEXT.INVALID_PIN };
-  const res = await post('login', { nickname: nick.nickname, pin: p, ...(session.userId ? { user_id: session.userId } : {}) }, opts);
+const failed = (error, message) => ({ ok: false, error, message: message ?? accountErrorText(error) });
+
+/** 가입 · 로그인 응답 → 이 기기 세션에 저장 */
+function keep(res, session) {
   if (!res.ok) return { ...res, message: accountErrorText(res.error, res) };
-  const signed = session.signIn({ id: res.user_id, nickname: res.nickname, pin: p });
-  if (!signed.ok) return { ok: false, error: 'SERVER_ERROR', message: ACCOUNT_ERROR_TEXT.SERVER_ERROR };
-  return { ok: true, user: signed.user, created: Boolean(res.created), recovered: Boolean(res.recovered), secured: Boolean(res.secured), me: res.me ?? null };
+  const signed = session.signIn({ token: res.token, id: res.user_id, username: res.username, nickname: res.nickname });
+  if (!signed.ok) return failed('SERVER_ERROR');
+  return { ok: true, user: signed.user, me: res.me ?? null };
+}
+
+/** 회원가입 → { ok: true, user, me } | { ok: false, error, message } (성공하면 바로 로그인 상태) */
+export async function signUp({ username, password, nickname }, { session = userSession, ...opts } = {}) {
+  const u = validateUsername(username);
+  if (!u.ok) return failed('INVALID_USERNAME', nicknameErrorText(u.reason));
+  const p = validatePassword(password);
+  if (!p.ok) return failed('INVALID_PASSWORD', nicknameErrorText(p.reason));
+  const n = validateNickname(nickname);
+  if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
+  return keep(await post('signup', { username: u.username, password: p.password, nickname: n.nickname }, opts), session);
+}
+
+/** 로그인 → { ok: true, user, me } | { ok: false, error, message } */
+export async function logIn({ username, password }, { session = userSession, ...opts } = {}) {
+  const u = validateUsername(username);
+  if (!u.ok) return failed('INVALID_USERNAME', nicknameErrorText(u.reason));
+  if (typeof password !== 'string' || !password) return failed('BAD_CREDENTIALS', '비밀번호를 입력해 주세요.');
+  return keep(await post('login', { username: u.username, password }, opts), session);
+}
+
+/** 토큰이 더는 통하지 않는다 → 로그아웃하고 로그인 화면을 다시 연다 */
+export function requireLogin(session = userSession, message = ACCOUNT_ERROR_TEXT.AUTH_REQUIRED) {
+  session.logout();
+  globalThis.window?.dispatchEvent?.(new CustomEvent('lastchamber:need-login', { detail: { message } }));
 }
 
 /** 닉네임 변경 (로그인 중) → { ok: true, user, unchanged? } | { ok: false, error, message } */
 export async function changeNickname(nickname, { session = userSession, ...opts } = {}) {
-  if (!session.isLoggedIn) return { ok: false, error: 'NOT_LOGGED_IN', message: ACCOUNT_ERROR_TEXT.NOT_LOGGED_IN };
-  const nick = validateNickname(nickname);
-  if (!nick.ok) return { ok: false, error: 'INVALID_NICKNAME', message: nicknameErrorText(nick.reason) };
-  if (nick.nickname === session.user.nickname) return { ok: true, unchanged: true, user: session.user };
-  const res = await post('rename', { user_id: session.userId, nickname: nick.nickname }, opts);
-  if (!res.ok) return { ...res, message: res.error === 'NICKNAME_TAKEN' ? '이미 사용 중인 닉네임입니다.' : accountErrorText(res.error, res) };
-  const local = session.rename(nick.nickname);
-  return local.ok ? { ok: true, user: local.user } : { ok: false, error: 'SERVER_ERROR', message: nicknameErrorText(local.reason) };
+  if (!session.isLoggedIn) return failed('NOT_LOGGED_IN');
+  const n = validateNickname(nickname);
+  if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
+  if (n.nickname === session.user.nickname) return { ok: true, unchanged: true, user: session.user };
+  const res = await post('rename', { token: session.token, nickname: n.nickname }, opts);
+  if (!res.ok) {
+    if (res.error === 'AUTH_REQUIRED') requireLogin(session);
+    return { ...res, message: accountErrorText(res.error, res) };
+  }
+  const local = session.setNickname(res.nickname ?? n.nickname);
+  return local.ok ? { ok: true, user: local.user } : failed('SERVER_ERROR', nicknameErrorText(local.reason));
 }

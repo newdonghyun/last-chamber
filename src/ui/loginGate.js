@@ -1,20 +1,23 @@
 /**
- * LAST CHAMBER - 시작 화면 로그인(닉네임 + 4자리 PIN) · 계정 창 — src/ui/session.js · src/ui/accountApi.js 의 화면
+ * LAST CHAMBER - 시작 화면(로그인 · 회원가입 · 둘러보기) · 계정 창 — src/ui/session.js · src/ui/accountApi.js 의 화면
  *
- *   · 로그인 기록이 없으면 #login-modal 이 뜬다: 닉네임(2~10자 · 공백 없이) + PIN(숫자 4자리) + [시작하기]. 회원가입은 없다.
- *     서버(POST /api/login)가 닉네임 + PIN 으로 계정을 만들거나(처음 보는 닉네임) 불러온다(같은 닉네임 + 맞는 PIN — 다른 기기 · 브라우저에서도).
- *     로그인 전에는 타이틀(게임 시작 · 로비 · 매칭 · 상점)을 누를 수 없다 (모달 + html.needs-login 이 타이틀을 숨긴다).
- *   · user_id · 닉네임 · PIN 은 session.js 가 localStorage 에 저장한다 → 다시 접속하면 이 화면 없이 바로 타이틀(자동 로그인).
+ *   · 로그인 기록이 없으면 #login-modal 이 뜬다: [로그인] 아이디 · 비밀번호 / [회원가입] 아이디 · 비밀번호(확인) · 닉네임.
+ *     성공하면 서버가 준 로그인 토큰을 session.js 가 localStorage 에 저장 → 다시 접속하면 이 화면 없이 바로 타이틀(자동 로그인).
+ *     [로그인 없이 둘러보기] = 손님: AI 딜러 연습만 (로비의 온라인 대전은 잠겨 있고, 누르면 이 화면이 다시 뜬다).
+ *     로그인 전에는 타이틀을 누를 수 없다 (모달 + html.needs-login 이 타이틀을 숨긴다).
  *   · 첫 화면 전에 src/ui/sessionBoot.js 가 html.needs-login 을 붙여 두므로 CSS(loginGate.css)가 처음부터 이 화면을 보여 준다
  *     → 타이틀이 잠깐 비쳤다가 로그인 화면으로 바뀌는 깜빡임이 없다. 이 모듈은 그 판단을 넘겨받아 진짜 모달(showModal)로 바꾼다.
- *   · 타이틀 우상단 #btn-account → #account-modal: 내 닉네임 [변경](누를 때만 변경 칸이 열린다) · 유저 ID 앞 8자리 ·
- *     복구 PIN(가려 두고 [보기]) 또는 PIN 이 없는 예전 계정이면 [PIN 설정] · [로그아웃](한 번 더 확인).
- *   · window 'lastchamber:need-login' 이벤트를 받으면 이 화면을 다시 연다 (detail.message 가 있으면 그 안내와 함께 — 예: 닉네임을 다른 계정이 PIN 으로 등록함).
+ *   · 타이틀 우상단 #btn-account → #account-modal: 닉네임 [변경](누를 때만 변경 칸이 열린다 — 서버가 바로 UPDATE · 중복 차단) · 아이디 · [로그아웃](한 번 더 확인).
+ *     손님이면 계정 버튼이 로그인 화면을 연다.
+ *   · window 'lastchamber:need-login' 이벤트를 받으면 이 화면을 다시 연다 (detail.message 가 있으면 그 안내와 함께 — 예: 토큰 만료 · 손님이 온라인 대전을 누름).
  *     window 'lastchamber:open-account' 이벤트를 받으면 계정 창을 연다 (detail.edit 이면 닉네임 변경 칸까지).
  */
 
-import { userSession, validateNickname, nicknameErrorText, attachNicknameFilter, NICK_RULE, NICK_HINT, PIN_HINT, SESSION_KEY } from './session.js';
-import { loginWithPin, changeNickname } from './accountApi.js';
+import {
+  userSession, validateNickname, validateUsername, validatePassword, nicknameErrorText, attachNicknameFilter,
+  NICK_RULE, NICK_HINT, USERNAME_HINT, PASSWORD_HINT, SESSION_KEY,
+} from './session.js';
+import { logIn, signUp, changeNickname } from './accountApi.js';
 import { PlayerProfile, NICKNAME } from './storeData.js';
 
 const $ = (id) => document.getElementById(id);
@@ -22,33 +25,36 @@ const root = document.documentElement;
 const gate = {
   modal: $('login-modal'),
   form: $('login-form'),
-  input: $('login-nick'),
-  pin: $('login-pin'),
-  submit: $('login-submit'),
+  tabs: [$('tab-login'), $('tab-signup')].filter(Boolean),
+  user: $('login-user'),
+  pass: $('login-pass'),
+  pass2: $('login-pass2'),
+  nick: $('login-nick'),
   count: $('login-count'),
   msg: $('login-msg'),
+  submit: $('login-submit'),
+  submitMain: $('login-submit-main'),
+  submitSub: $('login-submit-sub'),
+  guest: $('login-guest'),
 };
 const acct = {
   button: $('btn-account'),
   modal: $('account-modal'),
   name: $('acct-name'),
-  uid: $('acct-uid'),
+  username: $('acct-username'),
   edit: $('acct-edit'),
   form: $('acct-form'),
   input: $('acct-nick'),
   count: $('acct-count'),
   msg: $('acct-msg'),
-  pinShow: $('acct-pin-show'),
-  pinValue: $('acct-pin-value'),
-  pinForm: $('acct-pin-form'),
-  pinInput: $('acct-pin-input'),
-  pinMsg: $('acct-pin-msg'),
   logout: $('acct-logout'),
   confirm: $('acct-confirm'),
-  confirmText: $('acct-confirm-text'),
 };
-const legacy = new PlayerProfile(); // 이 업데이트 전부터 쓰던 프로필 닉네임 → 첫 로그인 화면의 기본값 (읽기만)
-const GATE_HINT = `${NICK_HINT} · PIN ${PIN_HINT}`;
+const legacy = new PlayerProfile(); // 이 업데이트 전부터 쓰던 프로필 닉네임 → 가입 화면 닉네임 칸의 기본값 (읽기만)
+const MODE = {
+  login: { main: '로그인', sub: 'LOG IN', hint: '아이디와 비밀번호로 로그인하세요', pass: 'current-password' },
+  signup: { main: '회원가입', sub: 'SIGN UP', hint: `아이디: ${USERNAME_HINT} · 비밀번호: ${PASSWORD_HINT} · 닉네임: ${NICK_HINT}`, pass: 'new-password' },
+};
 const SLOW_HINT_MS = 4000; // 서버가 잠들어 있으면 깨어나는 데 시간이 걸린다 → 이만큼 지나면 안내를 바꾼다
 
 const glyphs = (text) => [...text].length;
@@ -82,17 +88,7 @@ function closeModal(dlg) {
   }
 }
 
-/** PIN 입력칸: 숫자만 · 4자리까지 (붙여 넣은 글자 · 전각 숫자 등은 지운다) */
-function attachPinFilter(input, onChange) {
-  if (!input) return;
-  input.addEventListener('input', () => {
-    const digits = input.value.replace(/\D+/g, '').slice(0, 4);
-    if (digits !== input.value) input.value = digits;
-    onChange?.(digits);
-  });
-}
-
-/** 잠깐 떠오르는 알림 띠 (기존 계정을 불러왔을 때 등) */
+/** 잠깐 떠오르는 알림 띠 (가입 · 로그인 결과) */
 function toast(text) {
   const node = document.createElement('p');
   node.className = 'acct-toast';
@@ -104,10 +100,29 @@ function toast(text) {
 
 const recordText = (me) => (me && me.wins + me.losses > 0 ? ` — 랭킹전 ${me.wins}승 ${me.losses}패 · MMR ${me.mmr}` : '');
 
-// ───────── 로그인 화면 ─────────
+// ───────── 시작 화면: 로그인 · 회원가입 · 둘러보기 ─────────
 
-/** 기본값: 로그아웃 전에 쓰던 닉네임 → 없으면 예전 프로필 닉네임(기본 '방랑자'가 아니고 새 규칙에 맞을 때만) */
-function prefill() {
+let mode = 'login';
+function setMode(next, { focus = true } = {}) {
+  mode = next === 'signup' ? 'signup' : 'login';
+  gate.form.dataset.mode = mode;
+  for (const tab of gate.tabs) {
+    const on = tab.dataset.mode === mode;
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
+  const m = MODE[mode];
+  if (gate.submitMain) gate.submitMain.textContent = m.main;
+  if (gate.submitSub) gate.submitSub.textContent = m.sub;
+  gate.pass.autocomplete = m.pass;
+  gate.pass2.required = mode === 'signup';
+  gate.nick.required = mode === 'signup';
+  note(gate.msg, m.hint);
+  if (focus) (gate.user.value ? gate.pass : gate.user).focus();
+}
+
+/** 가입 화면 닉네임 기본값: 마지막 닉네임 → 예전 프로필 닉네임(기본 '방랑자'가 아니고 규칙에 맞을 때만) */
+function nicknameDefault() {
   const last = userSession.lastNickname;
   if (last) return last;
   legacy.reload();
@@ -119,14 +134,17 @@ function openGate(message = '') {
   if (!gate.modal) return;
   closeAccount();
   if (!gate.modal.open) {
-    gate.input.value = prefill();
-    if (gate.pin) gate.pin.value = '';
-    paintCount(gate.count, gate.input.value);
-    note(gate.msg, GATE_HINT);
+    gate.user.value = userSession.lastUsername ?? '';
+    gate.pass.value = '';
+    gate.pass2.value = '';
+    gate.nick.value = nicknameDefault();
+    paintCount(gate.count, gate.nick.value);
+    setMode(userSession.lastUsername ? 'login' : mode, { focus: false });
   }
   if (message) note(gate.msg, message, 'bad');
   setNeedsLogin(true);
-  openModal(gate.modal); // 첫 포커스 = 닉네임 입력칸
+  openModal(gate.modal);
+  (gate.user.value ? gate.pass : gate.user).focus();
 }
 
 function closeGate() {
@@ -140,82 +158,79 @@ function setNeedsLogin(on) {
 }
 
 function setGateBusy(on) {
-  gate.form?.classList.toggle('is-busy', on);
-  if (gate.submit) gate.submit.disabled = on;
-  gate.form?.setAttribute('aria-busy', String(on));
+  gate.form.classList.toggle('is-busy', on);
+  gate.submit.disabled = on;
+  gate.form.setAttribute('aria-busy', String(on));
 }
+
+/** 제출 전 화면에서 먼저 검사 → 문제 있으면 { node, message } */
+function precheck() {
+  const u = validateUsername(gate.user.value);
+  if (!u.ok) return { node: gate.user, message: nicknameErrorText(u.reason) };
+  if (mode === 'login') return gate.pass.value ? null : { node: gate.pass, message: '비밀번호를 입력해 주세요' };
+  const p = validatePassword(gate.pass.value);
+  if (!p.ok) return { node: gate.pass, message: nicknameErrorText(p.reason) };
+  if (gate.pass2.value !== gate.pass.value) return { node: gate.pass2, message: '비밀번호 확인이 맞지 않아요' };
+  const n = validateNickname(gate.nick.value);
+  if (!n.ok) return { node: gate.nick, message: nicknameErrorText(n.reason) };
+  return null;
+}
+
+const FOCUS_ON_ERROR = { USERNAME_TAKEN: 'user', INVALID_USERNAME: 'user', NICKNAME_TAKEN: 'nick', INVALID_NICKNAME: 'nick', BAD_CREDENTIALS: 'pass', INVALID_PASSWORD: 'pass' };
 
 let gateBusy = false;
 async function onGateSubmit(ev) {
   ev.preventDefault(); // method="dialog" 가 창을 닫지 않게 — 닫는 건 로그인이 성공했을 때(onSession)만
   if (gateBusy) return;
-  const nick = validateNickname(gate.input.value);
-  if (!nick.ok) {
-    note(gate.msg, nicknameErrorText(nick.reason), 'bad');
-    gate.input.focus();
-    return;
-  }
-  if (!/^\d{4}$/.test(gate.pin?.value ?? '')) {
-    note(gate.msg, 'PIN은 숫자 4자리로 입력해 주세요', 'bad');
-    gate.pin?.focus();
+  const problem = precheck();
+  if (problem) {
+    note(gate.msg, problem.message, 'bad');
+    problem.node.focus();
     return;
   }
   gateBusy = true;
   setGateBusy(true);
-  note(gate.msg, '계정을 확인하는 중…');
+  note(gate.msg, mode === 'login' ? '로그인하는 중…' : '계정을 만드는 중…');
   const slow = setTimeout(() => note(gate.msg, '서버를 깨우는 중이에요 — 처음 접속이면 최대 1분쯤 걸릴 수 있어요'), SLOW_HINT_MS);
-  const res = await loginWithPin(nick.nickname, gate.pin.value);
+  const signing = mode;
+  const res = signing === 'login'
+    ? await logIn({ username: gate.user.value, password: gate.pass.value })
+    : await signUp({ username: gate.user.value, password: gate.pass.value, nickname: gate.nick.value });
   clearTimeout(slow);
   gateBusy = false;
   setGateBusy(false);
   if (!res.ok) {
     note(gate.msg, res.message, 'bad');
-    if (res.error === 'NICKNAME_TAKEN' || res.error === 'INVALID_PIN') {
-      gate.pin.value = '';
-      gate.pin.focus();
-    } else if (res.error === 'NICKNAME_IN_USE' || res.error === 'INVALID_NICKNAME') {
-      gate.input.focus();
-    }
+    const field = FOCUS_ON_ERROR[res.error];
+    if (field === 'pass') gate.pass.value = '';
+    gate[field]?.focus();
     return;
   }
   // 성공 → session.signIn 이 구독자(onSession)에게 알려 로그인 화면이 닫힌다
-  if (res.recovered) toast(`${res.user.nickname} 계정을 불러왔어요${recordText(res.me)}`);
-  else if (res.created) toast(`${res.user.nickname} 계정을 만들었어요 — 다른 기기에서도 닉네임 + PIN 으로 이어서 플레이`);
+  gate.pass.value = '';
+  gate.pass2.value = '';
+  toast(signing === 'login'
+    ? `${res.user.nickname}, 다시 오셨군요${recordText(res.me)}`
+    : `${res.user.nickname} 계정을 만들었어요 — 다른 기기에서도 같은 아이디로 이어서 플레이`);
 }
 
-// ───────── 계정 창 (닉네임 변경 · PIN · 로그아웃) ─────────
+function onGuest() {
+  userSession.continueAsGuest(); // → onSession(null) · isGuest → 로그인 화면이 닫힌다
+  toast('둘러보기 — AI 딜러 연습만 할 수 있어요. 온라인 대전은 로그인 후에');
+}
+
+// ───────── 계정 창 (닉네임 변경 · 로그아웃) ─────────
 
 function paintAccountButton(user) {
   if (!acct.button) return;
-  acct.button.setAttribute('aria-label', user ? `계정: ${user.nickname} — 닉네임 변경 · PIN · 로그아웃` : '로그인');
-  acct.button.title = user ? `${user.nickname} · 닉네임 변경 · PIN · 로그아웃` : '로그인';
-}
-
-let pinVisible = false;
-function paintPin() {
-  const pin = userSession.pin;
-  if (acct.pinShow) acct.pinShow.hidden = !pin;
-  if (acct.pinForm) acct.pinForm.hidden = Boolean(pin);
-  if (acct.pinValue) acct.pinValue.textContent = pin ? (pinVisible ? pin : '••••') : '';
-  const toggle = acct.pinShow?.querySelector('[data-acct="toggle-pin"]');
-  if (toggle) {
-    toggle.textContent = pinVisible ? '숨기기' : '보기';
-    toggle.setAttribute('aria-pressed', String(pinVisible));
-  }
-  if (!pin && acct.pinMsg && !acct.pinMsg.classList.contains('is-bad') && !acct.pinMsg.classList.contains('is-ok')) {
-    note(acct.pinMsg, 'PIN이 아직 없어요 — 정해 두면 다른 기기 · 브라우저에서도 닉네임 + PIN으로 이 계정을 불러올 수 있어요');
-  }
-  if (acct.confirmText) {
-    acct.confirmText.textContent = pin
-      ? '로그아웃하면 다음에 닉네임과 PIN을 다시 입력해야 해요. 탄피 · 스킨 · 전적은 이 기기에 그대로 남아요.'
-      : 'PIN을 아직 정하지 않았어요. 로그아웃하기 전에 위에서 PIN을 정해 두면 어느 기기에서든 이 계정을 다시 불러올 수 있어요.';
-  }
+  acct.button.setAttribute('aria-label', user ? `계정: ${user.nickname} — 닉네임 변경 · 로그아웃` : '로그인 · 회원가입');
+  acct.button.title = user ? `${user.nickname} · 닉네임 변경 · 로그아웃` : '로그인 · 회원가입';
+  acct.button.classList.toggle('is-guest', !user);
 }
 
 function paintAccount(user) {
   if (acct.name) acct.name.textContent = user.nickname;
-  if (acct.uid) acct.uid.textContent = user.id.slice(0, 8).toUpperCase(); // 전체 ID 는 서버 기록의 열쇠라 화면에는 앞부분만
-  paintPin();
+  if (acct.username) acct.username.textContent = user.username;
 }
 
 function showConfirm(on) {
@@ -244,9 +259,6 @@ function openAccount({ edit = false } = {}) {
     openGate();
     return;
   }
-  pinVisible = false;
-  note(acct.pinMsg, '');
-  if (acct.pinInput) acct.pinInput.value = '';
   paintAccount(user);
   showEdit(false);
   showConfirm(false);
@@ -269,37 +281,12 @@ async function onAccountSubmit(ev) {
   renameBusy = false;
   if (!res.ok) {
     note(acct.msg, res.message, 'bad');
-    acct.input.focus();
+    if (res.error !== 'AUTH_REQUIRED') acct.input.focus();
     return;
   }
   acct.input.value = res.user.nickname;
   paintCount(acct.count, acct.input.value);
-  note(acct.msg, res.unchanged ? '지금 쓰고 있는 닉네임이에요' : '닉네임을 바꿨어요 — 대전 상대에게도 이 이름으로 보여요', 'ok');
-}
-
-let pinBusy = false;
-async function onPinSubmit(ev) {
-  ev.preventDefault();
-  const user = userSession.user;
-  if (pinBusy || !user) return;
-  if (!/^\d{4}$/.test(acct.pinInput.value)) {
-    note(acct.pinMsg, 'PIN은 숫자 4자리로 입력해 주세요', 'bad');
-    acct.pinInput.focus();
-    return;
-  }
-  pinBusy = true;
-  note(acct.pinMsg, '서버에 PIN을 등록하는 중…');
-  const res = await loginWithPin(user.nickname, acct.pinInput.value); // 같은 닉네임 + 이 기기의 user_id → 이 계정에 PIN 을 붙인다
-  pinBusy = false;
-  acct.pinInput.value = '';
-  if (!res.ok) {
-    note(acct.pinMsg, res.message, 'bad');
-    return;
-  }
-  // 이 계정에 PIN 을 붙였거나(secured) · 서버에 아직 없던 계정이라 이 닉네임으로 새로 만들었으면(created) '정했다', 같은 닉네임 + PIN 의 다른 계정을 찾았으면 '불러왔다'
-  const switched = res.recovered && !res.secured && res.user.id !== user.id;
-  note(acct.pinMsg, switched ? `이 닉네임 + PIN의 계정을 불러왔어요${recordText(res.me)}` : 'PIN을 정했어요 — 다른 기기에서도 닉네임 + PIN으로 이 계정을 불러올 수 있어요', 'ok');
-  paintPin();
+  note(acct.msg, res.unchanged ? '지금 쓰고 있는 닉네임이에요' : '닉네임을 바꿨어요 — 랭킹 · 대전 상대에게도 이 이름으로 보여요', 'ok');
 }
 
 function onAccountClick(ev) {
@@ -311,10 +298,6 @@ function onAccountClick(ev) {
   switch (btn?.dataset.acct) {
     case 'close': closeAccount(); break;
     case 'edit': showEdit(acct.form?.hidden !== false); break;
-    case 'toggle-pin':
-      pinVisible = !pinVisible;
-      paintPin();
-      break;
     case 'logout': showConfirm(true); break;
     case 'cancel-logout':
       showConfirm(false);
@@ -332,7 +315,7 @@ function onAccountClick(ev) {
 
 function onSession(user) {
   paintAccountButton(user);
-  if (!user) {
+  if (!user && !userSession.isGuest) {
     openGate();
     return;
   }
@@ -340,33 +323,41 @@ function onSession(user) {
     closeGate();
     $('btn-start')?.focus({ preventScroll: true });
   }
-  if (acct.modal?.open) paintAccount(user);
+  if (user && acct.modal?.open) paintAccount(user);
 }
 
 // ───────── 연결 ─────────
 
-if (gate.modal && gate.form && gate.input) {
-  attachNicknameFilter(gate.input, (value) => {
-    paintCount(gate.count, value);
-    note(gate.msg, GATE_HINT); // 다시 입력하면 이전 오류 안내는 지운다
+if (gate.modal && gate.form && gate.user && gate.pass) {
+  for (const tab of gate.tabs) tab.addEventListener('click', () => setMode(tab.dataset.mode));
+  gate.tabs[0]?.parentElement?.addEventListener('keydown', (ev) => { // ← → 로 탭 전환
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    ev.preventDefault();
+    setMode(mode === 'login' ? 'signup' : 'login', { focus: false });
+    gate.tabs.find((t) => t.dataset.mode === mode)?.focus();
   });
-  attachPinFilter(gate.pin, () => { if (gate.msg.classList.contains('is-bad')) note(gate.msg, GATE_HINT); });
+  gate.user.addEventListener('input', () => {
+    const lower = gate.user.value.toLowerCase().replace(/\s+/g, '');
+    if (lower !== gate.user.value) gate.user.value = lower; // 아이디는 소문자 · 공백 없이
+    if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
+  });
+  attachNicknameFilter(gate.nick, (value) => {
+    paintCount(gate.count, value);
+    if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
+  });
   gate.form.addEventListener('submit', onGateSubmit);
-  gate.modal.addEventListener('cancel', (ev) => ev.preventDefault()); // Esc 로 건너뛸 수 없다
+  gate.modal.addEventListener('cancel', (ev) => ev.preventDefault()); // Esc 로 건너뛸 수 없다 (둘러보기 버튼으로만)
+  gate.guest?.addEventListener('click', onGuest);
+  setMode('login', { focus: false });
 }
 if (acct.modal && acct.form && acct.input) {
   attachNicknameFilter(acct.input, (value) => {
     paintCount(acct.count, value);
     note(acct.msg, NICK_HINT);
   });
-  attachPinFilter(acct.pinInput, () => note(acct.pinMsg, ''));
   acct.form.addEventListener('submit', onAccountSubmit);
-  acct.pinForm?.addEventListener('submit', onPinSubmit);
   acct.modal.addEventListener('click', onAccountClick);
-  acct.modal.addEventListener('close', () => {
-    showConfirm(false);
-    pinVisible = false;
-  });
+  acct.modal.addEventListener('close', () => showConfirm(false));
 }
 acct.button?.addEventListener('click', () => openAccount());
 
@@ -377,7 +368,7 @@ window.addEventListener('storage', (ev) => { // 다른 탭에서 로그인 · �
 window.addEventListener('lastchamber:need-login', (ev) => openGate(ev?.detail?.message ?? ''));
 window.addEventListener('lastchamber:open-account', (ev) => openAccount({ edit: Boolean(ev?.detail?.edit) }));
 
-// 시작: sessionBoot.js 의 첫 판단을 넘겨받는다 (로그인 중이면 바로 타이틀, 아니면 로그인 화면)
+// 시작: sessionBoot.js 의 첫 판단을 넘겨받는다 (로그인 중 · 손님이면 바로 타이틀, 아니면 로그인 화면)
 paintAccountButton(userSession.user);
-if (userSession.isLoggedIn) closeGate();
+if (userSession.isLoggedIn || userSession.isGuest) closeGate();
 else openGate();

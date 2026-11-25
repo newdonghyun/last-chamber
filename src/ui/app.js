@@ -43,7 +43,7 @@ import {
 } from './storeData.js';
 import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
 import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
-import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버에서 먼저 확인 (남의 PIN 닉네임이면 거절) // 로그인한 닉네임 · 유저 ID (화면은 loginGate.js)
+import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절)
 
 const PLAYER = 'player';
 const AI = 'ai';

@@ -1,10 +1,12 @@
-// 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 10초 안팎 (PIN 해시 · 잠금 대기 포함).
-//   Phase 1 (기본 서버, 클라이언트 2개): 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 무작위 매칭(pro) · 정적 파일
+// 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client · fetch 로 서버를 실제로 때려 본다. 15초 안팎 (비밀번호 해시 포함).
+//   Phase 1 (기본 서버, 계정 2개): 로그인해야 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 빠른 매칭(pro) · 정적 파일
 //   Phase 2 (타이머를 줄인 서버): 20초 턴 타임아웃 강제 격발 · 연결 끊김 부전승 · 재접속 · 새 연결의 자리 인수
-//   Phase 7 (계정 · 메모리): 닉네임 + PIN 로그인 — 새 계정 · 복구 · 오답 잠금 · 남의 PIN 닉네임 차단 · 예전 계정에 PIN 붙이기 · 동시 가입 · PIN 원문 미저장 · CORS
-//   Phase 8 (계정 · Supabase 흉내): 중복 행이 늘지 않는다 · pin_hash 저장 · 시작할 때 PIN 계정 목록 · pin_hash 컬럼이 없으면 PIN_SETUP_REQUIRED
+//   Phase 3 (계정 · 파일 저장): 회원가입(아이디 · 닉네임 중복 차단 · 규칙) · 로그인 · 토큰 접속 · 손님 제한 · 랭킹전/친선전 전적 · 닉네임 변경 · 저장/복원 · 토큰 위조
+//   Phase 4 (계정 · Supabase 흉내): 기존 계정 로그인 · 가입 행 · 중복 · 전적 갱신 · TOP 10 계정만 · 닉네임 UPDATE · 재시작 뒤 토큰 · 계정 컬럼 없음 · 연결 실패
+//   Phase 5 (실제 supabase-js · 전역 WebSocket 없음): 가입 insert · 로그인 조회 · 닉네임 PATCH · TOP 10 필터
 //   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
-//   Phase 3 (유저 기록 파일을 쓰는 서버): 로그인(handshake auth · hello) · 닉네임 규칙 · 서버가 확인한 닉네임으로 상대에게 표시 · 서버 전적 기록 · 파일 저장/복원
+//   Phase 7 (계정 보안): 비밀번호 오답 잠금 · 비밀번호 미노출 · 토큰 만료 · 위조 · CORS · 동시 가입 · IP 시도 제한
+//   Phase 8 (공개 방): 로비 목록 실시간 · 손님 제한 · 자기 방 · 잘못된 입장 · 클릭 입장 즉시 시작(랭킹전) · 목록에서 빠짐 · 방장 이탈/끊김
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -13,7 +15,7 @@ import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
 import { roomChannel } from '../server/roomManager.js';
-import { hashPin } from '../server/pin.js';
+import { hashPassword, issueToken, TOKEN_TTL_SEC } from '../server/auth.js';
 
 const T0 = performance.now();
 let pass = 0;
@@ -26,7 +28,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const onError = (err) => serverErrors.push(err);
 
 const allSockets = [];
-async function client(port, auth) { // auth = { userId, nickname } 이면 로그인한 클라이언트 (handshake auth)
+async function client(port, auth) { // auth = { token } 이면 로그인한 클라이언트 (handshake auth = 로그인 토큰)
   const socket = connect(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false, forceNew: true, ...(auth ? { auth } : {}) });
   const inbox = []; // 받은 이벤트를 전부 쌓아 둔다 → 이벤트가 리스너보다 먼저 도착해도 놓치지 않는다
   socket.onAny((event, payload) => inbox.push({ event, payload }));
@@ -65,16 +67,490 @@ const head = (port, urlPath) => new Promise((resolve, reject) => {
   req.end();
 });
 
+
+// ───────── 계정 도우미 ─────────
+const PASSWORD = 'secret-pass1';
+let accountSeq = 0;
+const nextName = () => `user${++accountSeq}${Math.random().toString(36).slice(2, 6)}`;
+const nextNick = () => `P${++accountSeq}`;
+/** HTTP 요청 한 번 (연결을 재사용하지 않는다 — fetch 의 연결 풀은 끝난 서버와 같은 포트를 받은 새 서버에 죽은 연결을 쓰려다 'fetch failed' 가 난다) */
+const httpCall = (port, method, urlPath, { body, headers = {} } = {}) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port, path: urlPath, method, agent: false, headers: { ...(body !== undefined ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}), ...headers } }, (res) => {
+    let text = '';
+    res.setEncoding('utf8');
+    res.on('data', (chunk) => { text += chunk; });
+    res.on('end', () => resolve({ status: res.statusCode, headers: { get: (name) => res.headers[name.toLowerCase()] ?? null }, text }));
+  });
+  req.on('error', reject);
+  if (body !== undefined) req.write(body);
+  req.end();
+});
+const apiOf = (port) => async (route, body, { origin, raw } = {}) => {
+  const res = await httpCall(port, 'POST', `/api/${route}`, { body: raw ?? JSON.stringify(body), headers: origin ? { Origin: origin } : {} });
+  return { status: res.status, raw: res.text, headers: res.headers, ...JSON.parse(res.text) };
+};
+/** 회원가입 → { token, user_id, username, nickname, me, password } (실패하면 던진다) */
+async function signupVia(port, nickname = nextNick(), { username = nextName(), password = PASSWORD } = {}) {
+  const res = await apiOf(port)('signup', { username, password, nickname });
+  if (!res.ok) throw new Error(`signup(${nickname}) 실패: ${res.error}`);
+  return { ...res, password };
+}
+/** 가입한 계정으로 로그인한 소켓 (handshake auth = 로그인 토큰) */
+async function player(port, nickname) {
+  const account = await signupVia(port, nickname);
+  const c = await client(port, { token: account.token });
+  c.account = account;
+  return c;
+}
+/** X · Y 를 빠른 매칭(무료 테이블)으로 붙인다 — 이미 본 방 코드는 건너뛴다 */
+async function queueMatch(X, Y) {
+  X.seen ??= new Set();
+  await X.call('join_queue', { tier: 'free', profile: {} });
+  await Y.call('join_queue', { tier: 'free', profile: {} });
+  const mX = await X.waitFor('match_found', (p) => p.mode === 'queue' && !X.seen.has(p.code));
+  X.seen.add(mX.code);
+  return [mX, await Y.waitFor('match_found', (p) => p.code === mX.code)];
+}
+
+// ───────── Phase 3: 계정 (파일 저장 서버) ─────────
+async function phase3() {
+  const dir = mkdtempSync(join(tmpdir(), 'lastchamber-users-'));
+  const file = join(dir, 'users.json');
+  const server = createGameServer({ quiet: true, onError, userDataFile: file, userSaveDelayMs: 20, authSecret: 'test-secret' });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+
+  // 14. 회원가입: 아이디(소문자로 맞춤) · 닉네임 중복 차단 · 규칙
+  const a = await signupVia(port, '총잡이', { username: 'Gunner01' });
+  eq([a.username, a.nickname, a.me], ['gunner01', '총잡이', { nickname: '총잡이', wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 }], '14 회원가입 → 계정 · 기본 전적 (아이디는 소문자로)');
+  ok(/^t1\.[0-9a-f-]{36}\.\d+\.[A-Za-z0-9_-]{43}$/.test(a.token) && /^[0-9a-f-]{36}$/.test(a.user_id), '14 로그인 토큰 · 서버가 만든 user_id');
+  eq([(await api('signup', { username: 'GUNNER01', password: PASSWORD, nickname: '다른이름' })).error, (await api('signup', { username: 'other01', password: PASSWORD, nickname: '총잡이' })).error],
+    ['USERNAME_TAKEN', 'NICKNAME_TAKEN'], '14 같은 아이디(대소문자 무관) · 같은 닉네임은 가입할 수 없다');
+  const bad = await Promise.all([
+    api('signup', { username: 'ab', password: PASSWORD, nickname: '새사람' }),
+    api('signup', { username: '한글아이디', password: PASSWORD, nickname: '새사람' }),
+    api('signup', { username: 'okname1', password: '12345', nickname: '새사람' }),
+    api('signup', { username: 'okname1', password: PASSWORD, nickname: '새 사람' }),
+  ]);
+  eq(bad.map((r) => `${r.status} ${r.error}`), ['400 INVALID_USERNAME', '400 INVALID_USERNAME', '400 INVALID_PASSWORD', '400 INVALID_NICKNAME'], '14 아이디 4~16자 영문 소문자 · 숫자 · _ / 비밀번호 6자 이상 / 닉네임 규칙');
+
+  // 15. 로그인: 맞으면 같은 계정 · 틀리면 BAD_CREDENTIALS (없는 아이디도 같은 답)
+  const again = await api('login', { username: 'Gunner01', password: PASSWORD });
+  eq([again.status, again.user_id, again.nickname], [200, a.user_id, '총잡이'], '15 아이디 + 비밀번호 → 같은 계정');
+  const wrongPw = await api('login', { username: 'gunner01', password: 'nope-nope' });
+  const noUser = await api('login', { username: 'ghost99', password: PASSWORD });
+  eq([wrongPw.status, wrongPw.error, noUser.status, noUser.error], [401, 'BAD_CREDENTIALS', 401, 'BAD_CREDENTIALS'], '15 틀린 비밀번호 · 없는 아이디는 같은 답 (아이디가 있는지 알려 주지 않는다)');
+
+  // 16. 소켓 로그인: 토큰으로 접속 → register_player 전적 · 틀린 토큰은 손님 · 손님은 방 · 매칭 불가
+  const A = await client(port, { token: a.token });
+  const reg = await A.call('register_player', {});
+  eq([reg.ok, reg.me?.nickname, reg.me?.mmr], [true, '총잡이', 1000], '16 토큰으로 접속 → 내 계정 전적');
+  const forged = await client(port, { token: `${a.token.slice(0, -3)}xyz` });
+  eq((await forged.call('register_player', {})).error, 'AUTH_REQUIRED', '16 서명이 틀린 토큰은 로그인되지 않는다');
+  eq((await forged.call('register_player', { token: 'nonsense' })).error, 'AUTH_REQUIRED', '16 엉터리 토큰 → AUTH_REQUIRED');
+  const guest = await client(port);
+  eq([(await guest.call('create_private_room', {})).error, (await guest.call('create_public_room', {})).error, (await guest.call('join_queue', { tier: 'free' })).error, (await guest.call('join_private_room', 'ABCD')).error],
+    ['AUTH_REQUIRED', 'AUTH_REQUIRED', 'AUTH_REQUIRED', 'AUTH_REQUIRED'], '16 손님(로그인 안 함)은 방 만들기 · 입장 · 매칭 불가');
+  const guestBoard = await guest.call('get_leaderboard');
+  eq([guestBoard.ok, guestBoard.me, (await guest.call('watch_rooms')).ok], [true, null, true], '16 손님도 TOP 10 · 로비 방 목록은 볼 수 있다');
+
+  // 17. 랭킹전(빠른 매칭) 전적 · 상대에게 보이는 이름은 계정 닉네임 · 친선 비밀방은 미반영 · 같은 계정끼리는 미반영
+  const b = await signupVia(port, 'Ace_7', { username: 'ace7' });
+  const B = await client(port, { token: b.token });
+  const [mA, mB] = await queueMatch(A, B);
+  eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname, mA.ranked], ['총잡이', 'Ace_7', true], '17 상대 이름표는 계정 닉네임 · 빠른 매칭 = 랭킹전');
+  ok(![mA, mB].some((m) => JSON.stringify(m).includes(a.user_id) || JSON.stringify(m).includes(b.user_id)), '17 유저 ID 는 match_found 어디에도 실리지 않는다');
+  const [overA, overB] = [A.waitFor('game_over', (p) => p.code === mA.code), B.waitFor('game_over', (p) => p.code === mA.code)];
+  await B.call('leave_room');
+  const [goA, goB] = await Promise.all([overA, overB]);
+  eq([goA.record?.mmr, goA.record?.wins, goA.mmrDelta, goB.record?.mmr, goB.record?.losses, goB.mmrDelta], [1025, 1, 25, 980, 1, -20], '17 랭킹전: 승 +25 · 패 −20');
+  const friendly = await A.call('create_private_room', {});
+  await B.call('join_private_room', friendly.code);
+  await A.waitFor('match_found', (p) => p.code === friendly.code);
+  const fOver = A.waitFor('game_over', (p) => p.code === friendly.code);
+  await A.call('leave_room');
+  eq([(await fOver).ranked, (await fOver).record?.mmr], [false, 1025], '17 친선 비밀방 결과는 전적 · MMR 미반영');
+  const A2 = await client(port, { token: a.token }); // 같은 계정 · 다른 창
+  const [self] = await queueMatch(A, A2);
+  const selfOver = A.waitFor('game_over', (p) => p.code === self.code);
+  await A2.call('leave_room');
+  eq((await selfOver).record?.mmr, 1025, '17 같은 계정끼리(창 두 개) 둔 판은 기록하지 않는다');
+
+  // 18. 닉네임 변경: 서버에서 바로 · 중복 차단 · 토큰 필요 · 접속 중인 소켓의 이름표도
+  const renamed = await api('rename', { token: b.token, nickname: '에이스' });
+  eq([renamed.ok, renamed.nickname, renamed.me?.losses], [true, '에이스', 1], '18 닉네임 변경 (전적 그대로)');
+  eq([(await api('rename', { token: b.token, nickname: '총잡이' })).error, (await api('rename', { token: 'nope', nickname: '아무개' })).status], ['NICKNAME_TAKEN', 401], '18 남의 닉네임 → NICKNAME_TAKEN · 토큰 없으면 401');
+  const [mA3, mB3] = await queueMatch(A, B);
+  eq(mA3.opponent.profile.nickname, '에이스', '18 바꾼 닉네임이 바로 상대 이름표에');
+  const over3 = A.waitFor('game_over', (p) => p.code === mA3.code);
+  await B.call('leave_room');
+  await over3;
+  void mB3;
+  const board = await A.call('get_leaderboard');
+  eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '총잡이', 1050, true], [2, '에이스', 960, false]], '18 TOP 10: mmr 내림차순 · 내 줄 표시');
+  ok(!/password|token|user_id|username/i.test(JSON.stringify(board)), '18 랭킹 응답에 계정 정보(아이디 · 비밀번호 · ID)가 없다');
+
+  // 19. 저장 · 복원: 비밀번호는 해시로만 파일에 · 다시 켜도 로그인 · 토큰 그대로
+  await server.stop();
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  const gun = saved.users.find((u) => u.username === 'gunner01');
+  ok(gun && /^p1\$/.test(gun.passwordHash) && !readFileSync(file, 'utf8').includes(PASSWORD), '19 파일에는 비밀번호 해시만 (원문 없음)');
+  const reborn = createGameServer({ quiet: true, onError, userDataFile: file, authSecret: 'test-secret' });
+  const port2 = await reborn.start(0, '127.0.0.1');
+  const back = await apiOf(port2)('login', { username: 'gunner01', password: PASSWORD });
+  eq([back.user_id, back.me?.mmr, back.me?.wins], [a.user_id, 1050, 2], '19 서버를 다시 켜도 로그인 · 전적 그대로');
+  const oldToken = await client(port2, { token: a.token });
+  eq((await oldToken.call('register_player', {})).me?.nickname, '총잡이', '19 재시작 전에 받은 토큰으로도 자동 로그인 (서버 메모리에 세션이 없어도)');
+  await reborn.stop();
+  const wrongSecret = createGameServer({ quiet: true, onError, userDataFile: file, authSecret: 'other-secret' });
+  const port3 = await wrongSecret.start(0, '127.0.0.1');
+  eq((await (await client(port3, { token: a.token })).call('register_player', {})).error, 'AUTH_REQUIRED', '19 AUTH_SECRET 이 다르면 토큰은 무효 (위조 방지)');
+  await wrongSecret.stop();
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// ───────── Phase 4: 계정 · Supabase 흉내 ─────────
+// accountColumns: false 면 username · password_hash 컬럼이 아직 없는 테이블 (ACCOUNT_SQL 실행 전)
+function fakeSupabase(rows = [], { accountColumns = true } = {}) {
+  const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
+  const calls = [];
+  const ACCOUNT = /username|password_hash/;
+  const noColumn = { data: null, error: { code: '42703', message: 'column players.username does not exist' } };
+  const dup = (constraint) => ({ data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${constraint}"` } });
+  const clash = (row) => {
+    for (const r of table.values()) {
+      if (r.user_id === row.user_id) continue;
+      if (row.username && r.username === row.username) return dup('players_username_key');
+      if (row.username && r.username && r.nickname === row.nickname) return dup('players_account_nickname_key');
+    }
+    return null;
+  };
+  const orFilter = (expr) => {
+    const conds = expr.split(',').map((part) => {
+      const [col, op, val] = part.split('.');
+      return (r) => (op === 'gt' ? r[col] > Number(val) : op === 'eq' ? String(r[col]) === val : false);
+    });
+    return (r) => conds.some((f) => f(r));
+  };
+  const query = (filters = [], sorts = [], lim = Infinity, bad = false) => {
+    const run = () => {
+      const out = [...table.values()].filter((r) => filters.every((f) => f(r)));
+      for (const [c, asc] of [...sorts].reverse()) out.sort((x, y) => (asc ? x[c] - y[c] : y[c] - x[c]));
+      return out.slice(0, lim).map((r) => ({ ...r }));
+    };
+    const next = (more, sortMore = [], n = lim, col = '') => query([...filters, ...more], [...sorts, ...sortMore], n, bad || (!accountColumns && ACCOUNT.test(col)));
+    return {
+      eq: (c, v) => next([(r) => r[c] === v], [], lim, c),
+      not: (c, op, v) => next([(r) => !(op === 'is' && v === null ? r[c] == null : r[c] === v)], [], lim, c),
+      or: (expr) => { calls.push(`or:${expr}`); return next([orFilter(expr)]); },
+      order: (c, o = {}) => next([], [[c, o.ascending !== false]]),
+      limit: (n) => next([], [], n),
+      maybeSingle: async () => (bad ? noColumn : { data: run()[0] ?? null, error: null }),
+      then: (res, rej) => Promise.resolve(bad ? noColumn : { data: run(), error: null }).then(res, rej),
+    };
+  };
+  return {
+    table,
+    calls,
+    addAccountColumns: () => { accountColumns = true; }, // ACCOUNT_SQL 을 실행한 것처럼
+    from: () => ({
+      select: (cols = '*') => { calls.push('select'); return query([], [], Infinity, !accountColumns && ACCOUNT.test(cols)); },
+      insert: async (row) => {
+        calls.push('insert');
+        if (!accountColumns && Object.keys(row).some((k) => ACCOUNT.test(k))) return noColumn;
+        if (table.has(row.user_id)) return dup('players_pkey');
+        const c = clash(row);
+        if (c) return c;
+        table.set(row.user_id, { ...row });
+        return { data: null, error: null };
+      },
+      upsert: async (row) => {
+        calls.push('upsert');
+        const merged = { ...table.get(row.user_id), ...row };
+        const c = clash(merged);
+        if (c) return c;
+        table.set(row.user_id, merged);
+        return { data: null, error: null };
+      },
+      update: (patch) => ({
+        eq: async (col, val) => {
+          calls.push('update');
+          for (const r of table.values()) {
+            if (r[col] !== val) continue;
+            const c = clash({ ...r, ...patch });
+            if (c) return c;
+            Object.assign(r, patch);
+          }
+          return { data: null, error: null };
+        },
+      }),
+    }),
+  };
+}
+
+async function phase4() {
+  const veteran = randomUUID();
+  const legacy = randomUUID();
+  const db = fakeSupabase([
+    { user_id: veteran, username: 'veteran', password_hash: await hashPassword(PASSWORD), nickname: '고수', wins: 40, losses: 10, streak: 3, max_streak: 9, mmr: 1600 },
+    { user_id: legacy, nickname: '옛행', wins: 9, losses: 0, streak: 9, max_streak: 9, mmr: 2000 }, // 계정이 아닌 예전 행 (전적이 있어도 순위 · 로그인 대상 아님)
+  ]);
+  const server = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+  await sleep(30);
+  eq([server.stats().accountReady, server.stats().storage], [true, 'supabase'], '20 /healthz: 계정 컬럼 확인 → 회원가입 · 로그인 가능');
+
+  // 20. DB 의 기존 계정으로 로그인 · 토큰으로 접속
+  const v = await api('login', { username: 'veteran', password: PASSWORD });
+  eq([v.ok, v.user_id, v.me?.wins, v.me?.mmr], [true, veteran, 40, 1600], '20 Supabase 계정 로그인 → DB 전적 그대로');
+  const V = await client(port, { token: v.token });
+  eq((await V.call('register_player', {})).me?.nickname, '고수', '20 토큰으로 접속');
+
+  // 21. 회원가입 → players 에 행 1개 (비밀번호는 해시) · 중복은 DB 에서 막힌다
+  const rows = db.table.size;
+  const r = await signupVia(port, '신입', { username: 'rookie' });
+  const row = db.table.get(r.user_id);
+  eq([db.table.size, row?.username, row?.nickname, row?.mmr], [rows + 1, 'rookie', '신입', 1000], '21 회원가입 → players 에 새 행 (아이디 · 닉네임 · 기본 전적)');
+  ok(/^p1\$/.test(row?.password_hash) && !JSON.stringify(row).includes(PASSWORD), '21 Supabase 에는 password_hash(해시)만');
+  eq([(await api('signup', { username: 'ROOKIE', password: PASSWORD, nickname: '다른애' })).error, (await api('signup', { username: 'rookie2', password: PASSWORD, nickname: '고수' })).error, db.table.size],
+    ['USERNAME_TAKEN', 'NICKNAME_TAKEN', rows + 1], '21 같은 아이디 · 닉네임 → 거절, 행은 늘지 않는다');
+  const sameNickLegacy = await api('signup', { username: 'newold', password: PASSWORD, nickname: '옛행' });
+  eq(sameNickLegacy.ok, true, '21 계정이 아닌 예전 행의 닉네임은 쓸 수 있다');
+
+  // 22. 랭킹전 → DB 갱신 · TOP 10 은 계정만
+  const R = await client(port, { token: r.token });
+  const [mV] = await queueMatch(V, R);
+  const over = R.waitFor('game_over', (p) => p.code === mV.code);
+  await V.call('leave_room');
+  eq([(await over).record?.mmr, (await over).mmrDelta], [1025, 25], '22 game_over 에 갱신된 MMR');
+  await server.users.flush();
+  eq([db.table.get(r.user_id).wins, db.table.get(r.user_id).mmr, db.table.get(veteran).losses, db.table.get(veteran).mmr, db.table.get(veteran).password_hash === row?.password_hash],
+    [1, 1025, 11, 1580, false], '22 Supabase 행 갱신 (승자 +25 · 패자 −20, 계정 정보는 그대로)');
+  ok(Boolean(db.table.get(veteran).username) && Boolean(db.table.get(veteran).password_hash), '22 전적 저장이 아이디 · 비밀번호 해시를 지우지 않는다');
+  const board = await R.call('get_leaderboard');
+  eq(board.top.map((x) => [x.nickname, x.mmr]), [['고수', 1580], ['신입', 1025]], '22 TOP 10: 계정만 · 랭킹전 1판 이상 (예전 행 · 0판 계정은 빠진다)');
+  ok(db.calls.includes('or:wins.gt.0,losses.gt.0'), '22 TOP 10 쿼리에 wins + losses > 0');
+
+  // 23. 닉네임 변경 → players 바로 UPDATE · DB 에서 겹치면 거절
+  const ren = await api('rename', { token: r.token, nickname: '중수' });
+  eq([ren.ok, db.table.get(r.user_id).nickname], [true, '중수'], '23 닉네임 변경 → players 즉시 UPDATE');
+  eq([(await api('rename', { token: r.token, nickname: '고수' })).error, db.table.get(r.user_id).nickname], ['NICKNAME_TAKEN', '중수'], '23 다른 계정의 닉네임 → 거절 (DB 그대로)');
+  await server.stop();
+
+  // 24. 서버를 다시 켜도(캐시 없음) 토큰으로 바로 자동 로그인 — DB 에서 계정을 읽어 확인
+  const again = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const port2 = await again.start(0, '127.0.0.1');
+  const R2 = await client(port2, { token: r.token });
+  eq((await R2.call('register_player', {})).me, { nickname: '중수', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, '24 재시작 뒤 토큰 → DB 계정 · 전적');
+  await again.stop();
+
+  // 25. 계정 컬럼이 없는 테이블 (ACCOUNT_SQL 실행 전): 서버는 돌고 가입 · 로그인만 안내와 함께 막는다 → SQL 실행 뒤 다시 켜지 않아도 된다
+  const errors = [];
+  const oldDb = fakeSupabase([], { accountColumns: false });
+  const old = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: oldDb, accountRecheckMs: 0 });
+  const oldPort = await old.start(0, '127.0.0.1');
+  await sleep(30);
+  const blocked = await apiOf(oldPort)('signup', { username: 'early1', password: PASSWORD, nickname: '얼리' });
+  eq([old.stats().accountReady, blocked.status, blocked.error], [false, 503, 'ACCOUNT_SETUP_REQUIRED'], '25 계정 컬럼이 없으면 503 ACCOUNT_SETUP_REQUIRED');
+  ok(errors.some((e) => /add column if not exists username/.test(e.message)), '25 서버 로그에 실행할 SQL 을 알려 준다');
+  oldDb.addAccountColumns();
+  const afterSql = await apiOf(oldPort)('signup', { username: 'early1', password: PASSWORD, nickname: '얼리' });
+  eq([afterSql.ok, old.stats().accountReady, oldDb.table.size], [true, true, 1], '25 SQL 실행 뒤 다음 가입부터 바로 된다 (재시작 없이)');
+  await old.stop();
+
+  // 26. DB 연결이 실패하면 메모리로 계속 돈다
+  const errs = [];
+  const solo = createGameServer({ quiet: true, onError: (err) => errs.push(err), supabaseClient: Promise.reject(new Error('fetch failed')) });
+  const soloPort = await solo.start(0, '127.0.0.1');
+  const memo = await apiOf(soloPort)('signup', { username: 'memo1', password: PASSWORD, nickname: '메모' });
+  eq([memo.ok, solo.stats().storage, errs.length], [true, 'memory', 1], '26 Supabase 연결 실패 → 메모리로 가입 · 로그인 (오류는 한 번만)');
+  await solo.stop();
+}
+
+// ───────── Phase 5: 실제 supabase-js (전역 WebSocket 없는 Node) + 가짜 PostgREST ─────────
+async function phase5() {
+  const rows = new Map();
+  const requests = [];
+  const pick = (url) => { // PostgREST 필터 몇 가지만 (eq · is.null · not.is.null)
+    const conds = [];
+    for (const [k, v] of url.searchParams) {
+      if (['select', 'or', 'order', 'limit', 'offset', 'on_conflict', 'columns'].includes(k)) continue;
+      if (v.startsWith('eq.')) conds.push((r) => String(r[k]) === v.slice(3));
+      else if (v === 'is.null') conds.push((r) => r[k] == null);
+      else if (v === 'not.is.null') conds.push((r) => r[k] != null);
+    }
+    return [...rows.values()].filter((r) => conds.every((f) => f(r)));
+  };
+  const rest = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://x');
+      requests.push(`${req.method} ${url.pathname}?${[...url.searchParams.keys()].join(',')}`);
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'POST') {
+        for (const row of [].concat(JSON.parse(body))) rows.set(row.user_id, { ...rows.get(row.user_id), ...row });
+        res.statusCode = 201;
+        res.end();
+        return;
+      }
+      if (req.method === 'PATCH') {
+        for (const r of pick(url)) Object.assign(r, JSON.parse(body));
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+      res.end(JSON.stringify(pick(url).sort((a, b) => b.mmr - a.mmr)));
+    });
+  });
+  await new Promise((resolve) => rest.listen(0, '127.0.0.1', resolve));
+  const nativeWebSocket = globalThis.WebSocket;
+  delete globalThis.WebSocket;
+  const errors = [];
+  const server = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseUrl: `http://127.0.0.1:${rest.address().port}`, supabaseKey: 'test-service-role', authSecret: 'test-secret' });
+  const port = await server.start(0, '127.0.0.1');
+  try {
+    const made = await apiOf(port)('signup', { username: 'node20', password: PASSWORD, nickname: '노드20' });
+    eq([made.ok, server.stats().storage], [true, 'supabase'], `27 전역 WebSocket 이 없어도(Node 18/20) Supabase 클라이언트를 만든다 (${errors.map((e) => e.message.split('\n')[0]).join(' | ')})`);
+    eq([rows.get(made.user_id)?.username, rows.get(made.user_id)?.nickname, /^p1\$/.test(rows.get(made.user_id)?.password_hash ?? '')], ['node20', '노드20', true], '27 실제 supabase-js 로 players 에 계정 행 insert');
+    const back = await apiOf(port)('login', { username: 'node20', password: PASSWORD });
+    eq(back.user_id, made.user_id, '27 실제 supabase-js 로 아이디 조회 → 로그인');
+    const renamed = await apiOf(port)('rename', { token: back.token, nickname: '노드22' });
+    eq([renamed.ok, rows.get(made.user_id)?.nickname], [true, '노드22'], '27 닉네임 변경 → PATCH(UPDATE)');
+    const C = await client(port, { token: back.token });
+    const reg = await C.call('register_player', {});
+    eq([reg.ok, reg.top?.length], [true, 0], '27 토큰 접속 · TOP 10 (전적 없는 계정은 아직 없음)');
+    ok(requests.some((r) => r.startsWith('GET /rest/v1/players') && r.includes('or') && r.includes('username')) && errors.length === 0, `27 TOP 10 요청에 wins + losses > 0 · 계정만 필터 · 오류 ${errors.length}건`);
+  } finally {
+    globalThis.WebSocket = nativeWebSocket;
+    await server.stop();
+    rest.closeAllConnections?.();
+    await new Promise((resolve) => rest.close(resolve));
+  }
+}
+
+// ───────── Phase 7: 계정 보안 ─────────
+async function phase7() {
+  const server = createGameServer({ quiet: true, onError, authSecret: 'test-secret', loginLimits: { maxFails: 3, lockMs: 60_000, maxPerIp: 500 } });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+  const acct = await signupVia(port, '보안관', { username: 'sheriff' });
+
+  // 28. 비밀번호 여러 번 틀리면 잠금 (맞는 비밀번호도 잠시 막힌다)
+  await api('login', { username: 'sheriff', password: 'wrong-1' });
+  await api('login', { username: 'sheriff', password: 'wrong-2' });
+  const locked = await api('login', { username: 'sheriff', password: 'wrong-3' });
+  eq([locked.status, locked.error, locked.retryAfterSec > 0], [429, 'LOGIN_LOCKED', true], '28 3번 틀리면 잠금');
+  eq((await api('login', { username: 'sheriff', password: PASSWORD })).error, 'LOGIN_LOCKED', '28 잠긴 동안은 맞는 비밀번호도 막는다 (무차별 대입 방지)');
+
+  // 29. 응답 · 저장에 비밀번호가 없다 · 토큰 위조 · 만료
+  ok(!/password/i.test(acct.raw) && !acct.raw.includes(PASSWORD), '29 가입 응답에 비밀번호 · 해시가 없다');
+  const rec = server.users.get(acct.user_id);
+  ok(/^p1\$/.test(rec.passwordHash) && !rec.passwordHash.includes(PASSWORD), '29 서버에는 scrypt 해시만');
+  const expired = issueToken(rec, 'test-secret', Math.floor(Date.now() / 1000) - TOKEN_TTL_SEC - 10);
+  const noSecret = issueToken(rec, '');
+  const [e1, e2] = [await client(port, { token: expired }), await client(port, { token: noSecret })];
+  eq([(await e1.call('register_player', {})).error, (await e2.call('register_player', {})).error], ['AUTH_REQUIRED', 'AUTH_REQUIRED'], '29 만료된 토큰 · 서버 비밀 없이 만든 토큰은 무효');
+
+  // 30. CORS: 앱 출처만
+  const pre = await httpCall(port, 'OPTIONS', '/api/login', { headers: { Origin: 'capacitor://localhost', 'Access-Control-Request-Method': 'POST' } });
+  const evil = await api('login', { username: 'x', password: 'y' }, { origin: 'https://evil.example' });
+  eq([pre.status, pre.headers.get('access-control-allow-origin'), evil.headers.get('access-control-allow-origin')], [204, 'capacitor://localhost', null], '30 앱 출처만 CORS 허용 (다른 출처는 브라우저가 응답을 못 읽는다)');
+  eq((await api('login', null, { raw: '{broken' })).error, 'BAD_REQUEST', '30 깨진 JSON → 400');
+
+  // 31. 같은 아이디로 동시에 5번 가입 → 계정 1개
+  const burst = await Promise.all(Array.from({ length: 5 }, (_, i) => api('signup', { username: 'twin01', password: PASSWORD, nickname: `쌍둥이${i}` })));
+  eq([burst.filter((x) => x.ok).length, burst.filter((x) => x.error === 'USERNAME_TAKEN').length], [1, 4], '31 동시 가입 → 계정 1개');
+  await server.stop();
+
+  const strict = createGameServer({ quiet: true, onError, loginLimits: { maxPerIp: 2 } });
+  const strictPort = await strict.start(0, '127.0.0.1');
+  const tries = [];
+  for (let i = 0; i < 3; i += 1) tries.push((await apiOf(strictPort)('login', { username: 'nobody', password: 'whatever' })).error);
+  eq(tries, ['BAD_CREDENTIALS', 'BAD_CREDENTIALS', 'RATE_LIMITED'], '31 같은 IP 의 시도 수 제한');
+  await strict.stop();
+}
+
+// ───────── Phase 8: 공개 방 (로비 목록 · 클릭 입장 · 랭킹전) ─────────
+async function phase8() {
+  const server = createGameServer({ quiet: true, onError });
+  const port = await server.start(0, '127.0.0.1');
+  const host = await player(port, '방장');
+  const guest = await client(port);
+  const C = await player(port, '도전자');
+  const listOf = (X) => X.inbox.filter((m) => m.event === 'room_list').at(-1)?.payload.rooms ?? null;
+
+  // 32. 로비 목록 보기 → 공개 방을 만들면 즉시 목록에 (방장 닉네임 · MMR · 1/2)
+  eq((await guest.call('watch_rooms')).rooms, [], '32 처음 목록은 비어 있다');
+  await C.call('watch_rooms');
+  eq((await guest.call('create_public_room', {})).error, 'AUTH_REQUIRED', '32 손님은 공개 방을 만들 수 없다');
+  const made = await host.call('create_public_room', {});
+  eq([made.ok, made.mode], [true, 'public'], '32 공개 방 만들기');
+  await guest.waitFor('room_list', (p) => p.rooms.length === 1);
+  const item = listOf(guest)[0];
+  eq([item.code, item.host, item.mmr, item.players, item.capacity], [made.code, '방장', 1000, 1, 2], '32 목록에 즉시: 방장 닉네임 · MMR · 1/2명');
+  ok(!JSON.stringify(listOf(guest)).includes(host.account.user_id), '32 목록에 유저 ID 는 없다');
+  const secret = await (await player(port, '비밀')).call('create_private_room', {});
+  await sleep(40);
+  eq(listOf(guest).map((r) => r.code), [made.code], '32 친선 비밀방은 목록에 보이지 않는다');
+
+  // 33. 잘못된 입장
+  const twin = await client(port, { token: host.account.token }); // 같은 계정 · 다른 창
+  eq((await twin.call('join_public_room', { code: made.code })).error, 'OWN_ROOM', '33 자기 공개 방에는 못 들어간다');
+  eq([(await C.call('join_private_room', made.code)).error, (await C.call('join_public_room', { code: secret.code })).error], ['ROOM_NOT_FOUND', 'ROOM_NOT_FOUND'], '33 공개 방은 코드 입력으로 · 비밀방은 목록 입장으로 못 들어간다');
+
+  // 34. 목록에서 누르면 바로 1:1 시작 (랭킹전) → 목록에서 빠진다 · 입장한 소켓은 더 이상 목록을 받지 않는다
+  const joined = await C.call('join_public_room', { code: made.code });
+  const [mH, mC] = await Promise.all([host.waitFor('match_found', (p) => p.code === made.code), C.waitFor('match_found', (p) => p.code === made.code)]);
+  eq([joined.ok, mH.mode, mH.ranked, mC.opponent.profile.nickname], [true, 'public', true, '방장'], '34 입장 즉시 시작 · 공개 방 = 랭킹전');
+  await guest.waitFor('room_list', (p) => p.rooms.length === 0);
+  eq(listOf(guest), [], '34 시작된 방은 목록에서 즉시 빠진다');
+  const cLists = C.inbox.filter((m) => m.event === 'room_list').length;
+  const other = await (await player(port, '셋째')).call('create_public_room', {});
+  await guest.waitFor('room_list', (p) => p.rooms.some((r) => r.code === other.code));
+  eq(C.inbox.filter((m) => m.event === 'room_list').length, cLists, '34 방에 앉은 소켓은 로비 목록을 더 받지 않는다');
+  eq((await C.call('join_public_room', { code: other.code })).error, 'ALREADY_IN_ROOM', '34 판 도중에는 다른 방에 못 들어간다');
+  const over = host.waitFor('game_over', (p) => p.code === made.code);
+  await C.call('leave_room');
+  eq([(await over).ranked, (await over).mmrDelta, (await over).record?.mmr], [true, 25, 1025], '34 공개 방 결과는 MMR 정산 (+25)');
+
+  // 35. 방장이 나가거나 연결이 끊기면 목록에서 바로 빠진다 · 목록의 MMR 은 서버 전적
+  const relist = await host.call('create_public_room', {});
+  await guest.waitFor('room_list', (p) => p.rooms.some((r) => r.code === relist.code && r.mmr === 1025));
+  ok(true, '35 방장 MMR 은 서버 전적 (1025)');
+  await host.call('leave_room');
+  await guest.waitFor('room_list', (p) => !p.rooms.some((r) => r.code === relist.code));
+  ok(true, '35 방장이 나가면 목록에서 빠진다');
+  const dropper = await player(port, '끊김');
+  const dropped = await dropper.call('create_public_room', {});
+  await guest.waitFor('room_list', (p) => p.rooms.some((r) => r.code === dropped.code));
+  dropper.socket.disconnect();
+  await guest.waitFor('room_list', (p) => !p.rooms.some((r) => r.code === dropped.code));
+  ok(true, '35 방장 연결이 끊기면 목록에서 빠진다');
+  eq(guest.inbox.filter((m) => IN_GAME_EVENTS.includes(m.event)).length, 0, '35 목록만 보는 소켓은 인게임 이벤트를 하나도 받지 않는다');
+  await guest.call('unwatch_rooms');
+  const quiet = guest.inbox.length;
+  await (await player(port, '조용')).call('create_public_room', {});
+  await sleep(40);
+  eq(guest.inbox.length, quiet, '35 unwatch_rooms 뒤에는 목록을 받지 않는다');
+  await server.stop();
+}
+
+
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   eq([QUEUE_TIERS.free, QUEUE_TIERS.pro, QUEUE_TIERS.vip], [{ fee: 0, prize: 0 }, { fee: 200, prize: 360 }, { fee: 1000, prize: 1800 }], '등급표: free 0 · pro 200→360 · vip 1000→1800');
-  const A = await client(port);
-  const B = await client(port);
+  const A = await player(port, '알파');
+  const B = await player(port, 'Bravo_7');
+  const anon = await client(port);
   const profA = { nickname: '알파', mmr: 1100, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native' } };
   const profB = { nickname: 'Bravo_7', mmr: 900, cosmetics: { gun: '<img src=x onerror=alert(1)>', table: 'obsidian' } }; // 나쁜 id 는 걸러져야 한다
 
-  // 1. 방 생성
+  // 1. 방 생성 (로그인한 계정만)
+  eq((await anon.call('create_private_room', { profile: profA })).error, 'AUTH_REQUIRED', '1 로그인하지 않으면 방을 만들 수 없다');
   const created = await A.call('create_private_room', { profile: profA });
   ok(created.ok && /^[A-HJ-NP-Z2-9]{4}$/.test(created.code), `1 사설 방 코드는 4자리 영문/숫자 (${created.code})`);
   eq((await A.waitFor('room_created')).code, created.code, '1 room_created 이벤트도 같은 코드');
@@ -88,9 +564,9 @@ async function phase1() {
   eq([mA.mode, mA.tier, mA.fee, mA.prize, mA.code], ['private', 'free', 0, 0, created.code], '2 사설 방은 무료 판');
   eq([mA.you, mB.you].sort(), ['P1', 'P2'], '2 서로 다른 좌석');
   eq([mA.opponent.id, mB.opponent.id], [mB.you, mA.you], '2 상대 좌석 id');
-  eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo_7', 900], '2 A 가 보는 상대 프로필(B)');
+  eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo_7', 1000], '2 A 가 보는 상대 프로필(B) — 이름 · MMR 은 서버 계정 값 (보낸 900 이 아니라)');
   eq(mA.opponent.profile.cosmetics, { gun: null, table: 'obsidian', flame: null, taunt: null }, '2 위험한 코스메틱 id 는 걸러진다');
-  eq(mB.opponent.profile, { nickname: '알파', mmr: 1100, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A)');
+  eq(mB.opponent.profile, { nickname: '알파', mmr: 1000, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A)');
   ok(mA.token.length === 32 && mB.token.length === 32 && mA.token !== mB.token, '2 재접속 토큰은 각자 따로');
   eq(await B.call('join_private_room', created.code), { ok: false, error: 'ALREADY_IN_ROOM' }, '2 이미 시작된 방에 또 들어갈 수 없다');
 
@@ -159,7 +635,7 @@ async function phase1() {
   const [qA, qB] = await Promise.all([A.waitFor('match_found', (p) => p.mode === 'queue'), B.waitFor('match_found', (p) => p.mode === 'queue')]);
   eq([qA.tier, qA.fee, qA.prize, qB.fee, qB.prize], ['pro', 200, 360, 200, 360], '8 매칭된 pro 판: 참가비 200 · 승자 360');
   ok(qA.code !== created.code && qA.code === qB.code, '8 두 사람이 같은 새 방');
-  const sniper = await client(port);
+  const sniper = await player(port, '저격수');
   eq((await sniper.call('join_private_room', qA.code)).error, 'ROOM_NOT_FOUND', '8 매칭 방은 코드로 들어올 수 없다');
   const overQ = B.waitFor('game_over', (p) => p.code === qA.code);
   await A.call('leave_room');
@@ -177,11 +653,12 @@ async function phase1() {
   await server.stop();
 }
 
+
 async function phase2() {
   const server = createGameServer({ quiet: true, turnMs: 250, graceMs: 400, onError });
   const port = await server.start(0, '127.0.0.1');
   const mk = async (name) => {
-    const [x, y] = [await client(port), await client(port)];
+    const [x, y] = [await player(port, `${name}X`), await player(port, `${name}Y`)];
     const made = await x.call('create_private_room', { profile: { nickname: `${name}1` } });
     const joined = await y.call('join_private_room', made.code); // 스펙 형태: join_private_room(code)
     const [mx, my] = await Promise.all([x.waitFor('match_found'), y.waitFor('match_found')]);
@@ -191,7 +668,7 @@ async function phase2() {
   // 10. 턴 타임아웃: 아무도 안 쏘면 서버가 대신 격발
   const g1 = await mk('타임');
   eq(g1.joined.ok, true, '10 join_private_room(code) 문자열 형태');
-  eq(g1.mx.opponent.profile.nickname, '방랑자', '10 프로필 없이 들어오면 기본 닉네임');
+  eq(g1.mx.opponent.profile.nickname, '타임Y', '10 프로필 없이 들어와도 계정 닉네임');
   eq([g1.mx.turnMs, g1.mx.graceMs], [250, 400], '10 match_found 가 시간 규칙을 알려 준다');
   const first = await g1.x.waitFor('state_update', (p) => p.reason === 'start');
   const timeout = await g1.x.waitFor('state_update', (p) => p.reason === 'timeout', 1500);
@@ -247,236 +724,15 @@ async function phase2() {
   await server.stop();
 }
 
-async function phase3() {
-  const dir = mkdtempSync(join(tmpdir(), 'lastchamber-users-'));
-  const file = join(dir, 'users.json');
-  const server = createGameServer({ quiet: true, onError, userDataFile: file, userSaveDelayMs: 20 });
-  const port = await server.start(0, '127.0.0.1');
-  const idA = randomUUID();
-  const idB = randomUUID();
-  const meA = { userId: idA, nickname: '총잡이' };
 
-  // 14. 로그인: handshake auth 로 등록 · hello 로 서버 전적 · 규칙에 안 맞으면 거절 (연결은 끊지 않는다)
-  const A = await client(port, meA);
-  const B = await client(port, { userId: idB, nickname: 'Ace_7' });
-  eq(server.stats().users, 2, '14 handshake auth 로 유저 2명 등록');
-  eq(server.stats().storage, 'file', '14 /healthz: Supabase 키가 없으면 파일 저장');
-  eq(await A.call('hello', meA), { ok: true, user: { nickname: '총잡이', wins: 0, losses: 0, games: 0, streak: 0, maxStreak: 0, mmr: 1000 } }, '14 hello → 서버에 기록된 내 전적');
-  eq((await A.call('hello', { userId: idA, nickname: '총 잡이' })).error, 'INVALID_NICKNAME', '14 공백이 든 닉네임은 거절');
-  eq((await A.call('hello', { userId: idA, nickname: '총' })).error, 'INVALID_NICKNAME', '14 1자 닉네임은 거절');
-  eq((await A.call('hello', { userId: idA, nickname: '열한글자짜리닉네임이요' })).error, 'INVALID_NICKNAME', '14 11자 닉네임은 거절');
-  eq((await A.call('hello', { userId: idA, nickname: 'ㅤㅤ' })).error, 'INVALID_NICKNAME', '14 보이지 않는 채움 문자 닉네임은 거절');
-  eq((await A.call('hello', { userId: 'not-a-uuid', nickname: '총잡이' })).error, 'BAD_REQUEST', '14 UUID 가 아닌 유저 ID 는 거절');
-  const C = await client(port, { userId: 'x', nickname: '익명' }); // 틀린 auth → 익명으로 연결
-  ok(C.socket.connected && server.stats().users === 2, '14 틀린 auth 는 익명 소켓으로 받고 기록하지 않는다');
-
-  // 랭킹전(무작위 매칭 '무료 테이블') 한 판 잡기 — 이미 본 방 코드는 건너뛴다
-  const seenCodes = new Set();
-  const queueMatch = async (X, Y, profileX = {}, profileY = {}) => {
-    await X.call('join_queue', { tier: 'free', profile: profileX });
-    await Y.call('join_queue', { tier: 'free', profile: profileY });
-    const mX = await X.waitFor('match_found', (p) => p.mode === 'queue' && !seenCodes.has(p.code));
-    seenCodes.add(mX.code);
-    return [mX, await Y.waitFor('match_found', (p) => p.code === mX.code)];
-  };
-
-  // 15. 랭킹전(무작위 매칭): 상대에게는 서버가 확인한 닉네임 (프로필로 다른 이름을 보내도) · 유저 ID 는 상대에게 가지 않는다 · 판이 끝나면 서버 전적 기록
-  const [mA, mB] = await queueMatch(A, B, { nickname: '가짜이름', mmr: 1200 }, { nickname: 'Ace_7', mmr: 1000 });
-  eq([mA.mode, mA.ranked, mB.ranked], ['queue', true, true], '15 무작위 매칭 = 랭킹전 (match_found.ranked)');
-  eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname], ['총잡이', 'Ace_7'], '15 상대 이름표에는 로그인한 닉네임');
-  ok(![mA, mB].some((m) => JSON.stringify(m).includes(idA) || JSON.stringify(m).includes(idB)), '15 유저 ID 는 match_found 어디에도 실리지 않는다');
-  const [overA, overB] = [A.waitFor('game_over', (p) => p.code === mA.code), B.waitFor('game_over', (p) => p.code === mA.code)];
-  await B.call('leave_room');
-  const [goA, goB] = await Promise.all([overA, overB]);
-  eq(goA.record, { nickname: '총잡이', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, '15 승자: 1승 · 1연승 · MMR +25');
-  eq(goB.record, { nickname: 'Ace_7', wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 }, '15 패자: 1패 · 연승 0 · MMR −20');
-  eq([goA.ranked, goA.mmrDelta, goB.ranked, goB.mmrDelta], [true, 25, true, -20], '15 game_over: 랭킹전 · 서버가 기록한 이번 판 MMR 변동');
-
-  // 15-b. 친선전(방 코드 대전): 끝까지 가도 서버 MMR · 전적 · 연승은 그대로 (지인끼리 점수 몰아주기 방지)
-  const friendly = await A.call('create_private_room', { profile: {} });
-  await B.call('join_private_room', friendly.code);
-  const [fA] = await Promise.all([A.waitFor('match_found', (p) => p.code === friendly.code), B.waitFor('match_found', (p) => p.code === friendly.code)]);
-  eq([fA.mode, fA.ranked], ['private', false], '15 방 코드 대전 = 친선전 (ranked: false)');
-  const [fOverA, fOverB] = [A.waitFor('game_over', (p) => p.code === friendly.code), B.waitFor('game_over', (p) => p.code === friendly.code)];
-  await A.call('leave_room'); // A 항복 → B 승
-  const [fgA, fgB] = await Promise.all([fOverA, fOverB]);
-  eq([fgA.ranked, 'mmrDelta' in fgA, fgA.record?.mmr, fgA.record?.losses, fgB.youWon, fgB.record?.mmr, fgB.record?.wins], [false, false, 1025, 0, true, 980, 0], '15 친선전 결과는 서버 MMR · 전적에 넣지 않는다');
-
-  // 16. 익명 상대와의 랭킹전은 로그인한 쪽만 · 같은 유저끼리(창 두 개) 둔 판은 세지 않는다
-  const [vsAnon] = await queueMatch(A, C);
-  const [overA2, overC] = [A.waitFor('game_over', (p) => p.code === vsAnon.code), C.waitFor('game_over', (p) => p.code === vsAnon.code)];
-  await C.call('leave_room');
-  const [goA2, goC] = await Promise.all([overA2, overC]);
-  eq([goA2.record?.wins, 'record' in goC], [2, false], '16 익명 상대 — 로그인한 쪽만 기록되고 익명에게는 record 가 없다');
-  const A2 = await client(port, meA);
-  const [self] = await queueMatch(A, A2);
-  const overSelf = A.waitFor('game_over', (p) => p.code === self.code);
-  await A2.call('leave_room');
-  eq((await overSelf).record, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '16 같은 유저끼리 둔 판은 전적에 넣지 않는다');
-
-  // 17. 닉네임 변경 (hello) · 대기열 · 판 도중에는 다른 유저 ID 로 못 바꾼다 · 랭킹
-  eq((await B.call('hello', { userId: idB, nickname: '에이스' })).user, { nickname: '에이스', wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 }, '17 hello 로 닉네임 변경 — 전적은 그대로');
-  const board = await A.call('get_leaderboard');
-  eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '총잡이', 1050, true], [2, '에이스', 980, false]], '17 get_leaderboard: mmr 내림차순 · 내 줄 표시');
-  eq([board.me?.nickname, board.me?.mmr], ['총잡이', 1050], '17 get_leaderboard: 내 전적');
-  ok(!JSON.stringify(board).includes(idA) && !JSON.stringify(board).includes(idB) && !JSON.stringify(board).includes('user_id'), '17 랭킹 응답에 유저 ID 가 없다');
-  eq((await C.call('get_leaderboard')).me, null, '17 익명 소켓은 내 전적 없이 랭킹만');
-  const idD = randomUUID();
-  const D = await client(port, { userId: idD, nickname: '구경꾼' }); // 로비에만 들렀다 간 계정 (랭킹전 0판 · 1000점)
-  const boardD = await D.call('get_leaderboard');
-  eq([boardD.top.map((r) => r.nickname), boardD.me?.mmr], [['총잡이', '에이스'], 1000], '17 TOP 10 은 랭킹전 1판 이상만 — 0판(1000점) 계정은 빠지고 내 전적으로만');
-  await B.call('join_queue', { tier: 'free', profile: {} });
-  eq((await B.call('hello', { userId: randomUUID(), nickname: '다른사람' })).error, 'ALREADY_IN_ROOM', '17 대기 중에는 다른 유저 ID 로 바꿀 수 없다');
-  await B.call('leave_queue');
-
-  // 18. 저장 · 복원: 서버를 닫으면 파일에 쓰고, 다시 켜면 이어서 읽는다
-  await server.stop();
-  const saved = JSON.parse(readFileSync(file, 'utf8'));
-  eq(saved.users.map((u) => [u.nickname, u.wins, u.losses]).sort(), [['구경꾼', 0, 0], ['에이스', 0, 1], ['총잡이', 2, 0]].sort(), '18 파일에 바뀐 닉네임 · 전적 저장');
-  const again = createGameServer({ quiet: true, onError, userDataFile: file });
-  const port2 = await again.start(0, '127.0.0.1');
-  const back = await client(port2, meA);
-  eq((await back.call('hello', meA)).user, { nickname: '총잡이', wins: 2, losses: 0, games: 2, streak: 2, maxStreak: 2, mmr: 1050 }, '18 재시작 뒤에도 서버 전적 유지');
-  eq(again.stats().users, 3, '18 재시작 뒤 유저 수');
-  await again.stop();
-  rmSync(dir, { recursive: true, force: true });
-}
-
-// Supabase 흉내 (players 테이블 하나): from().select().eq().maybeSingle() · .order().limit() · upsert(row) 만
-// pinColumn: false 면 pin_hash 컬럼이 아직 없는 테이블 (PIN_SQL 실행 전) · pin_hash 가 있는 행끼리는 닉네임이 겹치면 23505 (unique index 흉내)
-function fakeSupabase(rows = [], { pinColumn = true } = {}) {
-  const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
-  const calls = [];
-  const noColumn = { data: null, error: { code: '42703', message: 'column players.pin_hash does not exist' } };
-  const orFilter = (expr) => { // PostgREST or 필터 'wins.gt.0,losses.gt.0' 중 gt · eq 만
-    const conds = expr.split(',').map((part) => {
-      const [col, op, val] = part.split('.');
-      return (r) => (op === 'gt' ? r[col] > Number(val) : op === 'eq' ? String(r[col]) === val : false);
-    });
-    return (r) => conds.some((f) => f(r));
-  };
-  const query = (filters = [], sorts = [], lim = Infinity, cols = '') => {
-    const bad = !pinColumn && cols.includes('pin_hash');
-    const run = () => {
-      const out = [...table.values()].filter((r) => filters.every((f) => f(r)));
-      for (const [c, asc] of [...sorts].reverse()) out.sort((a, b) => (asc ? a[c] - b[c] : b[c] - a[c]));
-      return out.slice(0, lim).map((r) => ({ ...r }));
-    };
-    const next = (more, sortMore = [], n = lim) => query([...filters, ...more], [...sorts, ...sortMore], n, cols);
-    return {
-      eq: (c, v) => next([(r) => r[c] === v]),
-      not: (c, op, v) => next([(r) => !(op === 'is' && v === null ? r[c] == null : r[c] === v)]),
-      or: (expr) => { calls.push(`or:${expr}`); return next([orFilter(expr)]); },
-      order: (c, o = {}) => next([], [[c, o.ascending !== false]]),
-      limit: (n) => next([], [], n),
-      maybeSingle: async () => (bad ? noColumn : { data: run()[0] ?? null, error: null }),
-      then: (res, rej) => Promise.resolve(bad ? noColumn : { data: run(), error: null }).then(res, rej),
-    };
-  };
-  return {
-    table,
-    calls,
-    addPinColumn: () => { pinColumn = true; }, // PIN_SQL 을 실행한 것처럼
-    from: () => ({
-      select: (cols = '*') => { calls.push('select'); return query([], [], Infinity, cols); },
-      upsert: async (row) => {
-        calls.push('upsert');
-        if ('pin_hash' in row && !pinColumn) return noColumn;
-        const merged = { ...table.get(row.user_id), ...row };
-        const clash = merged.pin_hash && [...table.values()].some((r) => r.user_id !== row.user_id && r.pin_hash && r.nickname === merged.nickname);
-        if (clash) return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "players_nickname_pin_key"' } };
-        table.set(row.user_id, merged);
-        return { data: null, error: null };
-      },
-    }),
-  };
-}
-
-async function phase4() {
-  const veteran = randomUUID();
-  const rookie = randomUUID();
-  const db = fakeSupabase([{ user_id: veteran, nickname: '고수', wins: 40, losses: 10, streak: 3, max_streak: 9, mmr: 1600 }]);
-  const server = createGameServer({ quiet: true, onError, supabaseClient: db });
-  const port = await server.start(0, '127.0.0.1');
-
-  // 19. 접속/로그인: 있으면 DB 값을 그대로, 없으면 기본값으로 upsert
-  const V = await client(port, { userId: veteran, nickname: '고수' });
-  const R = await client(port, { userId: rookie, nickname: '신입' });
-  eq((await V.call('hello', { userId: veteran, nickname: '고수' })).user, { nickname: '고수', wins: 40, losses: 10, games: 50, streak: 3, maxStreak: 9, mmr: 1600 }, '19 Supabase: 기존 유저는 DB 전적을 불러온다');
-  await R.call('hello', { userId: rookie, nickname: '신입' });
-  eq(db.table.get(rookie), { user_id: rookie, nickname: '신입', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }, '19 Supabase: 없는 유저는 기본값으로 upsert');
-  eq([(await R.call('get_leaderboard')).top.map((r) => r.nickname), db.calls.includes('or:wins.gt.0,losses.gt.0')], [['고수'], true], '19 TOP 10 쿼리: wins + losses > 0 — 로비만 들른 0판 유저는 빠진다');
-
-  // 20-a. 친선전(방 코드)은 끝까지 가도 DB 를 건드리지 않는다
-  const before = JSON.stringify([db.table.get(veteran), db.table.get(rookie)]);
-  const friendly = await V.call('create_private_room', { profile: {} });
-  await R.call('join_private_room', friendly.code);
-  await Promise.all([V.waitFor('match_found', (p) => p.code === friendly.code), R.waitFor('match_found', (p) => p.code === friendly.code)]);
-  const friendlyOver = R.waitFor('game_over', (p) => p.code === friendly.code);
-  await V.call('leave_room');
-  eq([(await friendlyOver).ranked, (await friendlyOver).youWon], [false, true], '20 친선전 game_over: ranked false');
-  await server.users.flush();
-  eq(JSON.stringify([db.table.get(veteran), db.table.get(rookie)]), before, '20 Supabase: 친선전 결과는 players 행을 바꾸지 않는다');
-
-  // 20. 랭킹전(무작위 매칭) 승/패 확정 → DB 갱신 (승자 wins+1 · streak+1 · max_streak · mmr+25 / 패자 losses+1 · streak 0 · mmr−20)
-  await V.call('join_queue', { tier: 'free', profile: {} });
-  await R.call('join_queue', { tier: 'free', profile: {} });
-  const ranked = await R.waitFor('match_found', (p) => p.mode === 'queue');
-  await V.waitFor('match_found', (p) => p.code === ranked.code);
-  const over = R.waitFor('game_over', (p) => p.code === ranked.code);
-  await V.call('leave_room'); // 고수가 나감 → 신입 부전승
-  eq([(await over).record?.mmr, (await over).mmrDelta], [1025, 25], '20 game_over 에 갱신된 MMR · 변동');
-  await server.users.flush();
-  eq([db.table.get(rookie).wins, db.table.get(rookie).streak, db.table.get(rookie).max_streak, db.table.get(rookie).mmr], [1, 1, 1, 1025], '20 Supabase: 승자 행 갱신');
-  eq([db.table.get(veteran).losses, db.table.get(veteran).streak, db.table.get(veteran).max_streak, db.table.get(veteran).mmr], [11, 0, 9, 1580], '20 Supabase: 패자 행 갱신 (최대 연승은 유지)');
-
-  // 21. get_leaderboard 는 DB 에서 mmr 내림차순
-  const board = await R.call('get_leaderboard');
-  eq(board.top.map((r) => [r.rank, r.nickname, r.mmr, r.isMe]), [[1, '고수', 1580, false], [2, '신입', 1025, true]], '21 Supabase: TOP 10 mmr 내림차순 · 내 줄');
-  eq(board.me?.wins, 1, '21 Supabase: 내 전적');
-
-  // 23. 로비에 들어올 때마다 동기화 — hello 응답이 오는 시점에는 이미 DB 에 써져 있다
-  await V.call('hello', { userId: veteran, nickname: '고수왕' });
-  eq([db.table.get(veteran).nickname, db.table.get(veteran).mmr], ['고수왕', 1580], '23 기존 유저: hello 응답 전에 닉네임 갱신 (전적은 그대로)');
-  db.table.delete(rookie); // 대시보드에서 행을 지운 경우
-  const again = await client(port, { userId: rookie, nickname: '신입' });
-  eq((await again.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1025, '23 재접속 hello → 최신 전적');
-  eq([db.table.get(rookie)?.nickname, db.table.get(rookie)?.mmr], ['신입', 1025], '23 없어진 행은 접속하자마자 다시 만든다');
-
-  // 24. register_player { user_id, nickname } — upsert 가 끝난 뒤 내 전적 + TOP 10 으로 답한다
-  const newbie = randomUUID();
-  const N = await client(port); // handshake auth 없이 이벤트로만 등록
-  const reg = await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
-  eq([reg.ok, reg.me?.nickname, reg.me?.mmr, reg.top?.length, reg.top?.some((r) => r.nickname === '등록왕')], [true, '등록왕', 1000, 2, false], '24 register_player → 내 전적 + TOP 10 (랭킹전 0판이라 순위에는 아직 없음)');
-  eq(db.table.get(newbie)?.nickname, '등록왕', '24 응답이 올 때 이미 players 에 upsert 되어 있다');
-  const upserts = db.calls.filter((c) => c === 'upsert').length;
-  await N.call('register_player', { user_id: newbie, nickname: '등록왕' });
-  eq(db.calls.filter((c) => c === 'upsert').length, upserts + 1, '24 다시 등록해도 upsert 한다');
-  eq((await N.call('register_player', { nickname: '아이디없음' })).error, 'BAD_REQUEST', '24 user_id 가 없으면 거절');
-  eq([server.stats().storage, server.stats().dbOk], ['supabase', true], '24 /healthz: 저장 방식 · DB 상태');
-  await server.stop();
-
-  // 22. DB 연결이 실패하면 메모리로 계속 돈다
-  const errors = [];
-  const broken = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: Promise.reject(new Error('no network')) });
-  const port2 = await broken.start(0, '127.0.0.1');
-  const solo = await client(port2, { userId: rookie, nickname: '신입' });
-  eq((await solo.call('hello', { userId: rookie, nickname: '신입' })).user?.mmr, 1000, '22 Supabase 연결 실패 → 메모리 폴백');
-  ok((await solo.call('get_leaderboard')).ok && errors.length === 1, `22 오류는 한 번만 알리고 랭킹은 메모리에서 (${errors.map((e) => e.message).join(' | ')})`);
-  eq(broken.stats().storage, 'memory', '22 /healthz: 메모리로 동작 중');
-  await broken.stop();
-}
-
-// 실제 supabase-js + 가짜 PostgREST, 전역 WebSocket 이 없는 Node 18/20 을 흉내낸다
-// (예전에는 createClient 가 'native WebSocket not found' 예외를 던져 서버가 메모리로 떨어지고 players 에 아무것도 안 들어갔다)
-// ───────── Phase 6: 방 격리 ─────────
 const IN_GAME_EVENTS = ['match_found', 'state_update', 'game_over', 'opponent_status', 'receive_emote', 'room_closed', 'session_replaced'];
 
 async function phase6() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   const channelSize = (code) => server.io.sockets.adapter.rooms.get(roomChannel(code))?.size ?? 0;
-  const [A, B, C, D, E, F, G] = await Promise.all(Array.from({ length: 7 }, () => client(port)));
+  const [A, B, C, D, E, F] = await Promise.all(Array.from({ length: 6 }, () => player(port)));
+  const G = await client(port); // 손님 (로비만)
 
   // 방 1 · 방 2 = 무작위 매칭(일반 테이블) 두 판이 동시에, 방 3 = 친구 방 코드
   await A.call('join_queue', { tier: 'free', profile: {} });
@@ -537,197 +793,7 @@ async function phase6() {
   await server.stop();
 }
 
-// ───────── Phase 7 · 8: 닉네임 + PIN 계정 ─────────
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const apiOf = (port) => async (route, body, { origin, raw } = {}) => {
-  const res = await fetch(`http://127.0.0.1:${port}/api/${route}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) },
-    body: raw ?? JSON.stringify(body),
-  });
-  const text = await res.text();
-  return { status: res.status, raw: text, ...JSON.parse(text) };
-};
 
-/** 로그인한 X 가 익명 상대와 랭킹전 한 판을 이긴다 (상대가 나감) → 서버 전적 1승 */
-async function winRanked(port, X) {
-  const foe = await client(port);
-  await X.call('join_queue', { tier: 'free', profile: {} });
-  await foe.call('join_queue', { tier: 'free', profile: {} });
-  X.won ??= new Set();
-  const m = await X.waitFor('match_found', (p) => p.mode === 'queue' && !X.won.has(p.code));
-  X.won.add(m.code);
-  const over = X.waitFor('game_over', (p) => p.code === m.code);
-  await foe.call('leave_room');
-  return over;
-}
-
-async function phase7() {
-  const server = createGameServer({ quiet: true, onError, pinLimits: { maxFails: 3, lockMs: 1000, maxPerIp: 500 } });
-  const port = await server.start(0, '127.0.0.1');
-  const api = apiOf(port);
-
-  // 27. 처음 보는 닉네임 → 서버가 user_id 를 만든다
-  const first = await api('login', { nickname: '유동현', pin: '1234' });
-  eq([first.status, first.ok, first.created, UUID.test(first.user_id), first.me?.mmr], [200, true, true, true, 1000], '27 새 닉네임 + PIN → 서버가 새 user_id 발급');
-  const A = await client(port, { userId: first.user_id, nickname: '유동현' });
-  eq((await winRanked(port, A)).record?.wins, 1, '27 그 계정으로 랭킹전 1승');
-  const usersBefore = server.stats().users;
-
-  // 28. 다른 기기(같은 닉네임 + 같은 PIN, user_id 없음) → 같은 계정 · 전적 그대로 · 새 행 없음
-  const again = await api('login', { nickname: '유동현', pin: '1234' });
-  eq([again.status, again.recovered, again.created, again.user_id === first.user_id, again.me?.wins, again.me?.mmr], [200, true, false, true, 1, 1025], '28 닉네임 + PIN 이 맞으면 기존 user_id · MMR · 전적을 그대로 돌려준다');
-  eq(server.stats().users, usersBefore, '28 복구할 때 새 계정(행)을 만들지 않는다');
-
-  // 29. PIN 오답 → NICKNAME_TAKEN, 여러 번 틀리면 잠금 (맞는 PIN 도 잠시 막힌다)
-  const wrong = await api('login', { nickname: '유동현', pin: '0000' });
-  eq([wrong.status, wrong.error], [409, 'NICKNAME_TAKEN'], '29 같은 닉네임 · 다른 PIN → 409 NICKNAME_TAKEN (중복 생성 없음)');
-  await api('login', { nickname: '유동현', pin: '0001' });
-  const lockedOut = await api('login', { nickname: '유동현', pin: '0002' });
-  eq([lockedOut.status, lockedOut.error, lockedOut.retryAfterSec > 0], [429, 'PIN_LOCKED', true], '29 3번 틀리면 잠금');
-  eq((await api('login', { nickname: '유동현', pin: '1234' })).error, 'PIN_LOCKED', '29 잠긴 동안은 맞는 PIN 도 막는다 (무차별 대입 방지)');
-  eq(server.stats().users, usersBefore, '29 틀린 시도로는 행이 늘지 않는다');
-
-  // 30. 입력 형식
-  eq([(await api('login', { nickname: '새사람', pin: '12a4' })).error, (await api('login', { nickname: '새사람', pin: '123' })).error, (await api('login', { nickname: '새사람', pin: 1234 })).error],
-    ['INVALID_PIN', 'INVALID_PIN', 'INVALID_PIN'], '30 PIN 은 4자리 숫자 문자열만');
-  eq([(await api('login', { nickname: '공 백', pin: '1234' })).status, (await api('login', null, { raw: '{broken' })).error], [400, 'BAD_REQUEST'], '30 닉네임 규칙 · 깨진 JSON → 400');
-
-  // 31. PIN 으로 등록된 닉네임은 다른 user_id 가 접속 · 변경으로 못 쓴다
-  const X = await client(port);
-  eq((await X.call('register_player', { user_id: randomUUID(), nickname: '유동현' })).error, 'NICKNAME_TAKEN', '31 남의 PIN 닉네임으로 register_player → NICKNAME_TAKEN');
-  const other = await api('login', { nickname: '다른사람', pin: '5555' });
-  eq((await api('rename', { user_id: other.user_id, nickname: '유동현' })).error, 'NICKNAME_TAKEN', '31 남의 PIN 닉네임으로 변경 → 409');
-  const renamed = await api('rename', { user_id: first.user_id, nickname: '동현2' });
-  eq([renamed.ok, renamed.me?.wins], [true, 1], '31 내 계정 닉네임 변경 (전적 그대로)');
-  eq((await api('login', { nickname: '동현2', pin: '1234' })).user_id, first.user_id, '31 바뀐 닉네임 + 같은 PIN 으로 같은 계정');
-  await sleep(1050); // 29 에서 걸린 잠금이 풀린 뒤
-  const freed = await api('login', { nickname: '유동현', pin: '9999' });
-  ok(freed.created && freed.user_id !== first.user_id, '31 비워진 옛 닉네임은 새 계정이 쓸 수 있다');
-
-  // 32. PIN 없는 예전 계정: 전적이 있으면 다른 기기에서 못 가져가고, 그 기기(같은 user_id)에서는 PIN 을 붙인다
-  const legacyId = randomUUID();
-  const L = await client(port);
-  await L.call('register_player', { user_id: legacyId, nickname: '옛사람' });
-  await winRanked(port, L);
-  const steal = await api('login', { nickname: '옛사람', pin: '4321' });
-  eq([steal.status, steal.error], [409, 'NICKNAME_IN_USE'], '32 전적 있는 예전 계정은 다른 기기에서 닉네임만으로 못 가져간다');
-  const secured = await api('login', { nickname: '옛사람', pin: '4321', user_id: legacyId });
-  eq([secured.ok, secured.secured, secured.user_id, secured.me?.wins], [true, true, legacyId, 1], '32 그 기기(같은 user_id)에서 PIN 설정 → 같은 계정에 PIN');
-  eq((await api('login', { nickname: '옛사람', pin: '4321' })).user_id, legacyId, '32 이제 다른 기기에서도 닉네임 + PIN 으로 복구');
-  const orphanId = randomUUID();
-  const O = await client(port);
-  await O.call('register_player', { user_id: orphanId, nickname: '빈이름' }); // 전적 없는 빈 예전 행
-  const taken = await api('login', { nickname: '빈이름', pin: '1111' });
-  ok(taken.created && taken.user_id !== orphanId, '32 전적 없는 빈 예전 행뿐이면 새 계정으로 (빈 행은 순위에도 안 나온다)');
-  eq((await O.call('register_player', { user_id: orphanId, nickname: '빈이름' })).error, 'NICKNAME_TAKEN', '32 그 뒤 빈 행의 기기는 닉네임 + PIN 으로 다시 로그인해야 한다');
-
-  // 33. PIN 원문은 저장하지 않는다
-  const stored = server.users.get(first.user_id).pinHash;
-  ok(/^s1\$/.test(stored) && !stored.includes('1234'), '33 서버에는 scrypt 해시만 (원문 없음)');
-  ok(!/pin/i.test(again.raw) && !/pin/i.test(JSON.stringify(await X.call('get_leaderboard'))), '33 응답 · 랭킹 어디에도 PIN · 해시가 실리지 않는다');
-
-  // 34. 같은 새 닉네임으로 동시에 5번 가입 → 계정은 하나
-  const burst = await Promise.all(Array.from({ length: 5 }, () => api('login', { nickname: '동시가입', pin: '7777' })));
-  eq([burst.filter((r) => r.created).length, new Set(burst.map((r) => r.user_id)).size], [1, 1], '34 동시 가입 → 계정 1개 (나머지는 같은 계정 복구)');
-
-  // 35. CORS: 앱 출처만
-  const pre = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'OPTIONS', headers: { Origin: 'capacitor://localhost', 'Access-Control-Request-Method': 'POST' } });
-  const evil = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: JSON.stringify({ nickname: '외부', pin: '1234' }) });
-  eq([pre.status, pre.headers.get('access-control-allow-origin')], [204, 'capacitor://localhost'], '35 앱 출처 preflight 허용');
-  eq(evil.headers.get('access-control-allow-origin'), null, '35 다른 출처에는 CORS 헤더가 없어 브라우저가 응답을 읽지 못한다');
-  await server.stop();
-}
-
-async function phase8() {
-  const legacyRich = randomUUID();
-  const claimedId = randomUUID();
-  const db = fakeSupabase([
-    { user_id: randomUUID(), nickname: '중복', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 },
-    { user_id: legacyRich, nickname: '중복', wins: 4, losses: 1, streak: 2, max_streak: 3, mmr: 1080 },
-    { user_id: randomUUID(), nickname: '중복', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 },
-    { user_id: claimedId, nickname: '선점', wins: 1, losses: 0, streak: 1, max_streak: 1, mmr: 1025, pin_hash: await hashPin('2580') },
-  ]);
-  const server = createGameServer({ quiet: true, onError, supabaseClient: db });
-  const port = await server.start(0, '127.0.0.1');
-  const api = apiOf(port);
-  await sleep(50); // 시작할 때 PIN 계정 목록 읽기
-  eq(server.stats().pinReady, true, '36 /healthz: pin_hash 컬럼 확인 → PIN 로그인 가능');
-  const S = await client(port);
-  eq((await S.call('register_player', { user_id: randomUUID(), nickname: '선점' })).error, 'NICKNAME_TAKEN', '36 시작할 때 읽은 PIN 계정 닉네임은 다른 user_id 가 못 쓴다');
-  eq((await api('login', { nickname: '선점', pin: '2580' })).me?.mmr, 1025, '36 DB 의 PIN 계정 복구 (전적 그대로)');
-
-  const rows = db.table.size;
-  const secured = await api('login', { nickname: '중복', pin: '1234', user_id: legacyRich });
-  eq([secured.user_id, secured.me?.wins, db.table.size], [legacyRich, 4, rows], '36 중복 행이 있던 닉네임: 이 기기의 행에 PIN — 새 행 없음');
-  ok(/^s1\$/.test(db.table.get(legacyRich).pin_hash) && !db.table.get(legacyRich).pin_hash.includes('1234'), '36 Supabase 에는 pin_hash(해시)만');
-  for (let i = 0; i < 3; i += 1) await api('login', { nickname: '중복', pin: '1234' });
-  eq(db.table.size, rows, '36 다른 기기에서 여러 번 들어와도 행이 늘지 않는다 (같은 user_id 복구)');
-  const fresh = await api('login', { nickname: '새얼굴', pin: '2468' });
-  await api('login', { nickname: '새얼굴', pin: '2468' });
-  eq([db.table.size, db.table.get(fresh.user_id)?.nickname, Boolean(db.table.get(fresh.user_id)?.pin_hash)], [rows + 1, '새얼굴', true], '36 새 닉네임 → 행 1개 (다시 들어와도 그대로)');
-  await server.stop();
-
-  // pin_hash 컬럼이 없는 테이블 (PIN_SQL 실행 전): 서버는 돌고, PIN 로그인만 안내와 함께 막는다
-  const errors = [];
-  const oldDb = fakeSupabase([], { pinColumn: false });
-  const old = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: oldDb, pinRecheckMs: 0 });
-  const oldPort = await old.start(0, '127.0.0.1');
-  await sleep(50);
-  const blocked = await apiOf(oldPort)('login', { nickname: '아무나', pin: '1234' });
-  eq([old.stats().pinReady, blocked.status, blocked.error], [false, 503, 'PIN_SETUP_REQUIRED'], '37 pin_hash 컬럼이 없으면 503 PIN_SETUP_REQUIRED');
-  ok(errors.some((e) => /alter table public\.players add column if not exists pin_hash/.test(e.message)), '37 서버 로그에 실행할 SQL 을 알려 준다');
-  const legacyClient = await client(oldPort);
-  eq((await legacyClient.call('register_player', { user_id: randomUUID(), nickname: '예전방식' })).ok, true, '37 그동안 예전 자동 로그인(register_player)은 그대로 된다');
-  oldDb.addPinColumn(); // 서버가 떠 있는 동안 SQL 실행
-  const afterSql = await apiOf(oldPort)('login', { nickname: '아무나', pin: '1234' });
-  eq([afterSql.status, afterSql.created, old.stats().pinReady], [200, true, true], '37 서버를 다시 켜지 않아도 SQL 실행 뒤 다음 로그인부터 PIN 계정이 된다');
-  await old.stop();
-}
-
-async function phase5() {
-  const rows = new Map();
-  const requests = [];
-  const boardQueries = []; // TOP 10 조회(GET, user_id 조건 없음)의 or 파라미터
-  const rest = http.createServer((req, res) => {
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
-      const url = new URL(req.url, 'http://x');
-      requests.push(`${req.method} ${url.pathname}`);
-      if (req.method === 'GET' && !url.searchParams.has('user_id')) boardQueries.push(url.searchParams.get('or'));
-      res.setHeader('Content-Type', 'application/json');
-      if (req.method === 'POST') {
-        for (const row of [].concat(JSON.parse(body))) rows.set(row.user_id, { ...rows.get(row.user_id), ...row });
-        res.statusCode = 201;
-        res.end();
-        return;
-      }
-      const id = url.searchParams.get('user_id')?.replace(/^eq\./, '');
-      res.end(JSON.stringify(id ? [rows.get(id)].filter(Boolean) : [...rows.values()].sort((a, b) => b.mmr - a.mmr)));
-    });
-  });
-  await new Promise((resolve) => rest.listen(0, '127.0.0.1', resolve));
-  const nativeWebSocket = globalThis.WebSocket;
-  delete globalThis.WebSocket;
-  const errors = [];
-  const server = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseUrl: `http://127.0.0.1:${rest.address().port}`, supabaseKey: 'test-service-role' });
-  const port = await server.start(0, '127.0.0.1');
-  try {
-    const id = randomUUID();
-    const C = await client(port);
-    const reg = await C.call('register_player', { user_id: id, nickname: '노드20' });
-    eq([reg.ok, server.stats().storage], [true, 'supabase'], `25 전역 WebSocket 이 없어도(Node 18/20) Supabase 클라이언트를 만든다 (${errors.map((e) => e.message.split('\n')[0]).join(' | ')})`);
-    eq([rows.get(id)?.nickname, rows.get(id)?.mmr], ['노드20', 1000], '25 실제 supabase-js 로 players 에 upsert');
-    ok(requests.some((r) => r.startsWith('POST /rest/v1/players')) && errors.length === 0, `25 PostgREST 요청: ${requests.join(', ')} · 오류 ${errors.length}건`);
-    eq([boardQueries.includes('(wins.gt.0,losses.gt.0)'), reg.top?.length], [true, 0], '25 TOP 10 요청에 wins + losses > 0 필터 (가짜 PostgREST 가 무시해도 서버가 한 번 더 거른다)');
-  } finally {
-    globalThis.WebSocket = nativeWebSocket;
-    await server.stop();
-    rest.closeAllConnections?.();
-    await new Promise((resolve) => rest.close(resolve));
-  }
-}
 
 try {
   await phase1();

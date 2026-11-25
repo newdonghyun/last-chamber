@@ -1,20 +1,25 @@
 /**
  * LAST CHAMBER - 방 · 판 관리 (server/index.js 에서 분리)
  *
- *   방(친구 초대 사설 방 · 매칭으로 맺어진 방)의 한살이를 맡는다:
+ *   방 3종의 한살이를 맡는다:
+ *     'public'  공개 방 — 방장이 만들면 로비 방 목록(publicRooms)에 보이고, 목록에서 누르면 바로 1:1 시작 (랭킹전)
+ *     'queue'   빠른 매칭 — matchmaker 가 같은 등급 2명을 맺어 준 방 (랭킹전)
+ *     'private' 친선 비밀방 — 목록에 보이지 않고 4자리 코드로만 들어온다 (친선전: MMR · 전적 미반영)
  *   · 생성 / 입장 / 재접속 토큰(rejoin_room) / 나가기 / 연결 끊김
  *   · 방마다 GameEngine 하나 — 서버 권위. 좌석(P1 · P2)은 서버가 소켓에 붙이고, 각자에게는 자기 시점의 상태와 로그만 보낸다
  *   · 20초 턴 타이머(0초가 되면 서버가 대신 격발) · 15초 연결 끊김 부전승 · 친구를 기다리는 방의 10분 만료 · 끝난 판 결과 60초 보관
  *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile) · 로그인한 소켓은 서버가 확인한 닉네임으로(profileOf)
- *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패 · 연승 · MMR)을 기록한다 (server/userStore.js) — 랭킹전(무작위 매칭)만. 친구 초대 방은 친선전이라 기록하지 않는다
+ *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패 · 연승 · MMR)을 기록한다 (server/userStore.js) — 랭킹전(공개 방 · 빠른 매칭)만. 친선 비밀방은 기록하지 않는다
  *     game_over 에 그 좌석의 record(현재 서버 전적) · ranked · mmrDelta(랭킹전에서 바뀐 MMR)로 알려 준다
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석, 등급별 대기열은 server/matchmaker.js.
  *
  *   전송 격리: 전체 방송(io.emit · socket.broadcast)은 쓰지 않는다. 인게임 이벤트는 좌석마다 따로(자기 시점 상태 — 투시경 같은 비공개 정보가 섞이지 않게),
  *             그 좌석의 소켓이 지금 이 방에 앉아 있을 때만 보내고(emitTo), 모든 이벤트에 방 코드(code)를 싣는다 → 클라이언트는 자기 방 코드가 아니면 버린다.
  *             방에 앉으면 Socket.io 방 채널(room:<code>)에 join, 판이 끝나거나 나가거나 방이 닫히면 leave.
+ *   로비 방 목록: 목록을 보는 소켓은 LOBBY_CHANNEL 에 들어 있다(server/index.js watch_rooms). 공개 방이 생기거나 · 시작되거나 · 닫히면 onRoomsChanged() →
+ *             index.js 가 그 채널에만 room_list 를 보낸다 (인게임 이벤트가 아니다). 방에 앉는 순간 그 소켓은 로비 채널에서 나간다.
  *   socket.data 약속:  where = null | { kind: 'queue', tier }(matchmaker 가 씀) | { kind: 'room', code }(여기서 씀) · lastEmote = 마지막 이모트 시각(ms)
- *                      user = null | { id, nickname } (server/index.js identifyUser 가 씀 — 로그인한 소켓)
+ *                      user = null | { id, nickname } (server/index.js 가 로그인 토큰을 확인한 뒤 씀 — 방 · 매칭은 로그인한 소켓만)
  */
 
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -24,7 +29,7 @@ import { GameEngine } from '../src/engine/gameEngine.js';
 
 export const TURN_MS = 20_000; // 턴 제한
 export const GRACE_MS = 15_000; // 연결이 끊긴 뒤 돌아올 수 있는 시간
-export const ROOM_TTL_MS = 10 * 60_000; // 친구를 기다리는 사설 방이 살아 있는 시간
+export const ROOM_TTL_MS = 10 * 60_000; // 상대를 기다리는 방(공개 · 비밀)이 살아 있는 시간
 export const RESULT_TTL_MS = 60_000; // 끝난 판의 결과를 늦게 돌아온 사람에게 다시 알려 줄 수 있는 시간
 /** createGameServer 의 설정(cfg) 중 이 파일이 읽는 값의 기본값 — options 로 덮어쓸 수 있다 (예: 테스트에서 turnMs: 250) */
 export const ROOM_DEFAULTS = Object.freeze({
@@ -42,8 +47,9 @@ const CODE_PATTERN = new RegExp(`^[${CODE_ALPHABET}]{4}$`);
 
 const rand = () => randomInt(2 ** 32) / 2 ** 32; // [0, 1)
 export const roomChannel = (code) => `room:${code}`; // Socket.io 방 채널 이름 (방에 앉은 소켓만 들어 있다)
-export const RANKED_MODE = 'queue'; // 랭킹전 = 무작위 매칭으로 맺어진 방만 ('private' 친구 방은 친선전)
-const isRanked = (room) => room.mode === RANKED_MODE;
+export const LOBBY_CHANNEL = 'lobby'; // 로비 방 목록을 보는 소켓들 (room_list 받는 곳)
+export const RANKED_MODES = Object.freeze(['queue', 'public']); // 랭킹전 = 빠른 매칭 · 공개 방 ('private' 친선 비밀방은 친선전)
+const isRanked = (room) => RANKED_MODES.includes(room.mode);
 const makeCode = () => Array.from({ length: 4 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
 const makeToken = () => randomBytes(16).toString('hex');
 const cleanCode = (raw) => {
@@ -97,8 +103,10 @@ export function cleanProfile(raw) {
  */
 export function profileOf(socket, raw) {
   const profile = cleanProfile(raw);
-  const nickname = socket?.data?.user?.nickname;
-  return nickname ? { ...profile, nickname } : profile;
+  const user = socket?.data?.user;
+  if (!user) return profile;
+  const rec = user.rec; // 로그인한 계정의 서버 기록 (닉네임 변경 · 판 결과가 바로 반영된 같은 객체)
+  return { ...profile, nickname: rec?.nickname ?? user.nickname, ...(Number.isFinite(rec?.mmr) ? { mmr: rec.mmr } : {}) }; // 이름 · MMR 은 서버 값
 }
 
 const EMOTE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
@@ -122,9 +130,10 @@ function validEmote(p) {
  *   log    quiet 을 지키는 로그 함수          guard  타이머 · 콜백의 예외가 프로세스를 죽이지 않게 감싸는 함수
  *   tiers  등급표 { free: { fee, prize }, ... } (matchmaker 의 QUEUE_TIERS) — 사설 방은 'free' 등급이다
  *   users  유저 저장소 (server/userStore.js createUserStore) — 없으면 서버 전적을 기록하지 않는다
+ *   onRoomsChanged()  공개 방 목록이 바뀌었을 때 (index.js 가 로비 채널에 room_list 를 보낸다)
  * 이벤트 처리 함수는 (socket, payload) → ack 로 돌려줄 { ok, ... } 를 반환한다 (소켓 이벤트와의 연결은 server/index.js).
  */
-export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) {
+export function createRoomManager({ io, cfg, log, guard, tiers, users = null, onRoomsChanged = () => {} }) {
   const rooms = new Map(); // code → room { code, mode, tier, status: 'waiting'|'playing'|'over', seats, engine, sent, turnTimer, turnSeq, deadline, ttlTimer, result }
 
   // ── 좌석 · 소켓 ──
@@ -141,7 +150,9 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
   const attach = (socket, room) => {
     socket.data.where = { kind: 'room', code: room.code };
     socket.join(roomChannel(room.code));
+    socket.leave(LOBBY_CHANNEL); // 방에 앉으면 로비 목록은 더 받지 않는다
   };
+  const listChanged = (room) => { if (room.mode === 'public') guard(() => onRoomsChanged()); };
   const release = (socket, code) => { // 이 방에 묶여 있을 때만 풀어 준다 (방 채널에서도 나간다 → 이전 방 이벤트를 더는 받지 않는다)
     const where = socket?.data.where;
     if (where?.kind !== 'room' || (code !== undefined && where.code !== code)) return;
@@ -177,6 +188,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     clearRoomTimers(room);
     rooms.delete(room.code);
     for (const seat of room.seats) release(socketOf(seat), room.code);
+    listChanged(room); // 공개 방이면 로비 목록에서 빠진다
   }
 
   // ── 판 진행 ──
@@ -293,6 +305,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     for (const seat of room.seats) emitTo(room, seat, 'match_found', matchPayload(room, seat, false));
     armTurn(room);
     broadcast(room, 'start');
+    listChanged(room); // 시작된 공개 방은 로비 목록에서 빠진다
     log('판 시작', room.code, room.mode, room.tier);
   }
 
@@ -301,18 +314,26 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
   }
 
   // ── 이벤트 처리 ──
-  function createPrivateRoom(socket, payload) {
+  /** 상대를 기다리는 방을 만든다 (mode: 'private' 친선 비밀방 | 'public' 공개 방) */
+  function openRoom(socket, payload, mode) {
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
     if (rooms.size >= cfg.maxRooms) return fail('SERVER_BUSY');
-    const room = newRoom('private', 'free');
+    const room = newRoom(mode, 'free');
     if (!room) return fail('SERVER_BUSY');
     room.seats.push(makeSeat('P1', socket, profileOf(socket, payload?.profile ?? payload)));
+    room.createdAt = Date.now();
     room.ttlTimer = setTimeout(() => guard(() => expireRoom(room)), cfg.roomTtlMs);
     room.ttlTimer.unref?.();
     attach(socket, room);
-    socket.emit('room_created', { code: room.code });
-    return { ok: true, code: room.code };
+    socket.emit('room_created', { code: room.code, mode });
+    listChanged(room); // 공개 방이면 로비 목록에 바로 보인다
+    return { ok: true, code: room.code, mode };
   }
+
+  /** 친선 비밀방 만들기 — 로비 목록에 보이지 않고 코드로만 들어온다 */
+  const createPrivateRoom = (socket, payload) => openRoom(socket, payload, 'private');
+  /** 공개 방 만들기 — 로비 방 목록에 보이고, 누르면 바로 시작 (랭킹전) */
+  const createPublicRoom = (socket, payload) => openRoom(socket, payload, 'public');
 
   function expireRoom(room) {
     if (room.status !== 'waiting') return;
@@ -326,12 +347,41 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     if (!code) return fail('ROOM_NOT_FOUND');
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
     const room = rooms.get(code);
-    if (!room || room.mode !== 'private') return fail('ROOM_NOT_FOUND'); // 매칭으로 만든 방은 코드로 들어올 수 없다
-    if (room.status !== 'waiting') return fail('ROOM_FULL');
-    room.seats.push(makeSeat('P2', socket, profileOf(socket, raw.profile)));
+    if (!room || room.mode !== 'private') return fail('ROOM_NOT_FOUND'); // 공개 방 · 매칭 방은 코드 입력으로 들어올 수 없다
+    return takeSeat(socket, room, raw.profile);
+  }
+
+  /** 로비 목록에서 공개 방을 눌렀다 → 바로 1:1 시작 */
+  function joinPublicRoom(socket, payload) {
+    const raw = typeof payload === 'string' ? { code: payload } : payload;
+    const code = cleanCode(raw?.code);
+    if (socket.data.where) return fail('ALREADY_IN_ROOM');
+    const room = code ? rooms.get(code) : undefined;
+    if (!room || room.mode !== 'public') return fail('ROOM_NOT_FOUND');
+    return takeSeat(socket, room, raw.profile);
+  }
+
+  /** 기다리는 방의 두 번째 자리에 앉혀 판을 시작한다 */
+  function takeSeat(socket, room, profile) {
+    if (room.status !== 'waiting' || room.seats.length >= 2) return fail('ROOM_FULL');
+    const host = room.seats[0];
+    if (host.userId && host.userId === socket.data.user?.id) return fail('OWN_ROOM'); // 같은 계정끼리(창 두 개)는 못 붙는다
+    room.seats.push(makeSeat('P2', socket, profileOf(socket, profile)));
     attach(socket, room);
     startGame(room);
-    return { ok: true, code };
+    return { ok: true, code: room.code, mode: room.mode };
+  }
+
+  /** 로비 방 목록: 상대를 기다리는 공개 방 (오래된 순) → [{ code, host, mmr, players, capacity, createdAt }] — 유저 ID 는 싣지 않는다 */
+  function publicRooms() {
+    return [...rooms.values()]
+      .filter((r) => r.mode === 'public' && r.status === 'waiting' && r.seats.length === 1)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((r) => {
+        const host = r.seats[0];
+        const mmr = (host.userId && users?.get(host.userId)?.mmr) ?? host.profile.mmr ?? 1000; // 서버 전적의 MMR (계정) — 없으면 프로필 값
+        return { code: r.code, host: host.profile.nickname, mmr, players: r.seats.length, capacity: 2, createdAt: r.createdAt };
+      });
   }
 
   /**
@@ -441,5 +491,5 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     rooms.clear();
   }
 
-  return { createPrivateRoom, joinPrivateRoom, startMatchedRoom, leaveRoom, rejoinRoom, gameAction, sendEmote, onDisconnect, stats, shutdown };
+  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, rejoinRoom, gameAction, sendEmote, onDisconnect, stats, shutdown };
 }
