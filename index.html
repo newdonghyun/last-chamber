@@ -407,7 +407,7 @@
             <span class="wallet-text"><small>BRASS</small><b id="wallet-amount">0</b></span>
             <span class="wallet-streak" id="wallet-streak" hidden></span>
           </div>
-          <button class="icon-btn account-btn" id="btn-account" type="button" aria-haspopup="dialog" aria-controls="account-modal" aria-label="계정 — 닉네임 변경 · 로그아웃" title="계정">
+          <button class="icon-btn account-btn" id="btn-account" type="button" aria-haspopup="dialog" aria-controls="account-modal" aria-label="계정 — 닉네임 변경 · PIN · 로그아웃" title="계정 · 닉네임 변경">
             <svg aria-hidden="true"><use href="#i-user"></use></svg>
           </button>
         </div>
@@ -776,14 +776,17 @@
       </div>
       <form class="login-form" id="login-form" method="dialog" autocomplete="off" novalidate>
         <label class="login-label" for="login-nick">NICKNAME · 닉네임 <span class="login-count" id="login-count" aria-hidden="true">0/10</span></label>
-        <input class="login-input" id="login-nick" name="nickname" type="text" maxlength="10" inputmode="text" enterkeyhint="go"
+        <input class="login-input" id="login-nick" name="nickname" type="text" maxlength="10" inputmode="text" enterkeyhint="next"
           spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="예: 방랑자" aria-describedby="login-msg" required />
+        <label class="login-label" for="login-pin">PIN · 숫자 4자리</label>
+        <input class="login-input login-pin" id="login-pin" name="pin" type="password" maxlength="4" inputmode="numeric" pattern="[0-9]*" enterkeyhint="go"
+          autocomplete="off" placeholder="••••" aria-describedby="login-msg" required />
         <p class="login-msg" id="login-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
         <button class="title-btn title-btn-play login-submit" id="login-submit" type="submit">
           <span class="title-btn-main">시작하기</span><span class="title-btn-sub">START</span>
         </button>
       </form>
-      <p class="login-note">회원가입 없이 바로 플레이 · 닉네임과 유저 ID는 이 기기에 저장되어 다음 접속부터 자동으로 로그인됩니다</p>
+      <p class="login-note">회원가입 없이 바로 플레이 · 처음이면 지금 정한 닉네임 + PIN으로 계정이 만들어지고, 다른 기기에서도 같은 닉네임 + PIN으로 전적을 이어 갑니다 · 이 기기에서는 다음 접속부터 자동으로 로그인됩니다</p>
     </div>
   </dialog>
 
@@ -805,8 +808,24 @@
           <b id="acct-name">방랑자</b>
           <small>유저 ID · <code id="acct-uid">--------</code></small>
         </div>
+        <button class="acct-edit" id="acct-edit" type="button" data-acct="edit" aria-expanded="false" aria-controls="acct-form">변경</button>
       </div>
-      <form class="nick-form acct-form" id="acct-form" method="dialog" autocomplete="off" novalidate>
+      <!-- 계정 PIN: 있으면 가려서 보여 주고(보기), 없으면(예전 계정) 여기서 정한다 — 다른 기기에서 닉네임 + PIN 으로 이 계정을 불러온다 -->
+      <div class="acct-pin" id="acct-pin">
+        <div class="acct-pin-row" id="acct-pin-show" hidden>
+          <span>복구 PIN</span><code id="acct-pin-value">••••</code>
+          <button class="acct-edit" type="button" data-acct="toggle-pin" aria-pressed="false">보기</button>
+        </div>
+        <form class="nick-form acct-pin-form" id="acct-pin-form" method="dialog" autocomplete="off" novalidate hidden>
+          <label for="acct-pin-input">PIN 설정 <small>숫자 4자리</small></label>
+          <div class="nick-row">
+            <input id="acct-pin-input" name="pin" type="password" maxlength="4" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="done" placeholder="••••" aria-describedby="acct-pin-msg" />
+            <button class="sk-btn sk-equip" type="submit">설정</button>
+          </div>
+        </form>
+        <p class="nick-msg" id="acct-pin-msg" role="status" aria-live="polite"></p>
+      </div>
+      <form class="nick-form acct-form" id="acct-form" method="dialog" autocomplete="off" novalidate hidden>
         <label for="acct-nick">닉네임 변경 <span class="acct-count" id="acct-count" aria-hidden="true">0/10</span></label>
         <div class="nick-row">
           <input id="acct-nick" name="nickname" type="text" maxlength="10" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" enterkeyhint="done" aria-describedby="acct-msg" />
@@ -816,7 +835,7 @@
       </form>
       <button class="acct-btn is-danger" id="acct-logout" type="button" data-acct="logout">로그아웃</button>
       <div class="acct-confirm" id="acct-confirm" role="alertdialog" aria-labelledby="acct-confirm-text" hidden>
-        <p id="acct-confirm-text">로그아웃하면 다음에 닉네임을 다시 입력해야 해요. 탄피 · 스킨 · 전적은 이 기기에 그대로 남아요.</p>
+        <p id="acct-confirm-text">로그아웃하면 다음에 닉네임과 PIN을 다시 입력해야 해요. 탄피 · 스킨 · 전적은 이 기기에 그대로 남아요.</p>
         <div class="acct-confirm-row">
           <button class="acct-btn" type="button" data-acct="cancel-logout">취소</button>
           <button class="acct-btn is-danger" type="button" data-acct="confirm-logout">로그아웃</button>

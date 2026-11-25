@@ -1,6 +1,8 @@
-// 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 5초 안에 끝난다.
+// 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 10초 안팎 (PIN 해시 · 잠금 대기 포함).
 //   Phase 1 (기본 서버, 클라이언트 2개): 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 무작위 매칭(pro) · 정적 파일
 //   Phase 2 (타이머를 줄인 서버): 20초 턴 타임아웃 강제 격발 · 연결 끊김 부전승 · 재접속 · 새 연결의 자리 인수
+//   Phase 7 (계정 · 메모리): 닉네임 + PIN 로그인 — 새 계정 · 복구 · 오답 잠금 · 남의 PIN 닉네임 차단 · 예전 계정에 PIN 붙이기 · 동시 가입 · PIN 원문 미저장 · CORS
+//   Phase 8 (계정 · Supabase 흉내): 중복 행이 늘지 않는다 · pin_hash 저장 · 시작할 때 PIN 계정 목록 · pin_hash 컬럼이 없으면 PIN_SETUP_REQUIRED
 //   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
 //   Phase 3 (유저 기록 파일을 쓰는 서버): 로그인(handshake auth · hello) · 닉네임 규칙 · 서버가 확인한 닉네임으로 상대에게 표시 · 서버 전적 기록 · 파일 저장/복원
 import http from 'node:http';
@@ -11,6 +13,7 @@ import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
 import { roomChannel } from '../server/roomManager.js';
+import { hashPin } from '../server/pin.js';
 
 const T0 = performance.now();
 let pass = 0;
@@ -340,9 +343,11 @@ async function phase3() {
 }
 
 // Supabase 흉내 (players 테이블 하나): from().select().eq().maybeSingle() · .order().limit() · upsert(row) 만
-function fakeSupabase(rows = []) {
+// pinColumn: false 면 pin_hash 컬럼이 아직 없는 테이블 (PIN_SQL 실행 전) · pin_hash 가 있는 행끼리는 닉네임이 겹치면 23505 (unique index 흉내)
+function fakeSupabase(rows = [], { pinColumn = true } = {}) {
   const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
   const calls = [];
+  const noColumn = { data: null, error: { code: '42703', message: 'column players.pin_hash does not exist' } };
   const orFilter = (expr) => { // PostgREST or 필터 'wins.gt.0,losses.gt.0' 중 gt · eq 만
     const conds = expr.split(',').map((part) => {
       const [col, op, val] = part.split('.');
@@ -350,27 +355,39 @@ function fakeSupabase(rows = []) {
     });
     return (r) => conds.some((f) => f(r));
   };
-  const query = (filters = [], sorts = [], lim = Infinity) => {
+  const query = (filters = [], sorts = [], lim = Infinity, cols = '') => {
+    const bad = !pinColumn && cols.includes('pin_hash');
     const run = () => {
       const out = [...table.values()].filter((r) => filters.every((f) => f(r)));
       for (const [c, asc] of [...sorts].reverse()) out.sort((a, b) => (asc ? a[c] - b[c] : b[c] - a[c]));
       return out.slice(0, lim).map((r) => ({ ...r }));
     };
+    const next = (more, sortMore = [], n = lim) => query([...filters, ...more], [...sorts, ...sortMore], n, cols);
     return {
-      eq: (c, v) => query([...filters, (r) => r[c] === v], sorts, lim),
-      or: (expr) => { calls.push(`or:${expr}`); return query([...filters, orFilter(expr)], sorts, lim); },
-      order: (c, o = {}) => query(filters, [...sorts, [c, o.ascending !== false]], lim),
-      limit: (n) => query(filters, sorts, n),
-      maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
-      then: (res, rej) => Promise.resolve({ data: run(), error: null }).then(res, rej),
+      eq: (c, v) => next([(r) => r[c] === v]),
+      not: (c, op, v) => next([(r) => !(op === 'is' && v === null ? r[c] == null : r[c] === v)]),
+      or: (expr) => { calls.push(`or:${expr}`); return next([orFilter(expr)]); },
+      order: (c, o = {}) => next([], [[c, o.ascending !== false]]),
+      limit: (n) => next([], [], n),
+      maybeSingle: async () => (bad ? noColumn : { data: run()[0] ?? null, error: null }),
+      then: (res, rej) => Promise.resolve(bad ? noColumn : { data: run(), error: null }).then(res, rej),
     };
   };
   return {
     table,
     calls,
+    addPinColumn: () => { pinColumn = true; }, // PIN_SQL 을 실행한 것처럼
     from: () => ({
-      select: () => { calls.push('select'); return query(); },
-      upsert: async (row) => { calls.push('upsert'); table.set(row.user_id, { ...table.get(row.user_id), ...row }); return { data: null, error: null }; },
+      select: (cols = '*') => { calls.push('select'); return query([], [], Infinity, cols); },
+      upsert: async (row) => {
+        calls.push('upsert');
+        if ('pin_hash' in row && !pinColumn) return noColumn;
+        const merged = { ...table.get(row.user_id), ...row };
+        const clash = merged.pin_hash && [...table.values()].some((r) => r.user_id !== row.user_id && r.pin_hash && r.nickname === merged.nickname);
+        if (clash) return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "players_nickname_pin_key"' } };
+        table.set(row.user_id, merged);
+        return { data: null, error: null };
+      },
     }),
   };
 }
@@ -520,6 +537,154 @@ async function phase6() {
   await server.stop();
 }
 
+// ───────── Phase 7 · 8: 닉네임 + PIN 계정 ─────────
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const apiOf = (port) => async (route, body, { origin, raw } = {}) => {
+  const res = await fetch(`http://127.0.0.1:${port}/api/${route}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) },
+    body: raw ?? JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, raw: text, ...JSON.parse(text) };
+};
+
+/** 로그인한 X 가 익명 상대와 랭킹전 한 판을 이긴다 (상대가 나감) → 서버 전적 1승 */
+async function winRanked(port, X) {
+  const foe = await client(port);
+  await X.call('join_queue', { tier: 'free', profile: {} });
+  await foe.call('join_queue', { tier: 'free', profile: {} });
+  X.won ??= new Set();
+  const m = await X.waitFor('match_found', (p) => p.mode === 'queue' && !X.won.has(p.code));
+  X.won.add(m.code);
+  const over = X.waitFor('game_over', (p) => p.code === m.code);
+  await foe.call('leave_room');
+  return over;
+}
+
+async function phase7() {
+  const server = createGameServer({ quiet: true, onError, pinLimits: { maxFails: 3, lockMs: 1000, maxPerIp: 500 } });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+
+  // 27. 처음 보는 닉네임 → 서버가 user_id 를 만든다
+  const first = await api('login', { nickname: '유동현', pin: '1234' });
+  eq([first.status, first.ok, first.created, UUID.test(first.user_id), first.me?.mmr], [200, true, true, true, 1000], '27 새 닉네임 + PIN → 서버가 새 user_id 발급');
+  const A = await client(port, { userId: first.user_id, nickname: '유동현' });
+  eq((await winRanked(port, A)).record?.wins, 1, '27 그 계정으로 랭킹전 1승');
+  const usersBefore = server.stats().users;
+
+  // 28. 다른 기기(같은 닉네임 + 같은 PIN, user_id 없음) → 같은 계정 · 전적 그대로 · 새 행 없음
+  const again = await api('login', { nickname: '유동현', pin: '1234' });
+  eq([again.status, again.recovered, again.created, again.user_id === first.user_id, again.me?.wins, again.me?.mmr], [200, true, false, true, 1, 1025], '28 닉네임 + PIN 이 맞으면 기존 user_id · MMR · 전적을 그대로 돌려준다');
+  eq(server.stats().users, usersBefore, '28 복구할 때 새 계정(행)을 만들지 않는다');
+
+  // 29. PIN 오답 → NICKNAME_TAKEN, 여러 번 틀리면 잠금 (맞는 PIN 도 잠시 막힌다)
+  const wrong = await api('login', { nickname: '유동현', pin: '0000' });
+  eq([wrong.status, wrong.error], [409, 'NICKNAME_TAKEN'], '29 같은 닉네임 · 다른 PIN → 409 NICKNAME_TAKEN (중복 생성 없음)');
+  await api('login', { nickname: '유동현', pin: '0001' });
+  const lockedOut = await api('login', { nickname: '유동현', pin: '0002' });
+  eq([lockedOut.status, lockedOut.error, lockedOut.retryAfterSec > 0], [429, 'PIN_LOCKED', true], '29 3번 틀리면 잠금');
+  eq((await api('login', { nickname: '유동현', pin: '1234' })).error, 'PIN_LOCKED', '29 잠긴 동안은 맞는 PIN 도 막는다 (무차별 대입 방지)');
+  eq(server.stats().users, usersBefore, '29 틀린 시도로는 행이 늘지 않는다');
+
+  // 30. 입력 형식
+  eq([(await api('login', { nickname: '새사람', pin: '12a4' })).error, (await api('login', { nickname: '새사람', pin: '123' })).error, (await api('login', { nickname: '새사람', pin: 1234 })).error],
+    ['INVALID_PIN', 'INVALID_PIN', 'INVALID_PIN'], '30 PIN 은 4자리 숫자 문자열만');
+  eq([(await api('login', { nickname: '공 백', pin: '1234' })).status, (await api('login', null, { raw: '{broken' })).error], [400, 'BAD_REQUEST'], '30 닉네임 규칙 · 깨진 JSON → 400');
+
+  // 31. PIN 으로 등록된 닉네임은 다른 user_id 가 접속 · 변경으로 못 쓴다
+  const X = await client(port);
+  eq((await X.call('register_player', { user_id: randomUUID(), nickname: '유동현' })).error, 'NICKNAME_TAKEN', '31 남의 PIN 닉네임으로 register_player → NICKNAME_TAKEN');
+  const other = await api('login', { nickname: '다른사람', pin: '5555' });
+  eq((await api('rename', { user_id: other.user_id, nickname: '유동현' })).error, 'NICKNAME_TAKEN', '31 남의 PIN 닉네임으로 변경 → 409');
+  const renamed = await api('rename', { user_id: first.user_id, nickname: '동현2' });
+  eq([renamed.ok, renamed.me?.wins], [true, 1], '31 내 계정 닉네임 변경 (전적 그대로)');
+  eq((await api('login', { nickname: '동현2', pin: '1234' })).user_id, first.user_id, '31 바뀐 닉네임 + 같은 PIN 으로 같은 계정');
+  await sleep(1050); // 29 에서 걸린 잠금이 풀린 뒤
+  const freed = await api('login', { nickname: '유동현', pin: '9999' });
+  ok(freed.created && freed.user_id !== first.user_id, '31 비워진 옛 닉네임은 새 계정이 쓸 수 있다');
+
+  // 32. PIN 없는 예전 계정: 전적이 있으면 다른 기기에서 못 가져가고, 그 기기(같은 user_id)에서는 PIN 을 붙인다
+  const legacyId = randomUUID();
+  const L = await client(port);
+  await L.call('register_player', { user_id: legacyId, nickname: '옛사람' });
+  await winRanked(port, L);
+  const steal = await api('login', { nickname: '옛사람', pin: '4321' });
+  eq([steal.status, steal.error], [409, 'NICKNAME_IN_USE'], '32 전적 있는 예전 계정은 다른 기기에서 닉네임만으로 못 가져간다');
+  const secured = await api('login', { nickname: '옛사람', pin: '4321', user_id: legacyId });
+  eq([secured.ok, secured.secured, secured.user_id, secured.me?.wins], [true, true, legacyId, 1], '32 그 기기(같은 user_id)에서 PIN 설정 → 같은 계정에 PIN');
+  eq((await api('login', { nickname: '옛사람', pin: '4321' })).user_id, legacyId, '32 이제 다른 기기에서도 닉네임 + PIN 으로 복구');
+  const orphanId = randomUUID();
+  const O = await client(port);
+  await O.call('register_player', { user_id: orphanId, nickname: '빈이름' }); // 전적 없는 빈 예전 행
+  const taken = await api('login', { nickname: '빈이름', pin: '1111' });
+  ok(taken.created && taken.user_id !== orphanId, '32 전적 없는 빈 예전 행뿐이면 새 계정으로 (빈 행은 순위에도 안 나온다)');
+  eq((await O.call('register_player', { user_id: orphanId, nickname: '빈이름' })).error, 'NICKNAME_TAKEN', '32 그 뒤 빈 행의 기기는 닉네임 + PIN 으로 다시 로그인해야 한다');
+
+  // 33. PIN 원문은 저장하지 않는다
+  const stored = server.users.get(first.user_id).pinHash;
+  ok(/^s1\$/.test(stored) && !stored.includes('1234'), '33 서버에는 scrypt 해시만 (원문 없음)');
+  ok(!/pin/i.test(again.raw) && !/pin/i.test(JSON.stringify(await X.call('get_leaderboard'))), '33 응답 · 랭킹 어디에도 PIN · 해시가 실리지 않는다');
+
+  // 34. 같은 새 닉네임으로 동시에 5번 가입 → 계정은 하나
+  const burst = await Promise.all(Array.from({ length: 5 }, () => api('login', { nickname: '동시가입', pin: '7777' })));
+  eq([burst.filter((r) => r.created).length, new Set(burst.map((r) => r.user_id)).size], [1, 1], '34 동시 가입 → 계정 1개 (나머지는 같은 계정 복구)');
+
+  // 35. CORS: 앱 출처만
+  const pre = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'OPTIONS', headers: { Origin: 'capacitor://localhost', 'Access-Control-Request-Method': 'POST' } });
+  const evil = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: JSON.stringify({ nickname: '외부', pin: '1234' }) });
+  eq([pre.status, pre.headers.get('access-control-allow-origin')], [204, 'capacitor://localhost'], '35 앱 출처 preflight 허용');
+  eq(evil.headers.get('access-control-allow-origin'), null, '35 다른 출처에는 CORS 헤더가 없어 브라우저가 응답을 읽지 못한다');
+  await server.stop();
+}
+
+async function phase8() {
+  const legacyRich = randomUUID();
+  const claimedId = randomUUID();
+  const db = fakeSupabase([
+    { user_id: randomUUID(), nickname: '중복', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 },
+    { user_id: legacyRich, nickname: '중복', wins: 4, losses: 1, streak: 2, max_streak: 3, mmr: 1080 },
+    { user_id: randomUUID(), nickname: '중복', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 },
+    { user_id: claimedId, nickname: '선점', wins: 1, losses: 0, streak: 1, max_streak: 1, mmr: 1025, pin_hash: await hashPin('2580') },
+  ]);
+  const server = createGameServer({ quiet: true, onError, supabaseClient: db });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+  await sleep(50); // 시작할 때 PIN 계정 목록 읽기
+  eq(server.stats().pinReady, true, '36 /healthz: pin_hash 컬럼 확인 → PIN 로그인 가능');
+  const S = await client(port);
+  eq((await S.call('register_player', { user_id: randomUUID(), nickname: '선점' })).error, 'NICKNAME_TAKEN', '36 시작할 때 읽은 PIN 계정 닉네임은 다른 user_id 가 못 쓴다');
+  eq((await api('login', { nickname: '선점', pin: '2580' })).me?.mmr, 1025, '36 DB 의 PIN 계정 복구 (전적 그대로)');
+
+  const rows = db.table.size;
+  const secured = await api('login', { nickname: '중복', pin: '1234', user_id: legacyRich });
+  eq([secured.user_id, secured.me?.wins, db.table.size], [legacyRich, 4, rows], '36 중복 행이 있던 닉네임: 이 기기의 행에 PIN — 새 행 없음');
+  ok(/^s1\$/.test(db.table.get(legacyRich).pin_hash) && !db.table.get(legacyRich).pin_hash.includes('1234'), '36 Supabase 에는 pin_hash(해시)만');
+  for (let i = 0; i < 3; i += 1) await api('login', { nickname: '중복', pin: '1234' });
+  eq(db.table.size, rows, '36 다른 기기에서 여러 번 들어와도 행이 늘지 않는다 (같은 user_id 복구)');
+  const fresh = await api('login', { nickname: '새얼굴', pin: '2468' });
+  await api('login', { nickname: '새얼굴', pin: '2468' });
+  eq([db.table.size, db.table.get(fresh.user_id)?.nickname, Boolean(db.table.get(fresh.user_id)?.pin_hash)], [rows + 1, '새얼굴', true], '36 새 닉네임 → 행 1개 (다시 들어와도 그대로)');
+  await server.stop();
+
+  // pin_hash 컬럼이 없는 테이블 (PIN_SQL 실행 전): 서버는 돌고, PIN 로그인만 안내와 함께 막는다
+  const errors = [];
+  const oldDb = fakeSupabase([], { pinColumn: false });
+  const old = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: oldDb, pinRecheckMs: 0 });
+  const oldPort = await old.start(0, '127.0.0.1');
+  await sleep(50);
+  const blocked = await apiOf(oldPort)('login', { nickname: '아무나', pin: '1234' });
+  eq([old.stats().pinReady, blocked.status, blocked.error], [false, 503, 'PIN_SETUP_REQUIRED'], '37 pin_hash 컬럼이 없으면 503 PIN_SETUP_REQUIRED');
+  ok(errors.some((e) => /alter table public\.players add column if not exists pin_hash/.test(e.message)), '37 서버 로그에 실행할 SQL 을 알려 준다');
+  const legacyClient = await client(oldPort);
+  eq((await legacyClient.call('register_player', { user_id: randomUUID(), nickname: '예전방식' })).ok, true, '37 그동안 예전 자동 로그인(register_player)은 그대로 된다');
+  oldDb.addPinColumn(); // 서버가 떠 있는 동안 SQL 실행
+  const afterSql = await apiOf(oldPort)('login', { nickname: '아무나', pin: '1234' });
+  eq([afterSql.status, afterSql.created, old.stats().pinReady], [200, true, true], '37 서버를 다시 켜지 않아도 SQL 실행 뒤 다음 로그인부터 PIN 계정이 된다');
+  await old.stop();
+}
+
 async function phase5() {
   const rows = new Map();
   const requests = [];
@@ -571,6 +736,8 @@ try {
   await phase4();
   await phase5();
   await phase6();
+  await phase7();
+  await phase8();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

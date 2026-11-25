@@ -13,6 +13,12 @@
  *       create table players (user_id text primary key, nickname text not null, wins int not null default 0, losses int not null default 0,
  *                             streak int not null default 0, max_streak int not null default 0, mmr int not null default 1000);
  *     키는 서버 전용 service_role 키 (클라이언트에 넣지 않는다).
+ *   · 계정(닉네임 + 4자리 PIN): login({ nickname, pin, userId? }) — 회원가입 없이 다른 기기에서도 같은 계정을 불러온다
+ *       PIN 으로 등록된 닉네임 → PIN 이 맞으면 그 계정(user_id · 전적)을 돌려주고, 틀리면 NICKNAME_TAKEN (새 행을 만들지 않는다)
+ *       PIN 없는 예전 계정 → 그 계정을 쓰던 기기(같은 user_id)에서 PIN 을 정하면 그 계정에 PIN 이 붙는다 · 다른 기기에서는 전적이 있는 계정을 가져갈 수 없다
+ *       처음 보는 닉네임 → 서버가 새 user_id 를 만들어 PIN 해시와 함께 저장 (클라이언트가 UUID 를 만들지 않는다 → 다시 들어올 때마다 행이 늘던 문제 해결)
+ *       PIN 은 원문이 아니라 scrypt 해시(pin_hash)로만 저장한다 (server/pin.js). Supabase 에는 아래 PIN_SQL 이 필요하다.
+ *       PIN 으로 등록된 닉네임은 다른 user_id 가 접속 · 닉네임 변경으로 쓸 수 없다 (nicknameOwner)
  *   · 판정(MMR_RULE): 승 = wins+1 · streak+1 · max_streak 갱신 · mmr+25 / 패 = losses+1 · streak 0 · mmr−20 (0 아래로는 안 내려감)
  *   ⚠ 아직 비밀번호 · 토큰 같은 인증이 없다 — 유저 ID 를 아는 사람은 그 기록을 이어 쓸 수 있다. 그래서 ID 는 본인 소켓에만 오가고
  *     상대에게 가는 프로필(cleanProfile)에는 절대 넣지 않는다. 실제 계정(소셜 로그인 등)이 붙으면 이 ID 를 계정에 연결하면 된다.
@@ -23,6 +29,8 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { hashPin, verifyPin, isPinHash } from './pin.js';
 
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
 const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
@@ -69,7 +77,13 @@ const MAX_COUNT = 9_999_999;
 export const MMR_RULE = Object.freeze({ start: 1000, win: 25, loss: 20 });
 const TABLE = 'players';
 const COLUMNS = 'user_id, nickname, wins, losses, streak, max_streak, mmr';
-const BOARD_CACHE_MS = 3000; // get_leaderboard 연타가 그대로 DB 로 가지 않게
+/** players 에 PIN 계정을 쓰려면 한 번 실행할 SQL (Supabase 대시보드 → SQL Editor). 같은 닉네임은 PIN 계정 하나만 (예전 PIN 없는 중복 행은 그대로 둔다) */
+export const PIN_SQL = [
+  'alter table public.players add column if not exists pin_hash text;',
+  'create unique index if not exists players_nickname_pin_key on public.players (nickname) where pin_hash is not null;',
+].join('\n');
+const BOARD_CACHE_MS = 3000;
+const PIN_RECHECK_MS = 30_000; // pin_hash 컬럼이 없을 때 로그인 시도에서 다시 확인하는 최소 간격 // get_leaderboard 연타가 그대로 DB 로 가지 않게
 
 export const USER_DEFAULTS = Object.freeze({ maxUsers: 50_000, saveDelayMs: 1000 });
 
@@ -106,6 +120,7 @@ function readRecord(raw, now) {
     streak: count(raw.streak),
     maxStreak: count(raw.maxStreak),
     mmr: Number.isFinite(raw.mmr) ? count(raw.mmr) : MMR_RULE.start, // 이 필드가 없던 예전 파일도 기본값으로 이어받는다
+    pinHash: isPinHash(raw.pinHash) ? raw.pinHash : null, // 계정 PIN 해시 (원문 아님)
     createdAt,
     updatedAt: time(raw.updatedAt, createdAt),
     lastSeenAt: time(raw.lastSeenAt, createdAt),
@@ -135,7 +150,9 @@ const fromRow = (row) => ({
   wins: count(row.wins), losses: count(row.losses), streak: count(row.streak), maxStreak: count(row.max_streak),
   mmr: Number.isFinite(row.mmr) ? count(row.mmr) : MMR_RULE.start,
 });
+// 평소 upsert 는 pin_hash 를 싣지 않는다 (PostgREST upsert 는 보낸 컬럼만 고친다 → PIN 이 지워지지 않는다). PIN 은 계정 생성 · PIN 설정 때만 따로 쓴다
 const toRow = (rec) => ({ user_id: rec.id, nickname: rec.nickname, wins: rec.wins, losses: rec.losses, streak: rec.streak, max_streak: rec.maxStreak, mmr: rec.mmr });
+const fromDbRow = (row) => ({ id: row.user_id, nickname: row.nickname, pinHash: isPinHash(row.pin_hash) ? row.pin_hash : null, ...fromRow(row) });
 const byRank = (a, b) => b.mmr - a.mmr || b.wins - a.wins;
 const hasPlayed = (r) => r.wins + r.losses > 0; // 랭킹전을 1판 이상 — TOP 10 에 오를 자격
 
@@ -146,10 +163,12 @@ const hasPlayed = (r) => r.wins + r.losses > 0; // 랭킹전을 1판 이상 — 
  *   maxUsers    최대 기록 수 — 가득 차면 새 유저는 기록하지 않는다 (대전은 그대로 할 수 있다)
  *   saveDelayMs 바뀐 뒤 파일에 쓰기까지 모으는 시간
  *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)        log(...)  상태 로그
- * → { identify, ready, get, recordResult, leaderboard, publicView, size, flush, close }
+ * → { identify, ready, get, recordResult, leaderboard, login, nicknameOwner, health, publicView, size, flush, close }
  */
-export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, now = Date.now, onError = () => {}, log = () => {} } = {}) {
+export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, now = Date.now, onError = () => {}, log = () => {}, pinRecheckMs = PIN_RECHECK_MS } = {}) {
   const users = new Map(); // id → record
+  const claimed = new Map(); // PIN 으로 등록된 닉네임 → user_id (같은 닉네임을 다른 계정이 못 쓰게 — 서버 1대 전제, 시작할 때 DB 에서 채운다)
+  const locks = new Map(); // 닉네임 → 진행 중인 로그인 (같은 닉네임의 동시 가입이 둘 다 성공하지 않게 차례로)
   let dirty = false;
   let timer = null;
   let chain = Promise.resolve(); // 파일 쓰기는 한 번에 하나씩 차례로
@@ -192,11 +211,12 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     const hint = HINTS.find(([re]) => re.test(`${e.message} ${e.details ?? ''}`))?.[1];
     throw new Error([`${op} 실패: ${e.message}`, e.code && `code=${e.code}`, e.details && `details=${e.details}`, e.hint && `hint=${e.hint}`, hint && `→ ${hint}`].filter(Boolean).join(' · '), { cause: e });
   };
-  // 시작 로그: Supabase 를 쓰는지, players 테이블을 읽을 수 있는지 (Render 로그에서 바로 확인)
-  if (db) {
-    dbReady.then(async () => {
+  // 시작 로그: Supabase 를 쓰는지, players 테이블을 읽을 수 있는지 (Render 로그에서 바로 확인) + PIN 컬럼 확인 · PIN 계정 목록
+  let pinReady = !db; // 메모리 · 파일 저장은 PIN 해시를 그대로 담는다. DB 는 pin_hash 컬럼이 있어야 한다
+  const schemaReady = db
+    ? dbReady.then(async () => {
       log('[DB] Supabase initialized:', Boolean(client));
-      if (!client) return;
+      if (!client) { pinReady = true; return; } // DB 연결 실패 → 메모리로 동작
       try {
         check(await client.from(TABLE).select(COLUMNS).limit(1), 'players 테이블 확인');
         markDb(null);
@@ -204,9 +224,26 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       } catch (err) {
         markDb(err);
         onError(err);
+        return;
       }
-    });
-  } else {
+      await probePin();
+    })
+    : Promise.resolve();
+  let pinProbedAt = -Infinity;
+  /** pin_hash 컬럼 확인 + PIN 계정 목록 읽기 → pinReady. 서버가 뜬 뒤에 PIN_SQL 을 실행해도 다음 로그인 시도 때 다시 확인한다 (PIN_RECHECK_MS 간격) */
+  async function probePin() {
+    pinProbedAt = now();
+    try {
+      check(await client.from(TABLE).select('user_id, pin_hash').limit(1), 'players.pin_hash 컬럼 확인');
+      const res = check(await client.from(TABLE).select('user_id, nickname, pin_hash').not('pin_hash', 'is', null).limit(maxUsers), 'PIN 계정 목록');
+      for (const row of res.data ?? []) if (isPinHash(row.pin_hash) && typeof row.nickname === 'string') claimed.set(row.nickname, row.user_id);
+      pinReady = true;
+      log(`[DB] PIN 계정 ${claimed.size}개 확인 — 닉네임 + PIN 로그인 사용 가능`);
+    } catch (err) {
+      onError(new Error(`players.pin_hash 컬럼이 없어 닉네임 + PIN 로그인을 쓸 수 없습니다. Supabase SQL Editor 에서 실행하세요:\n${PIN_SQL}`, { cause: err }));
+    }
+  }
+  if (!db) {
     log('[DB] Supabase initialized:', false, `— SUPABASE_URL · SUPABASE_KEY 가 없어 ${file ? '파일' : '메모리'}에 저장합니다`);
   }
   const upsert = async (rec) => {
@@ -239,9 +276,11 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       await dbReady;
       if (!client) { m.loaded = true; m.pending = []; return; } // DB 없이 시작됨 → 메모리 기록만
       if (!m.loaded) {
-        const res = check(await client.from(TABLE).select(COLUMNS).eq('user_id', rec.id).maybeSingle(), `players select(${rec.nickname})`);
+        await schemaReady;
+        const res = check(await client.from(TABLE).select(pinReady ? `${COLUMNS}, pin_hash` : COLUMNS).eq('user_id', rec.id).maybeSingle(), `players select(${rec.nickname})`);
         if (res.data) {
           Object.assign(rec, fromRow(res.data));
+          if (isPinHash(res.data.pin_hash)) rec.pinHash = res.data.pin_hash;
           for (const won of m.pending) applyResult(rec, won);
         }
         m.pending = [];
@@ -267,6 +306,7 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
       for (const raw of Array.isArray(data?.users) ? data.users : []) {
         const rec = readRecord(raw, t);
         if (rec && users.size < maxUsers) users.set(rec.id, rec);
+        if (rec?.pinHash) claimed.set(rec.nickname, rec.id);
       }
     } catch (err) {
       onError(new Error(`유저 파일을 읽지 못해 빈 저장소로 시작합니다 (${file}): ${err.message}`));
@@ -306,10 +346,14 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     let rec = users.get(id);
     if (!rec) {
       if (users.size >= maxUsers) return null;
-      rec = { id, nickname, wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t };
+      rec = { id, nickname, wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, pinHash: null, createdAt: t, updatedAt: t, lastSeenAt: t };
       users.set(id, rec);
     } else {
       if (rec.nickname !== nickname) {
+        if (claimed.get(rec.nickname) === id) { // PIN 계정의 닉네임 변경 → 등록된 닉네임도 옮긴다 (부르는 쪽이 nicknameOwner 로 먼저 확인)
+          claimed.delete(rec.nickname);
+          claimed.set(nickname, id);
+        }
         rec.nickname = nickname;
         rec.updatedAt = t;
         const m = meta.get(id);
@@ -320,6 +364,124 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     if (db && !meta.get(id)?.loading) loadRow(rec); // 접속/로그인마다 DB 동기화 (같은 접속의 handshake · hello 는 한 번으로 합쳐진다)
     markDirty();
     return rec;
+  }
+
+  /** 이 닉네임을 PIN 으로 등록한 계정의 user_id | null — 다른 user_id 가 이 닉네임으로 접속 · 변경하려 하면 막는다 */
+  const nicknameOwner = (nickname) => claimed.get(nickname) ?? null;
+
+  /** 같은 닉네임의 로그인 · 가입을 차례로 (동시에 두 번 가입돼 같은 닉네임 계정이 둘 생기지 않게) */
+  async function withNicknameLock(nickname, task) {
+    const prev = locks.get(nickname) ?? Promise.resolve();
+    let release;
+    const mine = new Promise((resolve) => { release = resolve; });
+    const tail = prev.then(() => mine);
+    locks.set(nickname, tail);
+    await prev;
+    try {
+      return await task();
+    } finally {
+      release();
+      if (locks.get(nickname) === tail) locks.delete(nickname);
+    }
+  }
+
+  /** 이 닉네임의 모든 계정 (DB 행 + 아직 DB 에 없는 캐시) → [{ id, nickname, pinHash, wins, losses, streak, maxStreak, mmr }] */
+  async function findByNickname(nickname) {
+    const found = new Map();
+    if (client) {
+      const res = check(await client.from(TABLE).select(`${COLUMNS}, pin_hash`).eq('nickname', nickname).limit(100), `players 닉네임 조회(${nickname})`);
+      markDb(null);
+      for (const row of res.data ?? []) {
+        const cached = meta.get(row.user_id)?.loaded ? users.get(row.user_id) : null; // 캐시가 더 최신이면 캐시 (PIN 은 DB 값도 본다)
+        found.set(row.user_id, cached ? { ...cached, pinHash: cached.pinHash ?? fromDbRow(row).pinHash } : fromDbRow(row));
+      }
+    }
+    for (const rec of users.values()) if (rec.nickname === nickname && !found.has(rec.id)) found.set(rec.id, rec);
+    return [...found.values()];
+  }
+
+  /** 찾은 계정을 캐시에 올린다 (이미 있으면 캐시를 쓴다) → 기록 객체 | null(가득 참) */
+  function adopt(row) {
+    let rec = users.get(row.id);
+    if (!rec) {
+      if (users.size >= maxUsers) return null;
+      const t = now();
+      rec = { id: row.id, nickname: row.nickname, wins: row.wins, losses: row.losses, streak: row.streak, maxStreak: row.maxStreak, mmr: row.mmr, pinHash: row.pinHash ?? null, createdAt: t, updatedAt: t, lastSeenAt: t };
+      users.set(rec.id, rec);
+      if (client) meta.set(rec.id, { chain: Promise.resolve(), loaded: true, loading: false, pending: [] }); // 방금 DB 에서 읽었다
+    } else if (row.pinHash && !rec.pinHash) {
+      rec.pinHash = row.pinHash;
+    }
+    return rec;
+  }
+
+  /** 계정 생성 · PIN 설정을 바로 저장한다 (DB 는 pin_hash 까지 — 실패하면 던진다) */
+  async function persistAccount(rec) {
+    markDirty();
+    await dbReady;
+    if (!client) return;
+    const m = meta.get(rec.id);
+    if (m) await m.chain; // 그 유저의 앞선 쓰기 뒤에
+    check(await client.from(TABLE).upsert({ ...toRow(rec), pin_hash: rec.pinHash }, { onConflict: 'user_id' }), `players 계정 저장(${rec.nickname})`);
+    markDb(null);
+    board.at = -Infinity;
+  }
+
+  /**
+   * 닉네임 + PIN 로그인 (닉네임 · PIN 은 이미 검사한 값, userId = 이 기기에 남아 있던 user_id | null)
+   * → { ok: true, user: 기록, created?, recovered?, secured? } | { ok: false, error: 'NICKNAME_TAKEN' | 'NICKNAME_IN_USE' | 'PIN_SETUP_REQUIRED' | 'SERVER_BUSY' }
+   *   created   처음 보는 닉네임 → 새 user_id 로 계정을 만들었다
+   *   recovered PIN 이 맞아 기존 계정(user_id · 전적)을 돌려준다
+   *   secured   PIN 없던 예전 계정(이 기기의 user_id)에 PIN 을 붙였다
+   */
+  async function login({ nickname, pin, userId = null }) {
+    await schemaReady;
+    if (!pinReady && client && now() - pinProbedAt >= pinRecheckMs) await probePin(); // 서버가 뜬 뒤 PIN_SQL 을 실행했을 수 있다
+    if (!pinReady) return { ok: false, error: 'PIN_SETUP_REQUIRED' };
+    return withNicknameLock(nickname, async () => {
+      const rows = await findByNickname(nickname);
+      const owner = rows.find((r) => r.pinHash);
+      if (owner) { // PIN 으로 등록된 닉네임 — PIN 이 맞을 때만 그 계정을 돌려준다 (새 행을 만들지 않는다)
+        if (!(await verifyPin(pin, owner.pinHash))) return { ok: false, error: 'NICKNAME_TAKEN' };
+        const rec = adopt(owner);
+        if (!rec) return { ok: false, error: 'SERVER_BUSY' };
+        claimed.set(nickname, rec.id);
+        rec.lastSeenAt = now();
+        return { ok: true, user: rec, recovered: true };
+      }
+      const own = userId ? rows.find((r) => r.id === userId) : null;
+      if (own) { // PIN 없던 예전 계정을 그 계정을 쓰던 기기에서 — PIN 을 붙인다
+        const rec = adopt(own);
+        if (!rec) return { ok: false, error: 'SERVER_BUSY' };
+        const before = rec.pinHash;
+        rec.pinHash = await hashPin(pin);
+        try {
+          await persistAccount(rec);
+        } catch (err) {
+          rec.pinHash = before;
+          throw err;
+        }
+        claimed.set(nickname, rec.id);
+        return { ok: true, user: rec, recovered: true, secured: true };
+      }
+      if (rows.some((r) => r.wins + r.losses > 0)) return { ok: false, error: 'NICKNAME_IN_USE' }; // PIN 없는 예전 계정에 전적이 있다 — 그 기기에서 PIN 을 먼저
+      // 처음 보는 닉네임 (또는 전적 없는 빈 예전 행뿐): 서버가 새 user_id 를 만든다
+      if (users.size >= maxUsers) return { ok: false, error: 'SERVER_BUSY' };
+      const t = now();
+      const rec = { id: randomUUID(), nickname, wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, pinHash: await hashPin(pin), createdAt: t, updatedAt: t, lastSeenAt: t };
+      users.set(rec.id, rec);
+      if (client) meta.set(rec.id, { chain: Promise.resolve(), loaded: true, loading: false, pending: [] });
+      try {
+        await persistAccount(rec);
+      } catch (err) {
+        users.delete(rec.id);
+        meta.delete(rec.id);
+        if (err?.cause?.code === '23505') return { ok: false, error: 'NICKNAME_TAKEN' }; // 같은 닉네임 PIN 계정이 그새 생겼다 (unique index)
+        throw err;
+      }
+      claimed.set(nickname, rec.id);
+      return { ok: true, user: rec, created: true };
+    });
   }
 
   /** 판 결과 한 번 기록 (MMR_RULE) → 갱신된 기록 | null(모르는 유저). 캐시는 바로 고치고 DB 에는 차례로 쓴다 */
@@ -381,12 +543,15 @@ export function createUserStore({ file = null, db = null, maxUsers = USER_DEFAUL
     get: (id) => users.get(id) ?? null,
     recordResult,
     leaderboard,
+    login,
+    nicknameOwner,
     // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부 · 마지막 DB 오류 · 접속 중인 Supabase 주소(키 제외)
     health: () => ({
       storage: db ? (client ? 'supabase' : 'memory') : (file ? 'file' : 'memory'),
       dbOk,
       dbError,
       dbHost: db ? (() => { try { return new URL(SUPABASE_URL).host; } catch { return `잘못된 URL: ${String(SUPABASE_URL).slice(0, 60)}`; } })() : null,
+      pinReady, // 닉네임 + PIN 로그인 가능 (DB 면 players.pin_hash 컬럼이 있어야 true)
     }),
     publicView: publicRecord,
     size: () => users.size,

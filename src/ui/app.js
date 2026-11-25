@@ -42,7 +42,8 @@ import {
   CHEST, CHEST_ITEMS, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
 import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
-import { userSession, nicknameErrorText, attachNicknameFilter, NICK_HINT } from './session.js'; // 로그인한 닉네임 · 유저 ID (화면은 loginGate.js)
+import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
+import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버에서 먼저 확인 (남의 PIN 닉네임이면 거절) // 로그인한 닉네임 · 유저 ID (화면은 loginGate.js)
 
 const PLAYER = 'player';
 const AI = 'ai';
@@ -826,11 +827,16 @@ async function renderBoard() {
 }
 
 // 프로필 모달의 닉네임 저장도 로그인 세션을 거친다 (계정 창과 같은 규칙 · 같은 저장소 — 서버로 가는 닉네임이 어긋나지 않게)
-function onNickSubmit(ev) {
+let nickBusy = false;
+async function onNickSubmit(ev) {
   ev.preventDefault();
-  const res = userSession.rename(el.nickInput.value);
+  if (nickBusy) return;
+  nickBusy = true;
+  nickMessage('서버에서 확인하는 중…');
+  const res = await changeNickname(el.nickInput.value);
+  nickBusy = false;
   if (!res.ok) {
-    nickMessage(nicknameErrorText(res.reason), 'bad');
+    nickMessage(res.message, 'bad');
     return;
   }
   el.nickInput.value = res.user.nickname;

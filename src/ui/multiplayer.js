@@ -65,6 +65,7 @@ const ERROR_TEXT = Object.freeze({
   SERVER_BUSY: '서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.',
   SERVER_ERROR: '서버 오류가 발생했습니다.',
   INVALID_NICKNAME: '닉네임이 규칙에 맞지 않습니다. 타이틀 우상단 계정 메뉴에서 바꿔 주세요.',
+  NICKNAME_TAKEN: '이 닉네임은 다른 계정이 PIN으로 등록했어요. 닉네임과 PIN으로 다시 로그인해 주세요.',
 });
 
 const fmt = (n) => Number(n).toLocaleString('ko-KR');
@@ -117,7 +118,7 @@ dialog.innerHTML = `
       </div>
       <button class="mp-close" type="button" data-act="close" aria-label="닫기">&#10005;</button>
     </header>
-    <p class="mp-me"><span class="mp-tier" data-ui="me-tier">—</span><b data-ui="me-name"></b><small data-ui="me-record"></small></p>
+    <p class="mp-me"><span class="mp-tier" data-ui="me-tier">—</span><b data-ui="me-name"></b><button class="mp-edit" type="button" data-act="edit-nick" aria-label="닉네임 변경">변경</button><small data-ui="me-record"></small></p>
     <p class="mp-wallet"><span>보유 탄피</span><b data-ui="brass">0</b></p>
 
     <div class="mp-view" data-ui="menu">
@@ -397,6 +398,13 @@ function registerPlayer(s) {
   if (!user) return Promise.resolve(null);
   return new Promise((resolve) => {
     s.timeout(ACK_TIMEOUT_MS).emit('register_player', { user_id: user.id, nickname: user.nickname }, (err, res) => {
+      if (!err && res?.error === 'NICKNAME_TAKEN') { // 이 닉네임을 다른 계정이 PIN 으로 등록했다 → 닉네임 + PIN 으로 다시 로그인 (자동 로그인도 멈춘다)
+        resolve(null);
+        closeDialog();
+        userSession.logout();
+        window.dispatchEvent(new CustomEvent('lastchamber:need-login', { detail: { message: ERROR_TEXT.NICKNAME_TAKEN } }));
+        return;
+      }
       if (err || !res?.ok) {
         console.warn('[LAST CHAMBER] register_player 실패', err?.message ?? res?.error);
         resolve(null);
@@ -669,6 +677,7 @@ dialog.addEventListener('click', (e) => {
   if (!el || el.disabled) return;
   switch (el.dataset.act) {
     case 'close': closeDialog(); break;
+    case 'edit-nick': window.dispatchEvent(new CustomEvent('lastchamber:open-account', { detail: { edit: true } })); break; // 닉네임 옆 [변경] → 계정 창의 변경 칸
     case 'solo': startSolo(); break;
     case 'create': createRoom(); break;
     case 'copy': onCopy(); break;

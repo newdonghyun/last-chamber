@@ -19,6 +19,9 @@
  *       친구 초대 방(mode 'private')은 친선전 — 전적 · MMR 을 기록하지 않는다 (ranked: false)
  *
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
+ *   ※ 계정(닉네임 + 4자리 PIN)은 HTTP: POST /api/login { nickname, pin, user_id? } → { ok, user_id, nickname, created, recovered, secured, me }
+ *                                       POST /api/rename { user_id, nickname } → { ok, nickname, me }   (오류: { ok: false, error } + HTTP 상태 — API_STATUS)
+ *     PIN 으로 등록된 닉네임은 다른 user_id 로 접속(register_player · hello · handshake) · 변경할 수 없다 → NICKNAME_TAKEN
  *   register_player({ user_id, nickname })        로비 접속 즉시: 로그인 + Supabase players upsert(완료 후 응답) → { ok, user, me, top }  (me · top = get_leaderboard 와 같다)
  *   hello({ userId, nickname })                   로그인 · 닉네임 변경 (연결 뒤에 해도 된다) → { ok, user: { nickname, wins, losses, games, streak, maxStreak, mmr } }  ← 서버에 기록된 내 전적
  *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (랭킹전 1판 이상 둔 유저만 · mmr 내림차순 10명), me: 내 전적 | null }
@@ -69,6 +72,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Server } from 'socket.io';
 import { createRoomManager, fail, cleanProfile, ROOM_DEFAULTS, TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS } from './roomManager.js';
+import { cleanPin, createPinLimiter, PIN_LIMITS } from './pin.js';
 import { createMatchmaker, QUEUE_TIERS } from './matchmaker.js';
 import { createUserStore, cleanUserId, cleanNickname, supabaseOrigin, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
 
@@ -145,6 +149,30 @@ const APP_ORIGINS = ['capacitor://localhost', 'http://localhost', 'https://local
 const TOSS_ORIGIN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.tossmini\.com$/i;
 
 /** CORS_ORIGIN 값 → Socket.io cors 옵션. '*' = 모든 출처 · 비어 있음 = 앱 + 토스 웹뷰 출처 (같은 출처는 CORS 가 필요 없다) · 그 밖 = 적어 준 출처만 */
+/** 계정 API 오류 코드 → HTTP 상태 */
+export const API_STATUS = Object.freeze({
+  BAD_REQUEST: 400, INVALID_NICKNAME: 400, INVALID_PIN: 400, NICKNAME_TAKEN: 409, NICKNAME_IN_USE: 409,
+  PIN_LOCKED: 429, RATE_LIMITED: 429, PIN_SETUP_REQUIRED: 503, SERVER_BUSY: 503, SERVER_ERROR: 500,
+});
+
+/** /api 의 CORS: Socket.io 와 같은 허용 출처(앱 · 토스 웹뷰 · CORS_ORIGIN)만. 같은 출처(웹)는 헤더 없이도 된다 */
+function apiCors(raw) {
+  const { origin } = corsOptions(raw);
+  const allowed = (o) => origin === '*' || (Array.isArray(origin) && origin.includes(o));
+  return (req, res, next) => {
+    const o = req.headers.origin;
+    if (o && allowed(o)) {
+      res.setHeader('Access-Control-Allow-Origin', origin === '*' ? '*' : o);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
+    if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
+    next();
+  };
+}
+
 function corsOptions(raw) {
   const list = String(raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (list.includes('*')) return { origin: '*' };
@@ -180,10 +208,11 @@ export function createGameServer(options = {}) {
   const dbError = (err) => { if (cfg.quiet) cfg.onError(err); else console.error('[DB ERROR]', err); };
   dbLog('[DB] SUPABASE_URL:', cfg.supabaseUrl ? 'set' : 'missing', '· SUPABASE_KEY:', cfg.supabaseKey ? `set (${keyRole(cfg.supabaseKey)})` : 'missing');
   const db = cfg.supabaseClient ?? (cfg.supabaseUrl && cfg.supabaseKey ? connectSupabase(cfg.supabaseUrl, cfg.supabaseKey) : null);
-  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: dbError, log: dbLog });
+  const users = createUserStore({ file: cfg.userDataFile || null, db, maxUsers: cfg.maxUsers, saveDelayMs: cfg.userSaveDelayMs, onError: dbError, log: dbLog, ...(cfg.pinRecheckMs !== undefined ? { pinRecheckMs: cfg.pinRecheckMs } : {}) });
   const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users });
   const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS });
   const stats = () => ({ ...rooms.stats(), queued: matchmaker.queued(), users: users.size(), ...users.health(), node: process.version });
+  const pinLimiter = createPinLimiter({ ...PIN_LIMITS, ...cfg.pinLimits }); // 닉네임별 PIN 오답 잠금 · IP 별 시도 수
 
   /**
    * 로그인: 이 소켓을 유저 { id, nickname } 로 기억하고 서버 기록을 만들거나 닉네임을 갱신한다 (handshake auth · hello 이벤트 공통).
@@ -196,6 +225,8 @@ export function createGameServer(options = {}) {
     if (!nickname) return fail('INVALID_NICKNAME');
     const current = socket.data.user;
     if (current && current.id !== id && socket.data.where) return fail('ALREADY_IN_ROOM'); // 판 · 대기열 도중에 다른 사람으로 바꿀 수 없다
+    const owner = users.nicknameOwner(nickname);
+    if (owner && owner !== id) return fail('NICKNAME_TAKEN'); // 다른 계정이 PIN 으로 등록한 닉네임 — 닉네임 + PIN 으로 다시 로그인해야 한다
     const record = users.identify(id, nickname); // 저장소가 가득 차면 null — 대전은 그대로, 기록만 남지 않는다
     socket.data.user = { id, nickname };
     // DB 모드면 조회 · upsert(신규 생성 / 닉네임 갱신)가 끝난 뒤에 답한다 (메모리 모드는 바로)
@@ -222,8 +253,55 @@ export function createGameServer(options = {}) {
     };
   }
 
-  // ── HTTP: 상태 확인 + 정적 파일 ──
+  /** POST /api/login { nickname, pin, user_id? } — 닉네임 + PIN 으로 계정을 만들거나 불러온다 (userStore.login) */
+  async function accountLogin(req) {
+    if (!pinLimiter.allowIp(req.ip ?? '?')) return fail('RATE_LIMITED');
+    const nickname = cleanNickname(req.body?.nickname);
+    if (!nickname) return fail('INVALID_NICKNAME');
+    const pin = cleanPin(req.body?.pin);
+    if (!pin) return fail('INVALID_PIN');
+    const userId = cleanUserId(req.body?.user_id); // 이 기기에 남아 있던 ID (없거나 모양이 틀리면 null)
+    const locked = () => ({ ...fail('PIN_LOCKED'), retryAfterSec: Math.ceil(pinLimiter.lockedFor(nickname) / 1000) });
+    if (pinLimiter.lockedFor(nickname)) return locked();
+    const res = await users.login({ nickname, pin, userId });
+    if (!res.ok) {
+      if (res.error === 'NICKNAME_TAKEN' && pinLimiter.fail(nickname)) return locked(); // PIN 오답 — 여러 번이면 잠근다
+      return fail(res.error);
+    }
+    pinLimiter.succeed(nickname);
+    log('계정', res.created ? '생성' : res.secured ? 'PIN 설정' : '복구', nickname);
+    return { ok: true, user_id: res.user.id, nickname: res.user.nickname, created: Boolean(res.created), recovered: Boolean(res.recovered), secured: Boolean(res.secured), me: users.publicView(res.user) };
+  }
+
+  /** POST /api/rename { user_id, nickname } — 닉네임 변경 (PIN 으로 등록된 남의 닉네임이면 NICKNAME_TAKEN) */
+  async function accountRename(req) {
+    if (!pinLimiter.allowIp(req.ip ?? '?')) return fail('RATE_LIMITED');
+    const id = cleanUserId(req.body?.user_id);
+    if (!id) return fail('BAD_REQUEST');
+    const nickname = cleanNickname(req.body?.nickname);
+    if (!nickname) return fail('INVALID_NICKNAME');
+    const owner = users.nicknameOwner(nickname);
+    if (owner && owner !== id) return fail('NICKNAME_TAKEN');
+    if (!users.identify(id, nickname)) return fail('SERVER_BUSY');
+    await users.ready(id);
+    return { ok: true, nickname, me: users.publicView(users.get(id)) };
+  }
+
+  const respond = (res, result) => Promise.resolve(result).then(
+    (body) => res.status(body?.ok ? 200 : (API_STATUS[body?.error] ?? 400)).json(body),
+    (err) => { cfg.onError(err); res.status(500).json(fail('SERVER_ERROR')); },
+  );
+
+  // ── HTTP: 상태 확인 + 계정 API + 정적 파일 ──
   app.disable('x-powered-by');
+  app.set('trust proxy', true); // Render 같은 프록시 뒤 → req.ip = 접속한 사람의 IP (IP 별 로그인 시도 제한)
+  app.use('/api', apiCors(cfg.corsOrigin), express.json({ limit: '2kb' }));
+  app.post('/api/login', (req, res) => respond(res, accountLogin(req)));
+  app.post('/api/rename', (req, res) => respond(res, accountRename(req)));
+  app.use('/api', (err, req, res, next) => { // 깨진 JSON 등
+    if (res.headersSent) { next(err); return; }
+    res.status(400).json(fail('BAD_REQUEST'));
+  });
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() })); // 클라우드 호스팅(Render · Railway) 헬스체크
   app.get('/healthz',(req, res) => res.json({ ok: true, ...stats() }));
   app.use(blockServerInternals);

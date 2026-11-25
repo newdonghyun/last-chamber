@@ -3,11 +3,13 @@
 //   2. 닉네임 규칙(session.js validateNickname): 2~10자 · 공백 없음 · 보이지 않는 문자/이모지 금지 — 서버(userStore.cleanNickname)와 같은 판정
 //   3. 세션(UserSession): 로그인 · UUID 발급 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(ID 유지) · 손상된 저장값 · 저장소 없음
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 기록이 없거나 깨졌으면 html.needs-login
+//   6. 계정(닉네임 + PIN): 서버가 정한 user_id · PIN 을 localStorage 에 저장 · 자동 로그인 · 예전(v1) 세션 호환 · 계정 API 오류 처리
 //   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { PlatformBridge, HAPTIC_COOLDOWN_MS } from '../src/platform/platformBridge.js';
 import { UserSession, validateNickname, createUserId, isUserId, SESSION_KEY } from '../src/ui/session.js';
+import { loginWithPin, changeNickname, serverBase } from '../src/ui/accountApi.js';
 import { cleanNickname as serverNickname } from '../server/userStore.js';
 import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
 import { MMR_RULE as SERVER_MMR } from '../server/userStore.js';
@@ -228,6 +230,51 @@ function memoryStorage(initial = {}) {
   const brass = p.brass;
   const f = p.recordFriendly(true);
   eq([f.mode, f.ranked, f.bonus, p.brass - brass, ranked(p), p.practice.wins], ['friendly', false, 0, REWARD.win, [2, 1, 1, 3, 1050], 2], '5 친선전은 기본 탄피만 — 랭킹 · 연습 기록 모두 그대로');
+}
+
+// ───────── 6. 계정: 닉네임 + PIN (session.signIn · accountApi) ─────────
+{
+  const store = memoryStorage();
+  const s = new UserSession({ storage: store });
+  const serverId = createUserId();
+  eq(s.signIn({ id: 'not-a-uuid', nickname: '유동현', pin: '1234' }).ok, false, '6 서버 user_id 모양이 틀리면 로그인하지 않는다');
+  const r = s.signIn({ id: serverId, nickname: '유동현', pin: '1234' });
+  eq([r.ok, s.userId, s.user?.nickname, s.pin, s.hasPin], [true, serverId, '유동현', '1234', true], '6 서버가 정한 user_id · 닉네임 · PIN 저장');
+  const saved = JSON.parse(store.getItem(SESSION_KEY));
+  eq([saved.v, saved.id, saved.nickname, saved.pin, saved.loggedIn], [2, serverId, '유동현', '1234', true], '6 localStorage 에 user_id · nickname · pin 영구 저장');
+  const reopened = new UserSession({ storage: store });
+  eq([reopened.isLoggedIn, reopened.userId, reopened.pin], [true, serverId, '1234'], '6 다시 접속 → 자동 로그인 (같은 계정 · PIN)');
+  reopened.logout();
+  eq([reopened.isLoggedIn, reopened.userId, reopened.pin], [false, serverId, '1234'], '6 로그아웃해도 user_id 는 남아 다음 로그인 때 서버에 알려 준다');
+  const v1 = new UserSession({ storage: memoryStorage({ [SESSION_KEY]: JSON.stringify({ v: 1, id: serverId, nickname: '옛사람', loggedIn: true }) }) });
+  eq([v1.isLoggedIn, v1.user?.nickname, v1.pin, v1.hasPin], [true, '옛사람', null, false], '6 예전(v1) 세션은 그대로 자동 로그인 · PIN 없음');
+  const junk = new UserSession({ storage: memoryStorage({ [SESSION_KEY]: JSON.stringify({ v: 2, id: serverId, nickname: '사람', pin: '12a4', loggedIn: true }) }) });
+  eq([junk.isLoggedIn, junk.pin], [true, null], '6 깨진 PIN 은 버리고 로그인은 유지');
+
+  // accountApi: 가짜 fetch 로 서버 응답 흉내
+  const calls = [];
+  const reply = (status, body) => async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return { status, ok: status < 300, json: async () => body }; };
+  const fresh = new UserSession({ storage: memoryStorage() });
+  const newId = createUserId();
+  const made = await loginWithPin('새얼굴', '2468', { session: fresh, base: 'http://srv', fetchImpl: reply(200, { ok: true, user_id: newId, nickname: '새얼굴', created: true, recovered: false, me: { wins: 0, losses: 0, mmr: 1000 } }) });
+  eq([made.ok, made.created, fresh.userId, fresh.pin, calls.at(-1).url, calls.at(-1).body], [true, true, newId, '2468', 'http://srv/api/login', { nickname: '새얼굴', pin: '2468' }], '6 처음 기기: user_id 없이 보내고 서버가 만든 user_id 를 쓴다 (클라이언트가 UUID 를 만들지 않는다)');
+  const legacyDevice = new UserSession({ storage: memoryStorage({ [SESSION_KEY]: JSON.stringify({ v: 1, id: serverId, nickname: '옛사람', loggedIn: false }) }) });
+  await loginWithPin('옛사람', '4321', { session: legacyDevice, base: 'http://srv', fetchImpl: reply(200, { ok: true, user_id: serverId, nickname: '옛사람', recovered: true, secured: true }) });
+  eq(calls.at(-1).body.user_id, serverId, '6 이 기기에 남아 있던 user_id 를 함께 보낸다 (예전 계정에 PIN 붙이기)');
+  const taken = await loginWithPin('유동현', '0000', { session: new UserSession({ storage: memoryStorage() }), base: 'http://srv', fetchImpl: reply(409, { ok: false, error: 'NICKNAME_TAKEN' }) });
+  eq([taken.ok, taken.message], [false, '이미 사용 중인 닉네임입니다. 본인 계정이라면 PIN 번호를 확인해 주세요.'], '6 PIN 이 틀리면 안내 문구 (로그인하지 않는다)');
+  const locked = await loginWithPin('유동현', '0000', { session: new UserSession({ storage: memoryStorage() }), base: 'http://srv', fetchImpl: reply(429, { ok: false, error: 'PIN_LOCKED', retryAfterSec: 600 }) });
+  ok(/10분 뒤/.test(locked.message), '6 잠기면 남은 시간 안내');
+  const offline = await loginWithPin('유동현', '1234', { session: new UserSession({ storage: memoryStorage() }), base: 'http://srv', fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
+  eq([offline.ok, offline.error], [false, 'OFFLINE'], '6 서버에 못 닿으면 OFFLINE (예외를 던지지 않는다)');
+  const before = calls.length;
+  eq([(await loginWithPin('유동현', '12', { session: fresh })).error, (await loginWithPin('공 백', '1234', { session: fresh })).error, calls.length], ['INVALID_PIN', 'INVALID_NICKNAME', before], '6 형식이 틀리면 서버에 보내지도 않는다');
+
+  const renamedOk = await changeNickname('바뀐이름', { session: fresh, base: 'http://srv', fetchImpl: reply(200, { ok: true, nickname: '바뀐이름' }) });
+  eq([renamedOk.ok, fresh.user.nickname, calls.at(-1).url, calls.at(-1).body], [true, '바뀐이름', 'http://srv/api/rename', { user_id: newId, nickname: '바뀐이름' }], '6 닉네임 변경: 서버 확인 뒤 이 기기에도');
+  const renamedNo = await changeNickname('유동현', { session: fresh, base: 'http://srv', fetchImpl: reply(409, { ok: false, error: 'NICKNAME_TAKEN' }) });
+  eq([renamedNo.ok, fresh.user.nickname], [false, '바뀐이름'], '6 남의 PIN 닉네임으로는 바뀌지 않는다 (이 기기 닉네임도 그대로)');
+  eq(serverBase({ LAST_CHAMBER_SERVER: 'https://x.example/', location: { protocol: 'https:', origin: 'https://y' } }), 'https://x.example', '6 서버 주소: LAST_CHAMBER_SERVER 우선');
 }
 
 const ms = Math.round(performance.now() - T0);

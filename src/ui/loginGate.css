@@ -74,7 +74,28 @@ html.needs-login .title-screen { visibility: hidden; } /* 로그인 전에는 �
 .login-input:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 1px; }
 .login-msg { margin: 0; min-height: 2.6em; font: 600 12px/1.3 var(--font-ui); color: var(--ink-dim); }
 .login-msg.is-bad { color: #ffb3a8; }
+.login-pin { width: 9.5em; font: 800 22px/1 var(--font-tech); letter-spacing: .5em; text-indent: .5em; } /* 4자리 PIN: 짧게 · 넓은 자간 */
 .login-submit { width: 100%; margin-top: 2px; }
+.login-form.is-busy { opacity: .75; pointer-events: none; }
+/* 로그인 · PIN 설정 결과를 잠깐 알리는 띠 (기존 계정 복구 등) */
+.acct-toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 120;
+  max-width: min(92vw, 420px);
+  padding: 10px 16px;
+  border-radius: 12px;
+  translate: -50% 0;
+  font: 700 13px/1.4 var(--font-ui);
+  text-align: center;
+  color: var(--ink);
+  background: linear-gradient(180deg, #24211b, #14120f);
+  box-shadow: inset 0 0 0 1px rgba(201, 163, 91, .55), 0 10px 24px rgba(0, 0, 0, .6);
+  animation: acct-toast 3.2s ease both;
+  pointer-events: none;
+}
+@keyframes acct-toast { 0% { opacity: 0; translate: -50% 10px; } 10%, 85% { opacity: 1; translate: -50% 0; } 100% { opacity: 0; translate: -50% 0; } }
 .login-note { font-size: var(--fs-xxs); letter-spacing: .06em; line-height: 1.5; color: var(--ink-faint); }
 
 /* ── 타이틀 우상단: 탄피 + 계정 버튼 ─────────────── */
@@ -141,7 +162,33 @@ html.needs-login .title-screen { visibility: hidden; } /* 로그인 전에는 �
 .acct-who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 800 17px/1.15 var(--font-ui); }
 .acct-who small { font: 600 11px/1.2 var(--font-ui); color: var(--ink-dim); }
 .acct-who code { font: 700 11px/1 var(--font-type); letter-spacing: .08em; color: var(--brass-hi); }
-.acct-form label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.acct-form label,
+.acct-pin-form label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.acct-form[hidden],
+.acct-pin-form[hidden],
+.acct-pin-row[hidden] { display: none; }
+.acct-me .acct-who { flex: 1; }
+/* 닉네임 옆 [변경] · PIN [보기] — 작은 알약 버튼 */
+.acct-edit {
+  flex: none;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font: 800 12.5px/1 var(--font-ui);
+  color: var(--brass-hi);
+  background: rgba(201, 163, 91, .1);
+  box-shadow: inset 0 0 0 1px rgba(201, 163, 91, .5);
+}
+.acct-edit[aria-expanded="true"],
+.acct-edit[aria-pressed="true"] { color: #111; background: var(--brass-hi); }
+.acct-edit:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 2px; }
+.acct-pin { display: grid; gap: 6px; padding: 10px 12px; border-radius: 14px; background: rgba(0, 0, 0, .28); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06); }
+.acct-pin-row { display: flex; align-items: center; gap: 10px; font: 700 12.5px/1 var(--font-ui); color: var(--ink-dim); }
+.acct-pin-row code { flex: 1; font: 800 16px/1 var(--font-tech); letter-spacing: .4em; color: var(--brass-hi); }
+.acct-pin-form small { font: 600 11px/1 var(--font-ui); color: var(--ink-dim); }
+.acct-pin .nick-msg:empty { display: none; }
 .acct-btn {
   width: 100%;
   min-height: 44px;
