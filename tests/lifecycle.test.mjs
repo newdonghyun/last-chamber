@@ -77,7 +77,7 @@ const buses = (ctx) => [ctx.nodes[0].gain.value, ctx.nodes[1].gain.value]; // #s
 
 // ───────── 1~3. suspend / 잠금 / resume ─────────
 {
-  const sound = new SoundEngine({ volume: 0.8, ambientVolume: 0.6, gunshotUrl: null });
+  const sound = new SoundEngine({ volume: 0.8, ambientVolume: 0.6 });
   eq(await sound.unlock(), true, '1 unlock → 오디오 켜짐');
   const ctx = FakeAudioContext.made.at(-1);
   const ambientFrom = ctx.nodes.length;
@@ -144,7 +144,7 @@ const buses = (ctx) => [ctx.nodes[0].gain.value, ctx.nodes[1].gain.value]; // #s
 
 // 화면 밖에서 판이 시작됨 (PvP 매칭이 백그라운드에서 잡힘)
 {
-  const sound = new SoundEngine({ gunshotUrl: null });
+  const sound = new SoundEngine();
   await sound.unlock(); // 타이틀에서 한 번 켬
   await sound.suspend();
   await sound.unlock(); // startGame(true) — 제스처 밖
@@ -159,7 +159,7 @@ const buses = (ctx) => [ctx.nodes[0].gain.value, ctx.nodes[1].gain.value]; // #s
 {
   FakeAudioContext.startState = 'suspended';
   FakeAudioContext.deferResume = true;
-  const sound = new SoundEngine({ gunshotUrl: null });
+  const sound = new SoundEngine();
   const unlocking = sound.unlock();
   const ctx = FakeAudioContext.made.at(-1);
   await sound.suspend();
@@ -172,7 +172,7 @@ const buses = (ctx) => [ctx.nodes[0].gain.value, ctx.nodes[1].gain.value]; // #s
 
 // iOS: 닫힌 뒤 돌아오면 제스처 전까지는 꺼져 있다가 다음 터치에서 켜짐
 {
-  const sound = new SoundEngine({ gunshotUrl: null });
+  const sound = new SoundEngine();
   eq(sound.needsUnlock, false, '4 한 번도 켠 적 없으면 터치로 깨울 필요 없음');
   await sound.unlock();
   await sound.close();
@@ -247,7 +247,7 @@ const fakePage = ({ hidden = false } = {}) => {
 // ───────── 6. app.js 와 같은 연결 ─────────
 {
   const { win, doc, setHidden, fire } = fakePage();
-  const sound = new SoundEngine({ gunshotUrl: null });
+  const sound = new SoundEngine();
   let socketsClosed = 0;
   const settle = () => new Promise((r) => setTimeout(r, 0));
   watchLifecycle({

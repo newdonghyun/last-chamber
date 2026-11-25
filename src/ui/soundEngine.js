@@ -2,11 +2,15 @@
  * LAST CHAMBER - 효과음 엔진 (Web Audio API)
  *
  *   const sound = new SoundEngine();
- *   startButton.addEventListener('click', () => sound.unlock()); // 첫 사용자 클릭에서 오디오 활성화 (총성 녹음도 이때 불러옴)
+ *   startButton.addEventListener('click', () => sound.unlock()); // 첫 사용자 클릭에서 오디오 활성화
  *   sound.playHeartbeat();                                         // play*()는 소리 길이(초) 반환, 활성화 전이면 0
  *
- * - 총성(playGunshot)만 실제 녹음(assets/audio/gunshot.wav)을 재생하고, 나머지 효과음은 외부 파일 없이 실시간 합성한다.
- * - 녹음을 아직 못 불러왔거나 불러오기에 실패하면 합성 총성으로 대신 재생한다 (소리가 비지 않음).
+ * - 모든 효과음은 외부 파일 없이 실시간 합성한다.
+ * - 격발음 설계 — 총성 뒤에 '띠딩' 하는 음정이 남지 않는 것이 원칙이다:
+ *   실탄(playGunshot)  ① 160→35Hz 저음 펀치 ② 1200→180Hz 로 닫히는 노이즈 폭음 ③ 짧은 방 잔향 — 세 겹이 0.4초 안에 모두 끝난다.
+ *   피격(playDamage)   둔탁한 저음 '퍽' 하나뿐 (예전의 하강 경고음 · 귀울림은 총성 직후 '띠딩'으로 들려 없앴다).
+ *   공포탄(playClick)  800~2500Hz 로 깎은 노이즈 '딸' + 금속 틱 '깍' — 0.06초에 끝나고 음정 있는 소리는 없다.
+ *   그 밖의 소리도 길게 울리는 고음은 없다: 배경 소리는 1kHz 미만, 장전 '철컥'의 금속 울림은 0.06초 이하 (tests/sound.test.mjs 가 지킨다).
  * - 배경 앰비언트(startAmbient)는 음악이 아니라 저음 드론·실내 소음·전등 험·드문 먼 소리를 합성해 까는 소리 바닥이다.
  *   setTension(0~1)으로 긴장도에 따라 서서히 커지고, duckAmbient()는 총성 때 잠깐 낮춘다.
  *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절한다.
@@ -15,30 +19,25 @@
  *              효과음 요청을 버리고(돌아왔을 때 몰아서 터지지 않게) 무엇도 컨텍스트를 다시 깨우지 못한다 (unlock() · iOS 'interrupted' 복구 포함).
  *   resume()   화면으로 돌아옴 → 컨텍스트 재가동 · 음량 복구 · 배경음 예약 재개 (close() 뒤라면 새 컨텍스트를 만들고 배경음도 이어서 켠다)
  *   close()    페이지 이탈 → 모든 소스 정지 · 타이머 해제 · 컨텍스트 close()
- * - 총성 출처: Freesound "Small pistol gunshot indoors" by acidsnowflake (#402789), CC0 1.0 (저작자 표시 불필요).
- *   미리듣기 MP3에서 한 발(4ms 앞부터 1.5초)을 잘라 25Hz 하이패스 → 피크 −1dBFS 정규화 → 모노 16비트 WAV.
- *   다른 총성으로 바꾸려면 같은 이름으로 파일만 교체하면 된다.
  *
- * 사용 노드: OscillatorNode, 화이트 노이즈·총성 AudioBuffer(AudioBufferSourceNode), BiquadFilterNode, GainNode
+ * 사용 노드: OscillatorNode, 화이트 노이즈 AudioBuffer(AudioBufferSourceNode), BiquadFilterNode, GainNode
  */
 
 const NOISE_SECONDS = 2;
-const GUNSHOT_URL = new URL('../../assets/audio/gunshot.wav', import.meta.url);
-const GUNSHOT_GAIN = 0.8; // 녹음은 피크 −1dBFS라, 피격음 등과 겹쳐도 넘치지 않게 낮춰 재생
 
 // 앰비언트 층별 기본 음량 (효과음이 늘 앞에 서도록 아주 낮게)
 const AMBIENT = { room: 0.2, air: 0.03, drone: 0.05, hum: 0.014, tension: 0.07, event: 0.06 };
 const AMBIENT_FADE_IN = 3; // 초
 const DRONE_PARTIALS = [['sine', 55, 0.5], ['sawtooth', 55.35, 0.16], ['sine', 82.4, 0.16], ['triangle', 110.1, 0.1], ['sine', 36.7, 0.2]]; // A1 + 약간 어긋난 톱니파(맥놀이) + 완전5도 + 서브
 const SILENT = 0.0001; // 지수 램프는 0으로 갈 수 없어 -80dB를 무음으로 사용
-const BAR_MODES = [1, 2.756, 5.404, 8.933]; // 금속 막대 고유 진동 비율(비정수배) → 황동/쇠 질감
+const BAR_MODES = [1, 2.756]; // 금속 막대 고유 진동 비율(비정수배) → 황동/쇠 질감. 더 높은 배음은 유리잔 '띠딩'처럼 들려 두지 않는다
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
 const vary = (value, spread = 0.04) => value * (1 + (Math.random() * 2 - 1) * spread); // 매번 미세하게 다른 소리
 
 // 금속 부품이 맞물리는 '철컥' 한 번: 짧은 쇳소리 + 금속 울림 + 낮은 몸통음
 const clank = (at, click, body, peak) => [
   { at, filters: [['bandpass', vary(click), 2.5]], peak, attack: 0.0006, decay: 0.03 },
-  { at, osc: 'sine', freq: vary(click * 0.67), peak: peak * 0.1, attack: 0.001, decay: 0.1 },
+  { at, osc: 'sine', freq: vary(click * 0.67), peak: peak * 0.1, attack: 0.001, decay: 0.05 }, // 금속 울림은 짧게 — 길면 '띠링' 알림음처럼 들린다
   { at, osc: 'sine', freq: body, to: body * 0.62, glide: 0.05, peak: peak * 0.45, attack: 0.002, decay: 0.08 },
 ];
 
@@ -53,9 +52,6 @@ export class SoundEngine {
   #ctx = null;
   #master = null;
   #noise = null;
-  #gunshot = null; // 실제 총성 녹음 (디코드된 AudioBuffer)
-  #gunshotUrl;
-  #loading = null;
   #volume; // 효과음 음량
   #ambientVolume; // 배경음 음량
   #muted;
@@ -70,15 +66,14 @@ export class SoundEngine {
   #tension = 0;
 
   /**
-   * @param {{ volume?: number, ambientVolume?: number, muted?: boolean, context?: BaseAudioContext, gunshotUrl?: string | URL | null }} [options]
+   * @param {{ volume?: number, ambientVolume?: number, muted?: boolean, context?: BaseAudioContext }} [options]
    *   volume: 효과음 0~1 (기본 0.8) / ambientVolume: 배경음 0~1 (기본 0.6) / muted: 전체 음소거
-   *   context: 이미 있는 AudioContext나 OfflineAudioContext를 쓸 때 / gunshotUrl: 총성 녹음 파일 (null이면 항상 합성 총성)
+   *   context: 이미 있는 AudioContext나 OfflineAudioContext를 쓸 때
    */
-  constructor({ volume = 0.8, ambientVolume = 0.6, muted = false, context = null, gunshotUrl = GUNSHOT_URL } = {}) {
+  constructor({ volume = 0.8, ambientVolume = 0.6, muted = false, context = null } = {}) {
     this.#volume = clamp01(volume);
     this.#ambientVolume = clamp01(ambientVolume);
     this.#muted = Boolean(muted);
-    this.#gunshotUrl = gunshotUrl;
     if (context) this.#setup(context);
   }
 
@@ -171,8 +166,6 @@ export class SoundEngine {
     }
     const ctx = this.#ctx;
     this.#ctx = this.#master = this.#ambientBus = this.#duck = this.#noise = null;
-    this.#gunshot = null;
-    this.#loading = null;
     if (!ctx || 'startRendering' in ctx || ctx.state === 'closed') return;
     try {
       await ctx.close();
@@ -194,7 +187,6 @@ export class SoundEngine {
       silence.buffer = this.#ctx.createBuffer(1, 1, this.#ctx.sampleRate);
       silence.connect(this.#ctx.destination);
       silence.start();
-      this.preload(); // 총성 녹음은 백그라운드로 불러온다 (끝나기 전엔 합성 총성으로 대신)
       if (this.#ambientWanted) this.startAmbient(); // close() 뒤 새 컨텍스트: 진행 중이던 판의 배경음을 이어서
     }
     const ctx = this.#ctx;
@@ -212,54 +204,34 @@ export class SoundEngine {
     return ctx.state === 'running';
   }
 
-  /** 총성 녹음을 불러와 디코드한다 (여러 번 불러도 한 번만). 성공하면 true, 실패하면 false → 합성 총성으로 대신한다. */
-  preload() {
-    this.#loading ??= this.#loadGunshot();
-    return this.#loading;
-  }
-
-  /** 지금 총성이 실제 녹음인가 (아직 불러오는 중이거나 실패했으면 false) */
-  get hasRecordedGunshot() {
-    return this.#gunshot !== null;
-  }
-
-  /** 1) 공포탄: 해머가 빈 약실을 때리는 차갑고 짧은 '찰칵' */
+  /**
+   * 1) 공포탄: 건조하고 날카로운 금속 공이 타격음 '딸깍!' — 0.06초에 깔끔하게 끝난다.
+   *    800~2500Hz 로 깎은 노이즈(딸) + 좁은 대역 노이즈의 금속 틱(깍). 음정이 남는 오실레이터는 쓰지 않는다 (실탄과 확실히 다른 소리).
+   */
   playClick() {
     return this.#play([
-      // 찰: 날카로운 쇳소리 트랜지언트
-      { filters: [['highpass', 1800], ['bandpass', vary(4800), 2.5]], peak: 0.9, attack: 0.0005, decay: 0.014 },
-      // 쇳조각 울림 (비정수배 고음 → 차가운 금속)
-      { osc: 'sine', freq: vary(3150), peak: 0.1, attack: 0.0008, decay: 0.06 },
-      { osc: 'sine', freq: vary(4730), peak: 0.07, attack: 0.0008, decay: 0.045 },
-      { osc: 'sine', freq: vary(7090), peak: 0.04, attack: 0.0008, decay: 0.03 },
-      // 칵: 공이가 되튕기는 두 번째 클릭
-      { at: 0.021, filters: [['bandpass', vary(3200), 3]], peak: 0.6, attack: 0.0005, decay: 0.018 },
-      // 아주 작은 기계 몸통음
-      { osc: 'triangle', freq: 260, to: 140, glide: 0.03, peak: 0.12, attack: 0.001, decay: 0.035 },
+      // (좁게 깎은 노이즈는 필터를 지나며 에너지가 크게 줄어, 게인을 1 이상으로 잡아야 실탄과 비슷한 체감 음량이 된다)
+      { filters: [['highpass', 800, 0.7], ['lowpass', 2500, 0.7]], peak: 1.7, attack: 0.0004, decay: 0.03 },
+      { at: 0.026, filters: [['bandpass', vary(2200, 0.06), 3.5]], peak: 2.6, attack: 0.0004, decay: 0.034 },
     ]);
   }
 
-  /** 2) 실탄: 실제 녹음한 실내 총성 (매번 음높이 ±3%·음량 ±8%로 미세하게 다르게). 녹음이 없으면 합성 총성 */
+  /**
+   * 2) 실탄: 묵직한 리볼버 굉음 — 실제 화약 격발처럼 세 겹을 동시에 겹치고 0.4초 안에 뚝 끝낸다.
+   *    모든 겹이 지수 감쇠(exponentialRamp)로 −80dB 까지 떨어지므로 뒤에 멜로디 · '띠딩' 같은 꼬리가 남지 않는다.
+   *    사용된 가장 높은 오실레이터 음정은 160Hz (고음은 필터를 지난 노이즈에만 있다).
+   */
   playGunshot() {
-    if (!this.#gunshot) return this.#synthGunshot();
-    return this.#playSample(this.#gunshot, vary(GUNSHOT_GAIN, 0.08), vary(1, 0.03));
-  }
-
-  // 합성 총성 (녹음을 못 불러왔을 때의 대체): 저음 펀치 + 노이즈 폭음 + 반사음/잔향이 섞인 묵직한 총성
-  #synthGunshot() {
     return this.#play([
-      // 파열음: 고역 크랙
-      { filters: [['highpass', 1000]], peak: 0.34, attack: 0.0005, decay: 0.04 },
-      // 폭음 본체: 밝게 터진 뒤 빠르게 어두워지는 노이즈
-      { filters: [['lowpass', 6000, 1, 320, 0.35]], peak: 0.38, attack: 0.001, decay: 0.5 },
-      // 저음 펀치 + 서브 '쿵'
-      { osc: 'sine', freq: 150, to: 42, glide: 0.18, peak: 0.42, attack: 0.003, decay: 0.38 },
-      { osc: 'triangle', freq: 75, to: 32, glide: 0.35, peak: 0.2, attack: 0.006, decay: 0.55 },
-      // 초기 반사음 (좁은 방)
-      { at: 0.085, filters: [['bandpass', 900, 0.8]], peak: 0.16, attack: 0.004, decay: 0.14 },
-      { at: 0.19, filters: [['lowpass', 700]], peak: 0.1, attack: 0.006, decay: 0.2 },
-      // 잔향 꼬리
-      { at: 0.012, filters: [['highpass', 120], ['lowpass', 1600, 1, 240, 1.6]], peak: 0.24, attack: 0.05, decay: 1.9 },
+      // ① 초저음 임팩트 펀치: 160Hz → 35Hz 를 0.12초에 급강하하는 사인 킥 + 몸통을 채우는 트라이앵글 (가슴을 때리는 타격감)
+      { osc: 'sine', freq: 160, to: 35, glide: 0.12, peak: 0.7, attack: 0.002, decay: 0.16 },
+      { osc: 'triangle', freq: 160, to: 35, glide: 0.12, peak: 0.2, attack: 0.002, decay: 0.12 },
+      // ② 화약 폭발: 1200Hz → 180Hz 로 빠르게 닫히는 로우패스를 지나는 거친 화이트 노이즈 0.35초 + 격발 순간의 짧은 크랙
+      { filters: [['lowpass', 1200, 1.1, 180, 0.25]], peak: 0.55, attack: 0.001, decay: 0.349 },
+      { filters: [['bandpass', 1500, 0.7]], peak: 0.22, attack: 0.0005, decay: 0.02 },
+      // ③ 짧은 공간 잔향: 방 벽에 한 번 튕긴 낮은 반사음과 어둡게 사라지는 꼬리 (0.4초 이내에 끝)
+      { at: 0.035, filters: [['lowpass', 700, 0.8, 200, 0.28]], peak: 0.18, attack: 0.012, decay: 0.28 },
+      { at: 0.07, filters: [['bandpass', 450, 0.8]], peak: 0.1, attack: 0.006, decay: 0.12 },
     ]);
   }
 
@@ -295,29 +267,23 @@ export class SoundEngine {
       // 묵직한 몸통 '툭'
       { osc: 'sine', freq: 150, to: 92, glide: 0.07, peak: 0.5, attack: 0.003, decay: 0.13 },
       { filters: [['lowpass', 600]], peak: 0.5, attack: 0.002, decay: 0.05 },
-      // 금속 막대 고유 진동
+      // 금속 막대 고유 진동 (짧게 — 길게 울리면 '띠딩' 알림음처럼 들린다)
       ...BAR_MODES.map((ratio, i) => ({
-        at: 0.008, osc: 'sine', freq: base * ratio, peak: 0.15 / (i + 1) ** 0.9, attack: 0.001, decay: 0.45 / (i + 1) ** 0.6,
+        at: 0.008, osc: 'sine', freq: base * ratio, peak: 0.15 / (i + 1) ** 0.9, attack: 0.001, decay: 0.2 / (i + 1) ** 0.6,
       })),
       // 손끝 금속 접촉음
       { at: 0.09, filters: [['bandpass', vary(3400), 5]], peak: 0.25, attack: 0.0005, decay: 0.015 },
     ]);
   }
 
-  /** 6) 피격: 낮은 타격음 + 어둡게 깎은 하강 경고음(붉은 경고) + 옅은 귀울림 */
+  /**
+   * 6) 피격: 몸에 꽂히는 둔탁한 저음 '퍽' 하나. 총성과 동시에 불러도 펀치가 포개지지 않게 50ms 뒤에 깔린다.
+   *    (예전의 하강 경고음 두 음 · 2900Hz 귀울림은 총성 직후 '띠딩'으로 들려서 없앴다 — 이 소리에는 음정이 없다)
+   */
   playDamage() {
-    const alarm = [[0.08, 330], [0.27, 277]].flatMap(([at, f]) => [f, f * 1.012].map((freq) => ({
-      at, osc: 'sawtooth', freq, to: freq * 0.94, glide: 0.15, filters: [['lowpass', 1500, 6]],
-      peak: 0.08, attack: 0.012, hold: 0.09, decay: 0.07,
-    })));
     return this.#play([
-      // 몸에 꽂히는 저음 타격 (총성과 동시에 재생해도 펀치가 포개지지 않게 50ms 뒤)
-      { at: 0.05, osc: 'sine', freq: 95, to: 34, glide: 0.22, peak: 0.5, attack: 0.003, decay: 0.32 },
-      { at: 0.05, filters: [['lowpass', 700, 1, 150, 0.15]], peak: 0.42, attack: 0.002, decay: 0.18 },
-      { at: 0.05, filters: [['bandpass', 1200, 1]], peak: 0.18, attack: 0.0006, decay: 0.03 },
-      ...alarm,
-      // 귀울림
-      { at: 0.08, osc: 'sine', freq: 2900, peak: 0.02, attack: 0.06, decay: 0.6 },
+      { at: 0.05, osc: 'sine', freq: 90, to: 34, glide: 0.14, peak: 0.4, attack: 0.003, decay: 0.2 },
+      { at: 0.05, filters: [['lowpass', 520, 1, 140, 0.12]], peak: 0.34, attack: 0.002, decay: 0.14 },
     ]);
   }
 
@@ -549,7 +515,7 @@ export class SoundEngine {
     }
   }
 
-  // 아주 작고 먼 소리 하나: 잔 부딪힘 / 배관 삐걱 / 둔탁한 쿵
+  // 아주 작고 먼 소리 하나: 나무 두드림 / 배관 삐걱 / 둔탁한 쿵 (전부 낮고 음정 없는 소리 — 격발 사이에 '띠딩'이 끼지 않게)
   #ambientEvent(out, at) {
     const ctx = this.#ctx;
     const bus = ctx.createGain();
@@ -600,12 +566,10 @@ export class SoundEngine {
       finish(n);
     };
     const kind = Math.floor(Math.random() * 3);
-    if (kind === 0) { // 먼 잔 부딪힘 (비정수배 배음 → 유리/금속)
-      const f = 2300 + Math.random() * 900;
-      tone(f, 0, 0.5, 0.001, 0.55);
-      tone(f * 1.505, 0, 0.28, 0.001, 0.4);
-      tone(f * 2.31, 0, 0.15, 0.001, 0.25);
-      tone(f * 0.94, 0, 0.3, 0.001, 0.35, 0.17); // 살짝 뒤늦은 두 번째 '챙'
+    if (kind === 0) { // 멀리서 나무 탁자를 두 번 두드리는 둔탁한 소리 (예전의 유리잔 '챙' 은 고음이 길게 울려 없앴다)
+      hiss('lowpass', 420, 140, 0.8, 0.8, 0.002, 0.07);
+      tone(150, 80, 0.4, 0.003, 0.09);
+      tone(130, 70, 0.3, 0.003, 0.08, 0.16);
     } else if (kind === 1) { // 배관 삐걱
       hiss('bandpass', 460, 250, 7, 0.7, 0.5, 1.2);
     } else { // 둔탁한 쿵
@@ -642,43 +606,6 @@ export class SoundEngine {
     return ctx;
   }
 
-  async #loadGunshot() {
-    const ctx = this.#ctx;
-    if (!ctx || !this.#gunshotUrl || typeof fetch !== 'function') return false;
-    try {
-      const res = await fetch(this.#gunshotUrl);
-      if (!res.ok) return false;
-      const data = await res.arrayBuffer();
-      // 구형 Safari는 decodeAudioData가 Promise를 돌려주지 않아 콜백과 Promise를 함께 받는다
-      const buffer = await new Promise((resolve, reject) => {
-        const decoding = ctx.decodeAudioData(data, resolve, reject);
-        if (typeof decoding?.then === 'function') decoding.then(resolve, reject);
-      });
-      if (this.#ctx !== ctx) return false; // 불러오는 사이 close() 됨 — 새 컨텍스트가 다시 불러온다
-      this.#gunshot = buffer;
-      return true;
-    } catch {
-      return false; // 파일이 없거나 디코드에 실패 → 합성 총성으로 대신
-    }
-  }
-
-  // 녹음된 AudioBuffer를 한 번 재생하고, 끝날 때까지의 시간(초)을 반환
-  #playSample(buffer, gain, rate) {
-    const ctx = this.#ready();
-    if (!ctx) return 0;
-    const t = ctx.currentTime + 0.01;
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.playbackRate.value = rate;
-    const amp = ctx.createGain();
-    amp.gain.value = gain;
-    src.connect(amp);
-    amp.connect(this.#master);
-    src.start(t);
-    this.#track(src);
-    return t - ctx.currentTime + buffer.duration / rate;
-  }
-
   // 레이어들을 한 번에 예약하고, 지금부터 소리가 끝날 때까지의 시간(초)을 반환
   #play(layers) {
     const ctx = this.#ready();
@@ -693,9 +620,9 @@ export class SoundEngine {
    * 소리 한 겹: 오실레이터(osc 지정 시) 또는 화이트 노이즈 → 필터 체인 → 엔벌로프 GainNode → 마스터
    * filters: [type, freq, Q = 1, 목표 freq?, 스윕 시간?][]   반환: 끝나는 절대 시각
    */
-  #layer(ctx, t0, { at = 0, osc, freq, to, glide, filters = [], peak, attack = 0.002, hold = 0, decay }) {
+  #layer(ctx, t0, { at = 0, osc, freq, to, glide, filters = [], peak, attack = 0.002, decay }) {
     const t = t0 + at;
-    const end = t + attack + hold + decay;
+    const end = t + attack + decay;
     let src;
     if (osc) {
       src = ctx.createOscillator();
@@ -720,7 +647,6 @@ export class SoundEngine {
     const amp = ctx.createGain();
     amp.gain.setValueAtTime(SILENT, t);
     amp.gain.exponentialRampToValueAtTime(peak, t + attack);
-    if (hold) amp.gain.setValueAtTime(peak, t + attack + hold);
     amp.gain.exponentialRampToValueAtTime(SILENT, end);
     node.connect(amp);
     amp.connect(this.#master);
