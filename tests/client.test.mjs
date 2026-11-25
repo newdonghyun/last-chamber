@@ -4,9 +4,10 @@
 //   3. 세션(UserSession): 서버가 준 토큰으로 로그인 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(아이디는 기본값으로) · 손님 · 예전(닉네임 · PIN) 세션 · 손상된 저장값
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 토큰도 손님 표시도 없으면 html.needs-login
 //   6. 계정 API(accountApi): 회원가입 · 로그인 → 이 기기에 저장 (비밀번호는 저장 안 함) · 형식 검사 · 오류 문구 · 토큰 만료 → 다시 로그인 · 닉네임 변경 · 아이디/비밀번호 규칙이 서버와 같다
+//   8. 소리 출력 지점 감사: Web Audio 는 soundEngine.js 한 곳뿐 · <audio> · new Audio · 음성 합성 · 시스템 벨(\x07) 없음 · 앱의 소리 호출 가드(포커스 · 인게임 화면)
 //   7. 인게임 [항복] / [나가기]: app.js 가 쓰는 요소가 index.html 에 모두 있다 · 확인 모달 · AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 · 온라인 항복은 서버 요청뿐
 //   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import vm from 'node:vm';
 import { PlatformBridge, HAPTIC_COOLDOWN_MS } from '../src/platform/platformBridge.js';
 import { randomUUID } from 'node:crypto';
@@ -303,6 +304,34 @@ function memoryStorage(initial = {}) {
   ok(/pvpSurrender\(\)/.test(confirm) && !/profile\./.test(confirm), '7 온라인 항복은 서버에 요청만 한다 — 클라이언트가 전적 · MMR 을 직접 바꾸지 않는다');
   ok(/if \(!online\)[\s\S]*leaveAiGame\(\)/.test(confirm), '7 AI 연습이면 서버 없이 바로 나간다');
   ok(/recordedGame !== token/.test(app) && /pvpSettle\(won\)/.test(app), '7 온라인 결과 정산은 기존 endGame 한 곳 (판당 한 번)');
+}
+
+// ───────── 8. 소리 출력 지점 감사 · 호출 가드 ─────────
+{
+  const root = new URL('../', import.meta.url);
+  const walk = (dir) => readdirSync(new URL(dir, root)).flatMap((name) => {
+    const rel = `${dir}${name}`;
+    return statSync(new URL(rel, root)).isDirectory() ? walk(`${rel}/`) : [rel];
+  });
+  const files = [...walk('src/'), ...walk('server/'), ...walk('scripts/'), 'index.html', 'style.css'].filter((f) => /\.(js|mjs|html|css)$/.test(f));
+  const text = (f) => readFileSync(new URL(f, root), 'utf8');
+  const hits = (re) => files.filter((f) => re.test(text(f)));
+  eq(hits(/createOscillator|createBufferSource|new (?:window\.)?AudioContext|webkitAudioContext/), ['src/ui/soundEngine.js'], '8 Web Audio 를 쓰는 파일은 soundEngine.js 한 곳뿐');
+  eq(hits(/new Audio\(|<audio\b|HTMLAudioElement|speechSynthesis|SpeechSynthesisUtterance/), [], '8 <audio> · new Audio · 음성 합성은 쓰지 않는다');
+  eq(hits(/\x07|\\x07|\\u0007|\\a['"`]|\bbeep\b/i), [], '8 시스템 벨(\\x07) · beep 출력은 코드 어디에도 없다 (서버 포함)');
+  eq(hits(/\bnew Notification\(|navigator\.mediaSession/), [], '8 알림음 · 미디어 세션(백그라운드 재생)은 쓰지 않는다');
+
+  const app = text('src/ui/app.js');
+  ok(/new SoundEngine\(\{[^}]*inGame: false/.test(app), '8 앱은 소리 엔진을 인게임 잠금을 잠근 채 만든다');
+  ok(/function startGame\([\s\S]*?sound\.setInGame\(true\)[\s\S]*?sound\.startAmbient\(\)/.test(app), '8 판이 시작될 때 잠금을 열고 나서 배경음을 켠다');
+  ok(/async function endGame\([\s\S]{0,1800}?sound\.setInGame\(false\)/.test(app), '8 결과 화면에서 잠금을 다시 닫는다');
+  ok(/setInGame\(false\)/.test(app.match(/function leaveAiGame\([^)]*\) \{[\s\S]*?\n\}\n/)?.[0] ?? ''), '8 AI 나가기에서도 잠금을 다시 닫는다');
+  ok(/const gameSoundOk = \(token = gameId\) => onGameScreen\(token\) && documentFocused\(\)/.test(app) && /const gameSfx = \(play, token = gameId\) => \{ if \(gameSoundOk\(token\)\) play\(\); \}/.test(app), '8 게임 효과음 가드: 같은 판의 게임 화면 + 창 포커스');
+  ok(/if \(documentFocused\(\)\) \{[\s\S]{0,80}sound\.playGunshot\(\)/.test(app), '8 총성도 포커스가 있을 때만');
+  ok(!/setTimeout\(\(\) => \(kind === 'item' \? sound\./.test(app) && /setTimeout\(\(\) => gameSfx\(/.test(app), '8 예약한 도발 효과음도 울리는 시점에 다시 가드 (판이 끝난 뒤에 새지 않는다)');
+  // 게임 전용 소리 호출은 가드(gameSfx · onGameScreen · gameSoundOk) 안에서만 — 직접 호출 줄 수를 고정해 새 호출이 가드 없이 늘어나는 것을 잡는다
+  const direct = app.split('\n').filter((l) => /sound\.(playGunshot|playDamage|playHeartbeat)\(/.test(l) && !/gameSfx\(/.test(l)).length;
+  eq(direct, 2, '8 가드 없이 직접 부르는 게임 전용 소리는 총성 · 피격 두 줄뿐 (둘 다 onGameScreen + 포커스 블록 안)');
 }
 
 const ms = Math.round(performance.now() - T0);

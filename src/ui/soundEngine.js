@@ -16,6 +16,11 @@
  * - 배경 앰비언트(startAmbient)는 음악이 아니라 저음 드론·실내 소음·전등 험·드문 먼 소리를 합성해 까는 소리 바닥이다.
  *   setTension(0~1)으로 긴장도에 따라 서서히 커지고, duckAmbient()는 총성 때 잠깐 낮춘다.
  *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절한다.
+ * - 소리 이중 잠금 (실시간 컨텍스트에만 — OfflineAudioContext 는 스피커로 나가지 않으므로 대상이 아니다):
+ *   잠금 1  모든 소리: 탭이 보이고(document.hidden 아님) · 창에 포커스가 있고(document.hasFocus()) · suspend() 중이 아닐 때만. 가려지거나 포커스를 잃는 순간(visibilitychange · blur)
+ *           마스터 · 배경 게인을 곧바로 0 으로 만들고, 그동안의 효과음 요청은 소리를 만들지도 않는다 (돌아와 focus 가 오면 원래 음량).
+ *   잠금 2  게임 전용 소리(총성 · 피격 · 심박 · 배경음): 앱이 '실제 인게임 화면'일 때만 setInGame(true) 로 열어 준다. 앱 쪽 호출 가드가 빠져도 판 밖(타이틀 · 결과 · 로비)에서는 울리지 않는다.
+ *           (장전 · 아이템 · 클릭은 상점 · 상자 · 설정의 메뉴 효과음과 같이 쓰므로 잠금 1 만 건다. 단독으로 쓸 때(테스트 · 측정)의 기본값은 열림 — new SoundEngine({ inGame: false }) 로 잠그고 시작.)
  * - 마스터 GainNode(#master)는 하나뿐이다 — 모든 효과음(총성 체인 포함)이 지나가는 문. document.hidden === true 이면 생명주기 훅이 늦거나 빠져도
  *   gain 을 0 으로 강제하고(visibilitychange 로 즉시 · 새 소리 요청도 차단), 보이게 돼도 suspend() 중이거나 음소거면 0 을 유지한다.
  * - 생명주기 (src/ui/lifecycle.js 가 부른다):
@@ -42,6 +47,7 @@ const BAR_MODES = [1, 2.756]; // 금속 막대 고유 진동 비율(비정수배
 const curveOf = (fn, n = 1024) => Float32Array.from({ length: n }, (_, i) => fn((i / (n - 1)) * 2 - 1)); // 입력 −1~1 → 출력 (WaveShaper 곡선)
 const softClipCurve = () => curveOf((x) => Math.tanh(GUN_CLIP_DRIVE * x) / Math.tanh(GUN_CLIP_DRIVE));
 const pageHidden = () => globalThis.document?.hidden === true; // 탭이 가려졌다 (화면 잠금 · 탭 내림 · 다른 앱) — 브라우저가 알려 주는 값
+const pageUnfocused = () => typeof globalThis.document?.hasFocus === 'function' && globalThis.document.hasFocus() === false; // 창이 포커스를 잃었다 (다른 창 · 앱 전환 · 닫는 중) — hasFocus 를 모르는 환경은 포커스 있음으로 본다
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
 const vary = (value, spread = 0.04) => value * (1 + (Math.random() * 2 - 1) * spread); // 매번 미세하게 다른 소리
 
@@ -77,16 +83,18 @@ export class SoundEngine {
   #ambientWanted = false; // 판이 진행 중이라 배경음이 깔려 있어야 하는가 (컨텍스트를 새로 만들면 이어서 켠다)
   #voices = new Set(); // 지금 울리고 있는 효과음 소스 — 화면을 떠나면 한꺼번에 끊는다
   #held = false; // 화면 밖(백그라운드 · 페이지 이탈): 소리를 만들지도, 컨텍스트를 깨우지도 않는다
-  #visBound = false; // visibilitychange 리스너를 이 엔진이 한 번만 달았는가
+  #visBound = false; // visibilitychange · window blur/focus 리스너를 이 엔진이 한 번만 달았는가
+  #inGame; // 잠금 2: 실제 인게임 화면인가 (게임 전용 소리가 이것을 본다)
   #unlockedOnce = false; // 사용자가 한 번이라도 오디오를 켰는가 (close() 뒤 돌아오면 새 컨텍스트를 만들어도 되는가)
   #tension = 0;
 
   /**
-   * @param {{ volume?: number, ambientVolume?: number, muted?: boolean, context?: BaseAudioContext }} [options]
+   * @param {{ volume?: number, ambientVolume?: number, muted?: boolean, context?: BaseAudioContext, inGame?: boolean }} [options]
    *   volume: 효과음 0~1 (기본 0.8) / ambientVolume: 배경음 0~1 (기본 0.6) / muted: 전체 음소거
-   *   context: 이미 있는 AudioContext나 OfflineAudioContext를 쓸 때
+   *   context: 이미 있는 AudioContext나 OfflineAudioContext를 쓸 때 / inGame: 게임 전용 소리의 잠금 2 (기본 true = 열림, 앱은 false 로 시작해 판이 열릴 때 setInGame(true))
    */
-  constructor({ volume = 0.8, ambientVolume = 0.6, muted = false, context = null } = {}) {
+  constructor({ volume = 0.8, ambientVolume = 0.6, muted = false, context = null, inGame = true } = {}) {
+    this.#inGame = Boolean(inGame);
     this.#volume = clamp01(volume);
     this.#ambientVolume = clamp01(ambientVolume);
     this.#muted = Boolean(muted);
@@ -119,6 +127,16 @@ export class SoundEngine {
   setMuted(muted) {
     this.#muted = Boolean(muted);
     this.#applyVolumes();
+  }
+
+  /** 잠금 2 — 앱이 실제 인게임 화면이면 true. false 가 되면 켜져 있던 배경음도 곧바로 접는다 (총성 · 피격 · 심박 · 배경음은 true 일 때만 난다) */
+  setInGame(on) {
+    this.#inGame = Boolean(on);
+    if (!this.#inGame) this.stopAmbient({ fade: 0.4 }); // 이미 접는 중이면(fade 가 더 긴 호출이 먼저 왔다면) 그대로 둔다
+  }
+
+  get inGame() {
+    return this.#inGame;
   }
 
   /** 화면 밖(백그라운드 · 화면 꺼짐 · 다른 앱)에 있는 동안 true — 이때는 아무 소리도 나지 않는다 */
@@ -239,6 +257,7 @@ export class SoundEngine {
    *    모든 겹이 지수 감쇠(exponentialRamp)로 −80dB 까지 떨어지므로 뒤에 멜로디 · '띠딩' 같은 꼬리가 남지 않는다 (2.2kHz 소리는 0.03초뿐).
    */
   playGunshot() {
+    if (!this.#inGame) return 0; // 잠금 2
     return this.#play([
       // ① 초기 뇌관 파열음: 0~0.03초에 2200Hz → 400Hz 로 급강하하는 날카로운 어택 펀치 (귀에 '땅!' 하고 꽂히는 핵심 타격감)
       { bus: 'gun', osc: 'triangle', freq: 2200, to: 400, glide: 0.03, peak: 0.6, attack: 0.0005, decay: 0.0295 },
@@ -270,6 +289,7 @@ export class SoundEngine {
 
   /** 4) 격발 직전 정적(0.4초) 안에 끝나는 낮고 묵직한 '두-근' */
   playHeartbeat() {
+    if (!this.#inGame) return 0; // 잠금 2
     return this.#play([...beat(0, 62, 0.8), ...beat(0.17, 72, 0.62)]);
   }
 
@@ -296,6 +316,7 @@ export class SoundEngine {
    *    (예전의 하강 경고음 두 음 · 2900Hz 귀울림은 총성 직후 '띠딩'으로 들려서 없앴다 — 이 소리에는 음정이 없다)
    */
   playDamage() {
+    if (!this.#inGame) return 0; // 잠금 2
     return this.#play([
       { at: 0.05, osc: 'sine', freq: 90, to: 34, glide: 0.14, peak: 0.4, attack: 0.003, decay: 0.2 },
       { at: 0.05, filters: [['lowpass', 520, 1, 140, 0.12]], peak: 0.34, attack: 0.002, decay: 0.14 },
@@ -307,6 +328,7 @@ export class SoundEngine {
    * preschedule: 처음에 미리 깔아 둘 '드문 소리'의 길이(초). 실시간에서는 4초마다 이어서 예약한다.
    */
   startAmbient({ preschedule = 12 } = {}) {
+    if (!this.#inGame) return; // 잠금 2 — 판 밖에서는 배경음을 켜지도, 켜 달라고 기억해 두지도 않는다
     this.#ambientWanted = true; // 지금 켤 수 없으면(화면 밖 · 컨텍스트 없음) 돌아와서 켠다
     const ctx = this.#ready();
     if (!ctx || this.#ambient) return;
@@ -448,7 +470,7 @@ export class SoundEngine {
       param.setValueAtTime(param.value, t);
       param.linearRampToValueAtTime(value, t + 0.03);
     };
-    const off = this.#muted || this.#held || pageHidden(); // 화면 밖에서 음량을 바꿔도 무음은 그대로 (돌아올 때 resume()이 올린다)
+    const off = this.#muted || this.#held || this.#away(ctx); // 화면 밖에서 음량을 바꿔도 무음은 그대로 (돌아올 때 resume()이 올린다)
     ramp(this.#master.gain, off ? 0 : this.#volume);
     ramp(this.#ambientBus.gain, off ? 0 : this.#ambientVolume);
   }
@@ -596,9 +618,9 @@ export class SoundEngine {
   #setup(ctx) {
     this.#ctx = ctx;
     this.#master = ctx.createGain(); // 효과음 버스
-    this.#master.gain.value = this.#muted || pageHidden() ? 0 : this.#volume;
+    this.#master.gain.value = this.#muted || this.#away(ctx) ? 0 : this.#volume;
     this.#ambientBus = ctx.createGain(); // 배경음 버스
-    this.#ambientBus.gain.value = this.#muted || pageHidden() ? 0 : this.#ambientVolume;
+    this.#ambientBus.gain.value = this.#muted || this.#away(ctx) ? 0 : this.#ambientVolume;
     this.#ambientBus.connect(ctx.destination);
     this.#duck = ctx.createGain();
     this.#duck.connect(this.#ambientBus);
@@ -613,14 +635,22 @@ export class SoundEngine {
     this.#gunBus = ctx.createGain();
     this.#gunBus.gain.value = GUN_BOOST;
     this.#gunBus.connect(this.#gunComp);
-    if (!this.#visBound && typeof globalThis.document?.addEventListener === 'function') { // 가려지는 순간 곧바로 마스터를 0 으로 (보이면 원래 음량으로 — suspend 중이면 0 유지)
+    if (!this.#visBound && typeof globalThis.document?.addEventListener === 'function') { // 가려지거나 포커스를 잃는 순간 곧바로 마스터를 0 으로 (돌아오면 원래 음량으로 — suspend 중이면 0 유지)
       this.#visBound = true;
-      globalThis.document.addEventListener('visibilitychange', () => (pageHidden() ? this.#silence() : this.#applyVolumes()));
+      const onAway = () => (this.#away() ? this.#silence() : this.#applyVolumes());
+      globalThis.document.addEventListener('visibilitychange', onAway);
+      for (const type of ['blur', 'focus']) globalThis.window?.addEventListener?.(type, (e) => { if (e.target === globalThis.window) onAway(); }); // 입력칸 같은 요소의 blur 는 무시
     }
     const length = Math.floor(ctx.sampleRate * NOISE_SECONDS);
     this.#noise = ctx.createBuffer(1, length, ctx.sampleRate);
     const data = this.#noise.getChannelData(0);
     for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+  }
+
+  // 잠금 1: 탭이 가려졌거나 창이 포커스를 잃었다. 스피커로 나가지 않는 OfflineAudioContext(테스트 · 측정)는 대상이 아니다
+  #away(ctx = this.#ctx) {
+    if (!ctx || 'startRendering' in ctx) return false;
+    return pageHidden() || pageUnfocused();
   }
 
   // 바디 포화 곡선 (tanh 로 둥글게 눌린 출력). 컨텍스트마다 한 번만 만든다
@@ -633,7 +663,7 @@ export class SoundEngine {
   // 화면 밖에서는 iOS 'interrupted' 복구도 하지 않는다 — 백그라운드에서 들어온 효과음 요청이 컨텍스트를 깨워 소리가 새던 원인
   #ready() {
     const ctx = this.#ctx;
-    if (this.#held || pageHidden() || !ctx || ctx.state === 'closed') return null; // 가려진 탭에서는 효과음을 만들지도 않는다
+    if (this.#held || !ctx || ctx.state === 'closed' || this.#away(ctx)) return null; // 가려지거나 포커스를 잃은 탭에서는 효과음을 만들지도 않는다 (잠금 1)
     if (ctx.state === 'interrupted') {
       ctx.resume().catch(() => {});
       return null;

@@ -6,6 +6,7 @@
 //   5. watchLifecycle: visibilitychange · blur/focus · pagehide · beforeunload · pageshow 순서와 1회 호출
 //   6. 둘을 이어 붙인 흐름 (app.js 와 같은 연결)
 //   7. blur · freeze → 즉시 오디오 close + 소켓 disconnect (onHalt) · 돌아오면 다시 (onRestore) · document.hidden 이면 마스터 게인 0 강제
+//   8. 소리 이중 잠금: ① 포커스(document.hasFocus) · 가려짐 — 잃는 순간 마스터 0 · 소리 요청 차단 ② 인게임 화면 플래그 — 총성 · 피격 · 심박 · 배경음은 판 밖에서 나지 않는다
 import { SoundEngine } from '../src/ui/soundEngine.js';
 import { watchLifecycle } from '../src/ui/lifecycle.js';
 
@@ -375,6 +376,78 @@ const fakePage = ({ hidden = false } = {}) => {
   eq(FakeAudioContext.made.at(-1).nodes[0].gain.value, 0, '7 가려진 탭에서 새로 만든 컨텍스트도 마스터 0');
   await sound.close();
   delete globalThis.document;
+}
+
+// ───────── 8. 소리 이중 잠금 ─────────
+{
+  // 잠금 1 — 포커스: 창이 포커스를 잃는 순간 마스터 · 배경 게인 0, 소리 요청은 소리를 만들지도 않는다
+  const win = new EventTarget();
+  const doc = new EventTarget();
+  doc.hidden = false;
+  doc.visibilityState = 'visible';
+  let focused = true;
+  doc.hasFocus = () => focused;
+  globalThis.window = win;
+  globalThis.document = doc;
+  const fireWin = (type) => win.dispatchEvent(new Event(type));
+  const sound = new SoundEngine({ volume: 0.8, ambientVolume: 0.6 });
+  await sound.unlock();
+  const ctx = FakeAudioContext.made.at(-1);
+  const master = ctx.nodes[0];
+  const ambient = ctx.nodes[1];
+  eq([master.gain.value, ambient.gain.value, sound.playClick() > 0], [0.8, 0.6, true], '8 포커스 있음: 정상 음량 · 소리 남');
+  focused = false;
+  fireWin('blur');
+  eq([master.gain.value, ambient.gain.value], [0, 0], '8 포커스를 잃으면 마스터 · 배경 게인 즉시 0');
+  const nodes = ctx.nodes.length;
+  eq([sound.playGunshot(), sound.playClick(), sound.playItem(), sound.playReload(), ctx.nodes.length], [0, 0, 0, 0, nodes], '8 포커스 없는 창에서는 어떤 효과음도 만들지 않는다');
+  focused = true;
+  fireWin('focus');
+  eq([master.gain.value, ambient.gain.value], [0.8, 0.6], '8 포커스가 돌아오면 원래 음량');
+  eq(sound.playClick() > 0, true, '8 다시 소리 남');
+  await sound.suspend();
+  fireWin('blur');
+  focused = true;
+  fireWin('focus');
+  eq(master.gain.value, 0, '8 suspend 중이면 포커스가 돌아와도 0 유지 (resume 할 때까지)');
+  await sound.resume();
+  eq(master.gain.value, 0.8, '8 resume → 원래 음량');
+  focused = false;
+  const off = Object.assign(new FakeAudioContext(), { startRendering() {} });
+  eq(new SoundEngine({ context: off }).playClick() > 0, true, '8 OfflineAudioContext(측정 · 렌더링)는 스피커로 나가지 않으므로 잠금 대상이 아니다');
+  focused = true;
+  await sound.close();
+  // 가려진 탭에서 새로 만든 컨텍스트도 포커스가 없으면 0 에서 시작
+  focused = false;
+  const late = new SoundEngine({ volume: 0.8 });
+  await late.unlock();
+  eq(FakeAudioContext.made.at(-1).nodes[0].gain.value, 0, '8 포커스 없이 새로 만든 컨텍스트는 마스터 0 에서 시작');
+  await late.close();
+  delete globalThis.window;
+  delete globalThis.document;
+}
+{
+  // 잠금 2 — 인게임 화면: 판 밖에서는 게임 전용 소리가 나지 않는다 (앱 쪽 가드가 빠져도)
+  const sound = new SoundEngine({ inGame: false });
+  await sound.unlock();
+  const ctx = FakeAudioContext.made.at(-1);
+  sound.startAmbient();
+  eq([sound.inGame, sound.ambientPlaying, intervals.size], [false, false, 0], '8 인게임이 아니면 배경음을 켜지 않는다');
+  const nodes = ctx.nodes.length;
+  eq([sound.playGunshot(), sound.playDamage(), sound.playHeartbeat(), ctx.nodes.length], [0, 0, 0, nodes], '8 판 밖: 총성 · 피격 · 심박은 소리를 만들지도 않는다');
+  ok(sound.playClick() > 0 && sound.playItem() > 0 && sound.playReload() > 0, '8 메뉴 효과음(클릭 · 아이템 · 장전)은 상점 · 상자 · 설정에서 쓰므로 판 밖에서도 난다 (잠금 1 만)');
+  sound.setInGame(true);
+  sound.startAmbient();
+  ok(sound.ambientPlaying && intervals.size === 1, '8 판이 열리면(setInGame true) 배경음 켜짐');
+  ok(sound.playGunshot() > 0 && sound.playDamage() > 0 && sound.playHeartbeat() > 0, '8 인게임: 총성 · 피격 · 심박 소리 남');
+  sound.setInGame(false);
+  eq([sound.ambientPlaying, intervals.size, sound.playGunshot(), sound.playHeartbeat()], [false, 0, 0, 0], '8 판이 끝나면(setInGame false) 배경음도 접히고 게임 전용 소리 차단');
+  sound.startAmbient(); // 판 밖에서 켜 달라고 해도 '나중에 켜겠다'고 기억해 두지 않는다
+  await sound.suspend();
+  await sound.resume();
+  eq([sound.ambientPlaying, intervals.size], [false, 0], '8 판 밖의 배경음 요청은 기억하지 않는다 — 화면에 돌아와도 저절로 켜지지 않음');
+  await sound.close();
+  eq(new SoundEngine().inGame, true, '8 단독 사용(테스트 · 측정)의 기본값은 열림');
 }
 
 for (const id of intervals) realClearInterval(id);

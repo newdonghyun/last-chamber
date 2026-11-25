@@ -268,7 +268,7 @@ try {
 } catch {
   // 저장소 접근 불가·손상된 값 → 기본값
 }
-const sound = new SoundEngine({ volume: soundPrefs.sfx, ambientVolume: soundPrefs.ambient, muted: soundPrefs.muted });
+const sound = new SoundEngine({ volume: soundPrefs.sfx, ambientVolume: soundPrefs.ambient, muted: soundPrefs.muted, inGame: false }); // 잠금 2 는 잠근 채 시작 — startGame 이 열고, 결과 · 나가기가 다시 잠근다
 let engine = null;
 let online = false; // 실시간 PvP 판인가 — true 면 engine 은 pvpSession.js 의 원격 엔진이고 딜러 AI · 로컬 규칙은 돌지 않는다
 let animatedIdx = -1; // PvP: 총 연출(격발)을 이미 보여 준 마지막 SHOT 로그 위치 — 내 격발은 입력 때, 상대 격발은 로그 연출 때 보여 주므로 겹치지 않게
@@ -330,7 +330,10 @@ const thinking = (on) => el.speech.classList.toggle('is-thinking', on);
 // (지난 판의 늦은 연출 · 끝난 PvP 판의 늦은 이벤트가 로비나 결과 화면에서 소리를 내지 않게. 다른 방 이벤트는 pvpSession.js 가 방 코드로 먼저 걸러 낸다)
 const lobbyOpen = () => document.getElementById('mp-lobby')?.open === true;
 const onGameScreen = (token = gameId) => token === gameId && Boolean(engine) && !el.title.open && !lobbyOpen();
-const gameSfx = (play, token = gameId) => { if (onGameScreen(token)) play(); };
+// 이중 잠금 ① 앱: 지금 판(token)의 실제 게임 화면이고 창에 포커스가 있을 때만 (② 엔진: 가려짐 · 포커스 · 인게임 플래그 — soundEngine.js)
+const documentFocused = () => typeof document.hasFocus !== 'function' || document.hasFocus();
+const gameSoundOk = (token = gameId) => onGameScreen(token) && documentFocused();
+const gameSfx = (play, token = gameId) => { if (gameSoundOk(token)) play(); };
 const isPaused = () => !online && (el.rules.open || el.leave.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
 
 function guard(promise) {
@@ -1398,8 +1401,9 @@ const TAUNT_SFX = {
   flick: [['click', 0], ['item', 110]],
 };
 
-function playTauntSound(id) {
-  for (const [kind, at] of TAUNT_SFX[id] ?? []) setTimeout(() => (kind === 'item' ? sound.playItem() : sound.playClick()), at);
+function playTauntSound(id) { // 예약한 소리는 울리는 시점에도 같은 판의 게임 화면 · 포커스일 때만 (판이 끝나거나 창을 떠난 뒤에 새지 않게)
+  const token = gameId;
+  for (const [kind, at] of TAUNT_SFX[id] ?? []) setTimeout(() => gameSfx(() => (kind === 'item' ? sound.playItem() : sound.playClick()), token), at);
 }
 
 // 도발 연출 한 번 (내 도발 · 상대 도발 공통): 테이블 중앙 네온 글자 + 도발별 이펙트 + 효과음. from = 'me' | 'opponent' (상대의 도발은 붉은 네온)
@@ -1515,6 +1519,7 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
       sound.unlock().catch(() => {});
     }, { once: true });
   }
+  sound.setInGame(true); // 잠금 2 열기 — 실제 판이 시작됐다
   sound.setTension(0);
   sound.startAmbient(); // 앰비언트 배경음 (다시 하기로 재시작해도 한 번만 켜짐)
   const token = ++gameId;
@@ -1623,6 +1628,7 @@ async function endGame(s, token) {
   render(); // 위기 비네팅·긴장도도 여기서 해제
   syncTauntButton(); // 승패가 갈렸으니 도발 버튼은 접는다
   sound.stopAmbient({ fade: 3 }); // 결과 화면에서는 배경음이 서서히 잦아든다
+  sound.setInGame(false); // 잠금 2 닫기 — 결과 화면부터는 게임 전용 소리가 나지 않는다 (위 페이드는 이미 걸려 있어 그대로)
   // 승패가 가려지는 순간 결과를 저장한다 (연출 도중 창을 닫아도 탄피·연승이 남도록). 한 판에 한 번만.
   let outcome = null;
   if (recordedGame !== token) {
@@ -1721,6 +1727,7 @@ function leaveAiGame() {
   setCrisis('');
   syncTauntButton();
   sound.stopAmbient({ fade: 1.5 });
+  sound.setInGame(false); // 잠금 2 닫기
   applyLoadout(profile.activeLoadout()); // 1판 체험 스킨이었다면 장착해 둔 스킨으로 복귀
   setHtml(el.titleHeading, 'LAST<span>CHAMBER</span>');
   el.titleSub.textContent = '연습 게임을 마쳤다. 다시 앉겠는가?';
@@ -1858,10 +1865,12 @@ async function fireSequence(shooter, target, token, known = null) {
       el.table.classList.add('zoom-hit');
     }
     if (onGameScreen(token)) { // 실제 게임 화면에서만 총성 · 진동
-      sound.playGunshot();
-      sound.playDamage();
+      if (documentFocused()) { // 포커스가 없으면 소리는 내지 않는다 (진동은 그대로)
+        sound.playGunshot();
+        sound.playDamage();
+        sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
+      }
       platform.triggerHaptic(atDealer ? 'shot' : 'hit'); // 실탄 1회: 상대가 맞으면 실탄 발사(Medium) · 내가 맞으면 피격(Heavy) — 300ms 쿨타임으로 중복 수신도 한 번만
-      sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
     }
     restartClasses([[el.gun, 'fire'], [el.app, 'shake-hard'], [el.flash, 'flash-red']]); // 강제 리플로우 1번으로 세 연출을 함께 시작
     if (slow) await wait(SLOWMO_MS);
