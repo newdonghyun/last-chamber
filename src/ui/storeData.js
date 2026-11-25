@@ -172,6 +172,48 @@ export const GUN_SKINS = Object.freeze([
       smoke: '#d9ccd6',
     }),
   },
+  {
+    // 출석 체크 6일차 보상 한정 (price.limited) — 탄피 · 결제로는 팔지 않는다
+    id: 'blood_gold',
+    name: '블러드 골드',
+    en: 'Blood Gold',
+    blurb: '황금빛 총열에 핏빛 문양이 번지는 한정 스킨 — 출석 체크 6일차 보상',
+    price: { limited: 'attendance', day: 6 },
+    chips: ['#ffe9b0', '#d4a02c', '#b3201f'],
+    vars: gunVars({
+      metal: ['#ffe9b0', '#d4a02c', '#8c1f1f', '#3a0a0a', '#140303'],
+      cyl: ['#ffd98a', '#b8862a', '#6b1414', '#1d0505'],
+      grip: ['#4a0f12', '#220708', '#0a0203'],
+      hammer: ['#ffe0b0', '#c9892a', '#7d1616', '#2a0606'],
+      accent: ['#ffe9b0', '#8c1f1f', '#2a0606'],
+      edge: '#ffe9c0',
+      rib: '#4a0f12',
+      cap: '#8c1f1f',
+      flash: ['#fff6dd', '#ffb347', '#e0301e', '#6a0a0a'],
+      smoke: '#e8c9b0',
+    }),
+  },
+  {
+    // 출석 체크 7일차 보상 한정 (price.limited)
+    id: 'phantom_black',
+    name: '팬텀 블랙',
+    en: 'Phantom Black',
+    blurb: '빛을 먹는 무광 블랙 바디에 보랏빛 광택만 스치는 한정 스킨 — 출석 체크 7일차 보상',
+    price: { limited: 'attendance', day: 7 },
+    chips: ['#4a4a55', '#14141a', '#8f78ff'],
+    vars: gunVars({
+      metal: ['#4a4a55', '#23232b', '#0f0f14', '#050507', '#000000'],
+      cyl: ['#5a5a66', '#2a2a33', '#101015', '#030304'],
+      grip: ['#1a1a20', '#0b0b0e', '#030304'],
+      hammer: ['#8a7fb0', '#3d3558', '#1a1530', '#08060f'],
+      accent: ['#b8a8e8', '#4b3a8a', '#140e2e'],
+      edge: '#8f86b8',
+      rib: '#0b0b0f',
+      cap: '#17141f',
+      flash: ['#f3eaff', '#a98cff', '#5a2ee6', '#1d0a66'],
+      smoke: '#bcb4d6',
+    }),
+  },
 ]);
 
 export const TABLE_THEMES = Object.freeze([
@@ -229,6 +271,22 @@ export const TABLE_THEMES = Object.freeze([
       edge: 'rgba(255, 128, 136, .42)',
       spot: [255, 82, 98],
       glow: 0.16,
+    }),
+  },
+  {
+    // 출석 체크 2일차 보상 한정 (price.limited) — 탄피 · 결제로는 팔지 않는다
+    id: 'silver_roulette',
+    name: '실버 룰렛',
+    en: 'Silver Roulette',
+    blurb: '은빛 펠트 위로 룰렛 휠의 광택이 번지는 한정 테이블 — 출석 체크 2일차 보상',
+    price: { limited: 'attendance', day: 2 },
+    chips: ['#8b94a3', '#d9dee6', '#dfe9ff'],
+    vars: tableVars({
+      rim: 'linear-gradient(180deg, rgba(255, 255, 255, .32), transparent 26%, transparent 80%, rgba(0, 0, 0, .4)), repeating-linear-gradient(90deg, rgba(255, 255, 255, .08) 0 1px, transparent 1px 4px), linear-gradient(135deg, #e8edf5 0%, #aab3c2 38%, #6b7484 68%, #cfd6e2 100%)',
+      surface: 'radial-gradient(ellipse 100% 90% at 50% 45%, #8b94a3 0%, #5a6270 55%, #262b34 100%)',
+      edge: 'rgba(223, 233, 255, .55)',
+      spot: [223, 233, 255],
+      glow: 0.17,
     }),
   },
 ]);
@@ -427,7 +485,13 @@ export const CHEST_ITEMS = Object.freeze([
 
 export const getChestItem = (id) => CHEST_ITEMS.find((it) => it.id === id) ?? null;
 /** 총구 화염 조회: 기본(스킨 고유) 또는 상자에서 나오는 화염. 화염이 아니면 null */
-export const FLAMES = Object.freeze([NATIVE_FLAME, ...CHEST_ITEMS.filter((it) => it.type === 'flame')]);
+/** 출석 체크 보상 화염 — 상자 추첨 풀(CHEST_ITEMS)에는 없고 출석 체크로만 얻는다 */
+export const LIMITED_FLAMES = Object.freeze([
+  { id: 'blue_flame', type: 'flame', name: '블루 플레임', en: 'Blue Flame', tone: '아이스 블루', blurb: '차갑게 타오르는 푸른 총구 화염 — 출석 체크 4일차 보상', rarity: 'rare', limited: 'attendance', day: 4,
+    chips: ['#f2fbff', '#74d4ff', '#1f7bff'], vars: flameVars(['#f2fbff', '#74d4ff', '#1f7bff', '#0b3aa8'], '#cfe8ff') },
+]);
+const ALL_FLAME_ITEMS = Object.freeze([...CHEST_ITEMS.filter((it) => it.type === 'flame'), ...LIMITED_FLAMES]); // 지닐 수 있는 화염 전체 (상자 + 출석)
+export const FLAMES = Object.freeze([NATIVE_FLAME, ...ALL_FLAME_ITEMS]);
 export const getFlame = (id) => FLAMES.find((f) => f.id === id) ?? null;
 /** 상자 아이템(화염 · 칭호)을 이 저장 데이터(d)가 이미 가졌는가 */
 const hasChestItem = (d, item) => (item.type === 'flame' ? d.flames : d.titles).includes(item.id);
@@ -586,7 +650,7 @@ function sanitize(raw) {
   d.equippedTitle = got.has(raw.equippedTitle) ? raw.equippedTitle : DEFAULT_TITLE_ID;
   // 암시장: 알 수 없는 id 는 버리고, 장착값은 가진 것만 인정한다
   const flames = new Set(Array.isArray(raw.flames) ? raw.flames : []);
-  d.flames = CHEST_ITEMS.filter((it) => it.type === 'flame' && flames.has(it.id)).map((it) => it.id);
+  d.flames = ALL_FLAME_ITEMS.filter((it) => flames.has(it.id)).map((it) => it.id);
   d.equippedFlame = d.flames.includes(raw.equippedFlame) ? raw.equippedFlame : DEFAULT_FLAME_ID;
   const taunts = new Set(Array.isArray(raw.taunts) ? raw.taunts : []);
   d.taunts = TAUNTS.filter((t) => taunts.has(t.id)).map((t) => t.id);
@@ -616,6 +680,12 @@ function grantTitles(d) {
 const fixedReward = (brass) => {
   const total = Math.max(0, Math.floor(brass) || 0);
   return { base: total, bonus: 0, total };
+};
+/** 서버가 정한 보상 총액을 기본 보상(승 150) + 연승 보너스로 나눠 보여 준다 */
+const serverReward = (total, won) => {
+  const t = Math.max(0, Math.floor(total) || 0);
+  const base = won ? Math.min(t, REWARD.win) : t;
+  return { base, bonus: t - base, total: t };
 };
 
 /** 서버가 준 랭킹 기록 { wins, losses, mmr, streak?, maxStreak? } 의 모양 검사 → 깨끗한 값 | null */
@@ -705,6 +775,29 @@ export class PlayerProfile {
     const result = fn(this.#data);
     this.#save();
     return result;
+  }
+
+  /**
+   * 서버 지갑(계정의 원본)으로 이 기기의 거울을 맞춘다 — 로그인한 계정은 탄피 · 스킨 · 화염 · 도발 · 칭호 · 상자 기록을 서버가 정하므로,
+   * 이 기기에서 값을 고쳐도 다음 동기화 때 서버 값으로 되돌아간다 (랭킹 전적 · 연습 기록 · 체험 · 광고 누적은 이 기기 것 그대로).
+   * wallet = 서버가 보낸 { brass, owned, equipped, flames, equippedFlame, taunts, equippedTaunt, titles, equippedTitle, chest } → 바뀌었으면 true
+   * 칭호는 꾸밈 요소라 이 기기 것을 지우지 않는다 (AI 연습 전적으로 얻은 칭호는 서버가 모른다) — 서버가 아는 칭호(상자)를 더하고, 장착도 이 기기 값 그대로.
+   */
+  adoptWallet(wallet) {
+    if (!wallet || typeof wallet !== 'object') return false;
+    return this.#mutate((d) => {
+      const before = JSON.stringify(d);
+      const next = sanitize({
+        ...d,
+        brass: wallet.brass, owned: wallet.owned, equipped: wallet.equipped,
+        flames: wallet.flames, equippedFlame: wallet.equippedFlame,
+        taunts: wallet.taunts, equippedTaunt: wallet.equippedTaunt,
+        titles: [...d.titles, ...(Array.isArray(wallet.titles) ? wallet.titles : [])], equippedTitle: d.equippedTitle, chest: wallet.chest,
+        hasNoAdsPass: wallet.hasNoAdsPass === true, starterPurchased: wallet.starterPurchased === true, streakShields: wallet.streakShields ?? 0, // 결제 권한도 서버 값이 원본 (지금은 서버에 결제가 없어 항상 없음)
+      });
+      Object.assign(d, next);
+      return JSON.stringify(d) !== before;
+    });
   }
 
   // ── 조회 ──
@@ -892,7 +985,7 @@ export class PlayerProfile {
         d.brass = toInt(d.brass + payback, d.brass, MAX_BRASS);
       } else if (item.type === 'flame') {
         const got = new Set([...d.flames, item.id]);
-        d.flames = CHEST_ITEMS.filter((it) => it.type === 'flame' && got.has(it.id)).map((it) => it.id);
+        d.flames = ALL_FLAME_ITEMS.filter((it) => got.has(it.id)).map((it) => it.id);
       } else {
         const got = new Set([...d.titles, item.id]);
         d.titles = TITLES.map((t) => t.id).filter((id) => got.has(id));
@@ -1009,7 +1102,7 @@ export class PlayerProfile {
    * → { mode: 'ranked', ranked: true, won, base, bonus, total, brass, streak, prevStreak, maxStreak, canProtect: false,
    *     mmr, prevMmr, mmrDelta, tier, prevTier, tierChange('up' | 'down' | null), wins, losses, newTitles }
    */
-  recordRanked(won, { record = null, mmrDelta = null, brass = null } = {}) {
+  recordRanked(won, { record = null, mmrDelta = null, brass = null, reward: granted = null } = {}) {
     return this.#mutate((d) => {
       const prevStreak = d.streak;
       const server = readServerRecord(record);
@@ -1017,7 +1110,7 @@ export class PlayerProfile {
       const prevMmr = server && delta !== null ? toMmr(server.mmr - delta) : d.mmr; // 서버 기준 직전 점수 (거울이 오래됐어도 승급 · 강등을 바르게)
       if (server) applyServerRecord(d, server);
       else applyRankedRule(d, won);
-      const reward = brass === null ? rewardFor(won, won ? d.streak : 0) : fixedReward(brass);
+      const reward = brass !== null ? fixedReward(brass) : granted !== null ? serverReward(granted, won) : rewardFor(won, won ? d.streak : 0); // reward = 서버 지갑이 이미 지급한 탄피
       d.brass = toInt(d.brass + reward.total, d.brass, MAX_BRASS);
       const tier = tierOf(d.mmr);
       const prevTier = tierOf(prevMmr);
@@ -1035,12 +1128,26 @@ export class PlayerProfile {
    * 친구 초대(방 코드) 대전 = 친선전: 랭킹 MMR · 랭킹 전적 · 연승은 그대로, 탄피만 (승리/패배 기본 보상 — 연승 보너스 없음, 판돈이 있으면 상금).
    * → { mode: 'friendly', ranked: false, won, base, bonus, total, brass, canProtect: false, newTitles: [] }
    */
-  recordFriendly(won, { brass = null } = {}) {
+  recordFriendly(won, { brass = null, reward: granted = null } = {}) {
     return this.#mutate((d) => {
-      const reward = brass === null ? rewardFor(won, 0) : fixedReward(brass);
+      const reward = brass !== null ? fixedReward(brass) : granted !== null ? serverReward(granted, false) : rewardFor(won, 0);
       d.brass = toInt(d.brass + reward.total, d.brass, MAX_BRASS);
       return { mode: 'friendly', ranked: false, won, ...reward, brass: d.brass, canProtect: false, newTitles: [] };
     });
+  }
+
+  /**
+   * 무효 판(서버 판정 — 1라운드 전 조기 종료 · 같은 상대 하루 3판 초과): MMR · 전적 · 연승 · 탄피 보상 없이 결과 화면용 값만 만든다.
+   * reason: 'EARLY_END' | 'PAIR_LIMIT'.  → recordRanked / recordFriendly 와 같은 모양 + voided
+   */
+  recordVoided(won, { ranked = true, reason = 'EARLY_END' } = {}) {
+    const d = this.#data;
+    const tier = tierOf(d.mmr);
+    return {
+      mode: ranked ? 'ranked' : 'friendly', ranked, won, base: 0, bonus: 0, total: 0, brass: d.brass, voided: reason, canProtect: false, newTitles: [],
+      streak: d.streak, prevStreak: d.streak, maxStreak: d.maxStreak, mmr: d.mmr, prevMmr: d.mmr, mmrDelta: 0,
+      tier, prevTier: tier, tierChange: null, wins: d.wins, losses: d.losses,
+    };
   }
 
   /** 로비 접속 등에서 받은 서버 랭킹 기록으로 랭킹 전적 · 연승 · MMR 을 맞춘다 (서버가 원본). 바뀌었으면 true */

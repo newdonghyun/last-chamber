@@ -40,10 +40,11 @@ import { GuideState, RULE_LINES, COACH_STEPS, GUIDED_TURN_MS } from './guide.js'
 import { platformBridge as platform } from '../platform/platformBridge.js';
 import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
-  CHEST, CHEST_ITEMS, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
+  CHEST, CHEST_ITEMS, LIMITED_FLAMES, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
 import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpPause, pvpResume, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
 import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
+import { sharedWallet, WALLET_CHANGED } from './walletClient.js'; // 탄피 · 스킨 · 출석 · 긴급 보급의 원본은 서버 지갑 (이 기기는 거울)
 import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절)
 
 const PLAYER = 'player';
@@ -306,10 +307,16 @@ let leaving = false; // 항복 요청을 서버에 보내고 답을 기다리는
 let audioUnlockArmed = false; // PvP 시작 때 붙이는 '첫 터치에 오디오 깨우기' 리스너가 이미 대기 중인가 (판마다 쌓이지 않게)
 
 const profile = new PlayerProfile(); // 탄피 · 해금/장착 · 체험 · 연승 (localStorage에 영구 저장)
+const wallet = sharedWallet(); // 로그인한 계정은 구매 · 장착 · 상자 · 보상을 서버가 처리한다 (손님은 예전처럼 이 기기에서)
+const WALLET_OFFLINE = '서버에 연결할 수 없어요. 잠시 뒤에 다시 시도해 주세요';
+const walletDown = (r) => r?.reason === 'offline' || r?.reason === 'server';
 // 첫 판 가이드: 이미 게임을 해 본 프로필이면 처음부터 '봤음'. 3줄 룰 카드는 첫 게임(어느 모드든), 코치마크 · 넉넉한 턴 제한은 첫 AI 판에서만 (온라인은 서버 시계라 멈출 수 없다)
 const guide = new GuideState({ hadPlayed: profile.games + profile.practice.games > 0 });
 const RULE_CARD_MS = 9000; // 카드가 떠 있는 시간 (탭하면 바로 닫힘)
 const RULE_CARD_MIN_MS = 5000; // 코치마크가 카드를 밀어내기 전에 최소한 보여 주는 시간
+const SHOOT_LOCK_MS = 350; // 내 턴이 시작된 직후 이 시간 동안은 격발 버튼을 잠근다 (앞선 터치가 격발로 이어지는 오조작 방지)
+let shootLockUntil = 0;
+let wasMyTurn = false; // 직전 advance 에서 내 턴이었는가 (새로 시작된 턴만 잠그려고)
 let guidedGame = false; // 이번 판이 첫 AI 판인가 → 턴 제한 GUIDED_TURN_MS
 let coaching = false; // 코치마크 진행 중 (advance 가 다시 불려도 한 번만)
 let ruleCardTimer = 0;
@@ -586,15 +593,16 @@ function showReward(outcome) {
   if (gained.length) notes.push(h('p', 'is-title', `새 칭호 — ${gained.join(', ')}`));
   if (outcome.mode === 'ranked') notes.push(h('p', '', `랭킹전 전적 ${fmt(outcome.wins)}승 ${fmt(outcome.losses)}패`));
   else if (outcome.mode === 'practice') notes.push(h('p', '', `AI 연습 전적 ${fmt(outcome.practice.wins)}승 ${fmt(outcome.practice.losses)}패`));
+  if (outcome.limited) notes.push(h('p', '', '오늘 AI 연습 보상 한도(5판)를 채웠어요 — 내일 다시 받을 수 있어요'));
   el.rewardRank.replaceChildren(...notes);
   el.rewardRank.hidden = notes.length === 0;
   el.doubleSub.textContent = `+${fmt(outcome.total)} 탄피 추가 지급`;
   el.btnProtect.hidden = !outcome.canProtect;
-  el.btnDouble.hidden = stakes;
+  el.btnDouble.hidden = stakes || Boolean(outcome.voided) || outcome.total <= 0;
   el.protectSub.textContent = `${outcome.prevStreak}연승 기록 유지`;
   // 광고 SDK 가 아직 없는 곳(공개 웹 등): 버튼은 보이되 '준비 중' — VIP 패스 · 연승 보호권은 광고 없이 되므로 그대로 쓸 수 있다
   const adsReady = platform.isAvailable('ads') || profile.hasNoAdsPass;
-  comingSoon(el.btnDouble, el.doubleSub, !adsReady);
+  comingSoon(el.btnDouble, el.doubleSub, !adsReady || wallet.remote); // 서버 지갑 계정의 광고 2배는 서버가 광고 시청을 확인할 수 있을 때 열린다 (지금은 클라이언트가 탄피를 더할 수 없다)
   comingSoon(el.btnProtect, el.protectSub, !adsReady && profile.streakShields < 1);
   el.reward.hidden = false;
   el.rewardActions.hidden = false;
@@ -682,10 +690,15 @@ async function onProtect() { // [광고 보고 연승 기록 보호하기] → �
 
 // 결과 화면의 모드 배지: 랭킹전만 MMR 증감(서버가 기록한 값), 연습 · 친선전은 랭킹에 반영되지 않는다는 표시
 const MODE_BADGE = { practice: '연습 모드 (랭킹 MMR 미반영)', friendly: '친선전 (랭킹 MMR 미반영)' };
-const modeText = (outcome) => (outcome.mode === 'ranked'
+const VOID_TEXT = Object.freeze({
+  EARLY_END: '조기 종료로 인해 MMR이 변동되지 않았습니다',
+  PAIR_LIMIT: '같은 상대와는 하루 3판까지만 랭킹에 반영돼요',
+});
+const modeText = (outcome) => (outcome.voided ? VOID_TEXT[outcome.voided] : outcome.mode === 'ranked'
   ? `랭킹전 · MMR ${outcome.mmrDelta > 0 ? '+' : outcome.mmrDelta < 0 ? '−' : '±'}${Math.abs(outcome.mmrDelta)} → ${fmt(outcome.mmr)}`
   : MODE_BADGE[outcome.mode] ?? MODE_BADGE.friendly);
 const streakText = (outcome) => {
+  if (outcome.voided) return outcome.refunded > 0 ? `무효 판 — 참가비 ${fmt(outcome.refunded)} 탄피를 돌려받았다` : '무효 판 — 전적 · 연승 · 탄피 보상에 넣지 않는다';
   if (outcome.mode === 'friendly') return '친선전 — 전적 · 연승에 넣지 않는다';
   const label = outcome.mode === 'practice' ? 'AI 연습 ' : '랭킹 ';
   if (outcome.won) return `${label}${outcome.streak}연승 중 · 최대 ${outcome.maxStreak}연승`;
@@ -992,6 +1005,7 @@ function skinCard(kind, item) {
 
   const body = h('div', 'skin-body');
   body.append(head, h('p', 'skin-blurb', item.blurb), chips);
+  if (!owned && item.price.limited === 'attendance') body.append(h('p', 'skin-goal', `출석 체크 ${item.price.day}일차 보상 — 탄피 · 결제로는 살 수 없어요`));
   if (!owned && goal) body.append(h('p', 'skin-goal', `광고 ${goal}회 누적 시청하면 영구 해금 · 현재 ${profile.adViews(item.id)}/${goal}`));
   body.append(actions);
   li.append(body);
@@ -1033,11 +1047,13 @@ async function onStoreAction(act, kind, id) {
   let next = null; // 처리 뒤 포커스를 옮길 버튼
   switch (act) {
     case 'buy': { // 탄피로 구매 (장착은 따로)
-      const r = profile.buyWithBrass(kind, id);
+      const r = await wallet.buyWithBrass(kind, id);
       if (r.ok) {
         sound.playItem();
         toast(`${item.name} 구매 완료 — '장착하기'를 눌러 적용하세요`);
         next = 'equip';
+      } else if (walletDown(r)) {
+        toast(WALLET_OFFLINE, true);
       } else if (r.reason === 'insufficient') {
         sound.playClick();
         toast(`탄피가 ${fmt(r.short)} 부족해요`, true);
@@ -1068,11 +1084,16 @@ async function onStoreAction(act, kind, id) {
       }
       break;
     }
-    case 'equip':
-      profile.equip(kind, id);
+    case 'equip': {
+      const r = await wallet.equip(kind, id);
+      if (!r.ok) {
+        toast(walletDown(r) ? WALLET_OFFLINE : '장착할 수 없는 스킨이에요', true);
+        break;
+      }
       sound.playClick();
       toast(`${item.name} 장착`);
       break;
+    }
     case 'trial': { // 보상형 광고 1회 → 다음 1판 체험 예약 (+ 광고 누적 해금 항목은 횟수 적립)
       const res = await watchAd('skin_trial');
       if (!res.rewarded) {
@@ -1152,7 +1173,7 @@ function renderChest() {
     : full ? '천장 도달 — 다음 상자는 안 가진 희귀 아이템이 확정으로 나와요'
       : `이미 가진 아이템이 나오면 +1 · ${CHEST.pity}가 되면 다음 상자는 안 가진 희귀 아이템 확정`;
   el.chestProgress.textContent = `${owned} / ${CHEST_ITEMS.length}`;
-  el.chestList.replaceChildren(flameCard(getFlame(DEFAULT_FLAME_ID)), ...CHEST_ITEMS.map((it) => (it.type === 'flame' ? flameCard(it) : titleCard(it))));
+  el.chestList.replaceChildren(flameCard(getFlame(DEFAULT_FLAME_ID)), ...LIMITED_FLAMES.filter((f) => profile.flames.includes(f.id)).map(flameCard), ...CHEST_ITEMS.map((it) => (it.type === 'flame' ? flameCard(it) : titleCard(it))));
 }
 
 function chipRow(colors) {
@@ -1280,8 +1301,9 @@ async function onFlameAction(act, _kind, id) {
   if (act !== 'equip') return;
   const flame = getFlame(id);
   if (!flame) return;
-  if (!profile.equipFlame(id).ok) {
-    toast('장착할 수 없는 화염이에요', true);
+  const r = await wallet.equipFlame(id);
+  if (!r.ok) {
+    toast(walletDown(r) ? WALLET_OFFLINE : '장착할 수 없는 화염이에요', true);
     return;
   }
   sound.playClick();
@@ -1297,11 +1319,13 @@ async function onTauntAction(act, _kind, id) {
   let next = null;
   switch (act) {
     case 'buy': { // 탄피로 구매 (장착은 따로)
-      const r = profile.buyTaunt(id);
+      const r = await wallet.buyTaunt(id);
       if (r.ok) {
         sound.playItem();
         toast(`${taunt.name} 구매 완료 — '장착하기'를 눌러 게임 화면에 도발 버튼을 만드세요`);
         next = 'equip';
+      } else if (walletDown(r)) {
+        toast(WALLET_OFFLINE, true);
       } else if (r.reason === 'insufficient') {
         sound.playClick();
         toast(`탄피가 ${fmt(r.short)} 부족해요`, true);
@@ -1310,16 +1334,21 @@ async function onTauntAction(act, _kind, id) {
       }
       break;
     }
-    case 'equip':
-      if (!profile.equipTaunt(id).ok) {
-        toast('장착할 수 없는 도발이에요', true);
+    case 'equip': {
+      const r = await wallet.equipTaunt(id);
+      if (!r.ok) {
+        toast(walletDown(r) ? WALLET_OFFLINE : '장착할 수 없는 도발이에요', true);
         break;
       }
       sound.playClick();
       toast(`${taunt.name} 장착 — 게임 화면 구석에 도발 버튼이 나타나요`);
       break;
+    }
     case 'unequip':
-      profile.equipTaunt(null);
+      if (walletDown(await wallet.equipTaunt(null))) {
+        toast(WALLET_OFFLINE, true);
+        break;
+      }
       sound.playClick();
       toast('도발을 해제했어요');
       break;
@@ -1346,9 +1375,12 @@ async function onChestOpen() {
     return;
   }
   const before = profile.brass;
-  const r = profile.openChest();
-  if (!r.ok) { // 그 사이 다른 탭에서 탄피를 썼거나 다 모은 경우
-    toast(r.reason === 'insufficient' ? `탄피가 ${fmt(r.short)} 부족해요` : '모든 아이템을 이미 모았어요', true);
+  chestBusy = true; // 서버가 추첨하는 동안 다시 눌리지 않게
+  el.btnChest.disabled = true;
+  const r = await wallet.openChest();
+  if (!r.ok) { // 그 사이 다른 기기에서 탄피를 썼거나 다 모은 경우 · 서버에 닿지 못함
+    chestBusy = false;
+    toast(walletDown(r) ? WALLET_OFFLINE : r.reason === 'insufficient' ? `탄피가 ${fmt(r.short)} 부족해요` : '모든 아이템을 이미 모았어요', true);
     syncWallet();
     renderChest();
     return;
@@ -1594,6 +1626,8 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   say(pick(LINES.start));
   render();
   setInMatch(true); // [항복] / [나가기] 버튼
+  wasMyTurn = false;
+  shootLockUntil = 0;
   guidedGame = guide.shouldCoach({ online }); // 첫 AI 판: 턴 제한을 넉넉하게 + 내 첫 턴에 코치마크
   if (guide.shouldShowRuleCard) showRuleCard(); // 첫 게임: 장전 연출과 함께 핵심 3줄 룰
 
@@ -1613,6 +1647,9 @@ function advance(token) {
     return;
   }
   const s = engine.getPublicState(PLAYER);
+  const myTurn = Boolean(s.turn?.isMine) && !s.winner;
+  if (myTurn && !wasMyTurn) armShootLock(token); // 내 턴이 새로 시작됐다 — render 가 격발 버튼을 잠근 채 그린다
+  wasMyTurn = myTurn;
   render();
   if (s.winner) guard(endGame(s, token));
   else if (s.turn.isMine) {
@@ -1643,6 +1680,19 @@ async function catchUp(token) {
   advance(token);
 }
 
+/**
+ * AI 연습 판의 결과: 연습 전적 · 연승은 이 기기에 기록하고, 탄피 보상은 로그인한 계정이면 서버 지갑이 정한 값으로 (AI 판은 서버가 검증할 수 없어 하루 5판까지)
+ * → recordPractice 와 같은 모양 (+ limited: 오늘 한도를 채웠다)
+ */
+async function settlePractice(won) {
+  const outcome = profile.recordPractice(won);
+  if (!wallet.remote) return outcome;
+  const res = await wallet.practice(won);
+  if (!res) return outcome; // 서버에 닿지 못했다 — 이 기기 값으로 보여 주고 다음 동기화 때 서버 값으로 맞춘다
+  profile.reload();
+  return { ...outcome, base: res.granted, bonus: 0, total: res.granted, brass: profile.brass, limited: Boolean(res.limited) };
+}
+
 async function endGame(s, token) {
   const won = s.winner === PLAYER;
   const surrendered = online && pvpOver()?.reason === 'surrender'; // 서버가 항복으로 끝낸 판 (won = 상대가 항복) — 문구만 다르고 정산은 같은 경로
@@ -1661,7 +1711,7 @@ async function endGame(s, token) {
   let outcome = null;
   if (recordedGame !== token) {
     recordedGame = token;
-    outcome = online ? await pvpSettle(won) : profile.recordPractice(won); // PvP: 랭킹전/친선전별 정산 + 소켓 정리 · AI 딜러: 연습 기록만 (랭킹 MMR 미반영)
+    outcome = online ? await pvpSettle(won) : await settlePractice(won); // PvP: 랭킹전/친선전별 정산 + 소켓 정리 · AI 딜러: 연습 기록만 (랭킹 MMR 미반영)
   }
   say(pick(won ? LINES.gameWon : LINES.gameLost));
   subtitle(surrendered ? (won ? '상대가 항복했다 — 당신의 승리' : '당신은 항복했다 — 상대의 승리') : won ? '딜러가 쓰러졌다 — 당신의 승리' : '당신이 쓰러졌다 — 딜러의 승리', won ? 'info' : 'danger');
@@ -1866,6 +1916,12 @@ function leaveAiGame() {
 // ───────── 플레이어 입력 ─────────
 
 const playerCanAct = () => Boolean(engine) && !busy && !isPaused() && engine.getPublicState(PLAYER).turn?.isMine === true;
+const shootLocked = () => performance.now() < shootLockUntil;
+/** 내 턴이 막 시작됐다: 0.35초 동안 격발 버튼을 잠갔다가 푼다 (아이템 카드는 잠그지 않는다) */
+function armShootLock(token) {
+  shootLockUntil = performance.now() + SHOOT_LOCK_MS;
+  setTimeout(() => { if (token === gameId) render(); }, SHOOT_LOCK_MS + 20);
+}
 
 async function handleItem(index) {
   if (!playerCanAct()) return;
@@ -1889,7 +1945,7 @@ async function handleItem(index) {
 }
 
 async function handleShoot(target) {
-  if (!playerCanAct()) return;
+  if (!playerCanAct() || shootLocked()) return;
   const token = gameId;
   busy = true; // 중복 클릭 방지
   render();
@@ -2365,8 +2421,8 @@ function render() {
   renderPlayerItems(s, canAct);
 
   el.gun.classList.toggle('is-doubled', Boolean(t?.doubleActive));
-  setDisabled(el.btnOpponent, !canAct);
-  setDisabled(el.btnSelf, !canAct);
+  setDisabled(el.btnOpponent, !canAct || shootLocked());
+  setDisabled(el.btnSelf, !canAct || shootLocked());
   syncMood(s);
 }
 
@@ -2693,6 +2749,15 @@ wireTabs(el.profileTabs, (which) => { if (which === 'board') renderBoard(); }); 
 // 프로필 · 티어 · 순위표 (좌상단 미니 카드 → 프로필 & 랭킹 모달) + 로그인한 닉네임 (session.js 구독 — 로그인 · 닉네임 변경 · 로그아웃마다 바로 반영)
 syncFromSession();
 userSession.subscribe(syncFromSession);
+// 서버 지갑: 접속 · 로그인할 때 서버 값으로 거울을 맞춘다 (이 기기에서 고친 탄피 · 스킨은 여기서 되돌아간다). 지갑이 바뀔 때마다 화면도 다시 그린다
+document.addEventListener(WALLET_CHANGED, () => {
+  profile.reload();
+  syncWallet();
+  if (el.store.open) renderStore();
+  if (el.title.open) applyLoadout(profile.activeLoadout());
+});
+userSession.subscribe((user) => { if (user) guardUi(wallet.sync()); });
+if (userSession.isLoggedIn) guardUi(wallet.sync());
 el.playerCard.addEventListener('click', () => openProfile());
 el.btnProfileClose.addEventListener('click', closeProfile);
 el.profile.addEventListener('click', (ev) => { if (ev.target === el.profile) closeProfile(); }); // 바깥 어두운 곳

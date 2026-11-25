@@ -397,11 +397,15 @@ ul, ol { list-style: none; }
 .icon-btn.is-muted { color: var(--ink-faint); }
 
 .hud-tools { display: flex; align-items: center; gap: 6px; }
+/* 모바일 엄지 터치: 소리 · 도움말 · 항복/나가기 는 가장 작은 화면에서도 높이 40px 이상 (HUD 줄도 그만큼 확보) */
+.hud { height: max(var(--hud-h), 40px); }
+.hud-tools .icon-btn { width: max(var(--hud-h), 40px); height: max(var(--hud-h), 40px); }
+.hud-tools .leave-btn { min-height: 40px; }
 
 /* 인게임 [항복] / [나가기] — 작은 알약 버튼 (모서리의 도구 줄 맨 앞). 온라인 대전은 붉은 톤, AI 연습의 나가기는 놋쇠 톤 */
 .leave-btn {
   flex: none;
-  min-height: calc(var(--hud-h) * .82);
+  min-height: 40px;
   padding: 0 11px;
   border: 0;
   border-radius: 999px;
@@ -418,7 +422,11 @@ ul, ol { list-style: none; }
 .leave-btn:active { transform: scale(.95); }
 .leave-btn:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 3px; }
 @media (hover: hover) { .leave-btn:hover { filter: brightness(1.18); } }
-@media (max-width: 360px) { .leave-btn { padding: 0 9px; font-size: 11.5px; } }
+@media (max-width: 400px) { /* 좁은 화면: 버튼 40px 을 지키려고 점수판의 DEALER / YOU 글자를 접는다 (숫자 · 라운드 램프는 그대로) */
+  .leave-btn { padding: 0 10px; font-size: 11.5px; }
+  .scoreboard span { display: none; }
+  .hud-tools { gap: 4px; }
+}
 
 /* 첫 게임의 3줄 룰 카드 — 장전 연출(.reveal, z-index 9) 위, 테이블 아래쪽에 */
 .first-rules {
@@ -1314,7 +1322,7 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 16px; /* 되돌릴 수 없는 두 격발 버튼 — 엄지가 옆 버튼을 누르지 않게 넓게 */
   padding: 7px;
   border-radius: 16px;
   background:
@@ -2502,6 +2510,11 @@ body.slowmo { --slow: 1.75; }
 }
 
 /* ── 작은 화면 압축 ─────────────────────────────── */
+@media (max-width: 400px) { /* 버튼 간격 16px 을 지키는 대신 안쪽 여백 · 아이콘을 줄여 '상대에게 격발' 이 말줄임(…) 없이 들어가게 */
+  .trigger { gap: 6px; padding: 7px 7px 0 8px; }
+  .trigger-icon { width: calc(var(--trigger-h) * .42); }
+  .trigger-label { letter-spacing: 0; }
+}
 @media (max-width: 359px) {
   .scoreboard span { display: none; }
   .trigger-sub { display: none; }

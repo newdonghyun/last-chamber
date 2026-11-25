@@ -26,6 +26,7 @@ export const ACCOUNT_ERROR_TEXT = Object.freeze({
   SERVER_BUSY: '서버가 바빠요. 잠시 뒤에 다시 시도해 주세요.',
   OFFLINE: '서버에 연결할 수 없어요. 인터넷 연결을 확인하고 다시 시도해 주세요.',
   TIMEOUT: '서버가 응답하지 않아요. 잠시 뒤에 다시 시도해 주세요.',
+  WALLET_SETUP_REQUIRED: '탄피 · 스킨 서버 저장을 준비하고 있어요.',
   SERVER_ERROR: '서버 오류가 났어요. 잠시 뒤에 다시 시도해 주세요.',
   BAD_REQUEST: '요청을 처리할 수 없어요.',
   NOT_LOGGED_IN: '먼저 로그인해 주세요.',
@@ -105,6 +106,20 @@ export async function logIn({ username, password }, { session = userSession, ...
   if (!u.ok) return failed('INVALID_USERNAME', nicknameErrorText(u.reason));
   if (typeof password !== 'string' || !password) return failed('BAD_CREDENTIALS', '비밀번호를 입력해 주세요.');
   return keep(await post('login', { username: u.username, password }, opts), session);
+}
+
+/**
+ * 서버 지갑 호출 (POST /api/wallet) — 로그인한 계정의 탄피 · 스킨 · 출석 · 긴급 보급은 서버가 원본이다 (src/ui/walletClient.js 가 쓴다).
+ * → { ok: true, result, wallet, state } | { ok: false, error: 'AUTH_REQUIRED' | 'RATE_LIMITED' | 'WALLET_SETUP_REQUIRED' | 'OFFLINE' | 'TIMEOUT' | …, message }
+ */
+export async function walletCall(action, args = {}, { session = userSession, ...opts } = {}) {
+  if (!session.isLoggedIn) return failed('NOT_LOGGED_IN');
+  const res = await post('wallet', { ...args, action, token: session.token }, opts);
+  if (!res.ok) {
+    if (res.error === 'AUTH_REQUIRED') requireLogin(session);
+    return { ...res, message: accountErrorText(res.error, res) };
+  }
+  return res;
 }
 
 /** 토큰이 더는 통하지 않는다 → 로그아웃하고 로그인 화면을 다시 연다 */

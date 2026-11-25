@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { hashPassword, verifyPassword, isPasswordHash, readToken, verifyToken, cleanUsername } from './auth.js';
 import { noirNickname } from './nicknames.js';
+import { WALLET_COLUMNS, walletToRow, walletFromRow, normalizeWallet, defaultWallet } from './wallet.js';
 
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
 const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
@@ -87,6 +88,17 @@ export const ACCOUNT_SQL = [
   'alter table public.players drop column if exists pin_hash;',
 ].join('\n');
 const AUTO_NICK_TRIES = 4; // 자동 닉네임이 unique 인덱스에서 겹쳤을 때 다시 뽑는 최대 횟수
+/** 서버 지갑(탄피 · 스킨 · 출석 · 긴급 보급) 컬럼 — Supabase SQL Editor 에서 한 번 실행한다. 기존 행은 기본값(탄피 300 · 기본 스킨)으로 채워진다 */
+export const WALLET_SQL = [
+  'alter table public.players add column if not exists shells integer not null default 300;',
+  `alter table public.players add column if not exists unlocked_skins jsonb not null default '{"gun":["steel"],"table":["obsidian"]}'::jsonb;`,
+  `alter table public.players add column if not exists equipped_skin jsonb not null default '{"gun":"steel","table":"obsidian"}'::jsonb;`,
+  'alter table public.players add column if not exists attendance_days integer not null default 0;',
+  'alter table public.players add column if not exists last_checkin_date date;',
+  'alter table public.players add column if not exists emergency_date date;',
+  'alter table public.players add column if not exists emergency_count integer not null default 0;',
+  `alter table public.players add column if not exists wallet_extra jsonb not null default '{}'::jsonb;`,
+].join('\n');
 const BOARD_CACHE_MS = 3000; // get_leaderboard 연타가 그대로 DB 로 가지 않게
 const ACCOUNT_RECHECK_MS = 30_000; // 계정 컬럼이 없을 때 가입 · 로그인 시도에서 다시 확인하는 최소 간격
 
@@ -132,8 +144,12 @@ function readRecord(raw, now) {
     createdAt,
     updatedAt: time(raw.updatedAt, createdAt),
     lastSeenAt: time(raw.lastSeenAt, createdAt),
+    ...(raw.wallet && typeof raw.wallet === 'object' ? { wallet: normalizeWallet(raw.wallet, statsOf(raw)) } : {}), // 지갑은 믿지 않고 다시 검증
   };
 }
+
+/** 지갑(칭호 조건 · 닉네임)이 보는 랭킹 전적 */
+const statsOf = (rec) => ({ wins: count(rec.wins), losses: count(rec.losses), streak: count(rec.streak), maxStreak: count(rec.maxStreak), mmr: Number.isFinite(rec.mmr) ? count(rec.mmr) : MMR_RULE.start, nickname: rec.nickname });
 
 /** 화면에 보여 줄 공개 부분 (ID · 아이디 · 비밀번호 해시 · 시각은 빼고) → { nickname, wins, losses, games, streak, maxStreak, mmr } | null */
 export const publicRecord = (rec) => (rec
@@ -160,9 +176,11 @@ const fromRow = (row) => ({
 });
 // 전적 upsert 는 username · password_hash 를 싣지 않는다 (PostgREST upsert 는 보낸 컬럼만 고친다 → 계정 정보가 지워지지 않는다)
 const toRow = (rec) => ({ user_id: rec.id, nickname: rec.nickname, wins: rec.wins, losses: rec.losses, streak: rec.streak, max_streak: rec.maxStreak, mmr: rec.mmr });
-const fromDbRow = (row) => ({
-  id: row.user_id, nickname: row.nickname, username: cleanUsername(row.username), passwordHash: isPasswordHash(row.password_hash) ? row.password_hash : null, ...fromRow(row),
-});
+const fromDbRow = (row) => {
+  const rec = { id: row.user_id, nickname: row.nickname, username: cleanUsername(row.username), passwordHash: isPasswordHash(row.password_hash) ? row.password_hash : null, ...fromRow(row) };
+  const wallet = walletFromRow(row, statsOf(rec));
+  return wallet ? { ...rec, wallet } : rec;
+};
 const byRank = (a, b) => b.mmr - a.mmr || b.wins - a.wins;
 const hasPlayed = (r) => r.wins + r.losses > 0; // 랭킹전을 1판 이상 — TOP 10 에 오를 자격
 /** unique 인덱스 위반(23505) → 어떤 값이 겹쳤는지 */
@@ -179,7 +197,7 @@ const duplicateOf = (err) => {
  *   saveDelayMs 바뀐 뒤 파일에 쓰기까지 모으는 시간
  *   authSecret  로그인 토큰 서명에 섞는 서버 비밀 (환경 변수 AUTH_SECRET)
  *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)        log(...)  상태 로그
- * → { signup, login, authenticate, rename, ready, get, recordResult, recordMatch, leaderboard, health, publicView, size, flush, close }
+ * → { signup, login, authenticate, rename, ready, get, recordResult, recordMatch, getWallet, commitWallet, walletNow, leaderboard, health, publicView, size, flush, close }
  */
 export function createUserStore({
   file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, authSecret = '',
@@ -245,6 +263,8 @@ export function createUserStore({
 
   // 시작: players 테이블 확인 + 계정 컬럼 확인 · 계정 목록(아이디 · 닉네임) 읽기
   let accountReady = !db; // 메모리 · 파일 저장은 그대로 된다. DB 는 계정 컬럼(ACCOUNT_SQL)이 있어야 한다
+  let walletReady = !db; // 서버 지갑: DB 는 지갑 컬럼(WALLET_SQL)이 있어야 한다 — 없으면 지갑 기능만 꺼지고(클라이언트는 예전처럼 이 기기에 저장) 게임 · 계정은 그대로
+  let walletProbedAt = -Infinity;
   let accountsProbedAt = -Infinity;
   const schemaReady = db
     ? dbReady.then(async () => {
@@ -260,6 +280,7 @@ export function createUserStore({
         return;
       }
       await probeAccounts();
+      await probeWallet();
     })
     : Promise.resolve();
   if (!db) log('[DB] Supabase initialized:', false, `— SUPABASE_URL · SUPABASE_KEY 가 없어 ${file ? '파일' : '메모리'}에 저장합니다`);
@@ -282,6 +303,63 @@ export function createUserStore({
       onError(new Error(`players 에 계정 컬럼(username · password_hash)이 없어 회원가입 · 로그인을 쓸 수 없습니다. Supabase SQL Editor 에서 실행하세요:\n${ACCOUNT_SQL}`, { cause: err }));
     }
   }
+  /** 지갑 컬럼 확인 → walletReady. 서버가 뜬 뒤 WALLET_SQL 을 실행해도 다음 지갑 요청 때 다시 확인한다 */
+  async function probeWallet() {
+    walletProbedAt = now();
+    try {
+      check(await client.from(TABLE).select(WALLET_COLUMNS).limit(1), 'players 지갑 컬럼 확인');
+      walletReady = true;
+      log('[DB] 지갑 컬럼 확인 — 서버 지갑 사용 가능');
+    } catch (err) {
+      walletReady = false;
+      onError(new Error(`players 에 지갑 컬럼(shells · unlocked_skins …)이 없어 서버 지갑을 쓸 수 없습니다 (탄피 · 스킨은 이 기기에 저장됩니다). Supabase SQL Editor 에서 실행하세요:\n${WALLET_SQL}`, { cause: err }));
+    }
+  }
+  async function ensureWallet() {
+    await schemaReady;
+    if (!walletReady && client && now() - walletProbedAt >= accountRecheckMs) await probeWallet();
+    return walletReady;
+  }
+
+  /**
+   * 이 계정의 서버 지갑 (없으면 불러오거나 새로 만든다) → 지갑 객체(살아 있는 것 — 바꾼 뒤 commitWallet) | null(지갑을 쓸 수 없음 · 모르는 계정).
+   * 같은 계정의 여러 요청은 이 한 객체를 바꾼다 (한 프로세스 안에서 동기 구간마다 원자적).
+   */
+  async function getWallet(id) {
+    if (!(await ensureWallet())) return null;
+    const rec = users.get(id);
+    if (!rec?.username) return null;
+    if (!rec.wallet) {
+      if (client) {
+        try {
+          const res = check(await client.from(TABLE).select(`user_id, ${WALLET_COLUMNS}`).eq('user_id', id).maybeSingle(), '지갑 불러오기');
+          markDb(null);
+          if (!rec.wallet) rec.wallet = (res.data && walletFromRow(res.data, statsOf(rec))) || defaultWallet(statsOf(rec));
+        } catch (err) {
+          markDb(err);
+          onError(err);
+          return null;
+        }
+      } else {
+        rec.wallet = defaultWallet(statsOf(rec));
+      }
+    }
+    return rec.wallet;
+  }
+
+  /** 지갑을 바꾼 뒤 저장 (DB 는 이 계정의 앞선 쓰기 뒤에 컬럼만 UPDATE — 전적 컬럼은 건드리지 않는다) */
+  function commitWallet(id) {
+    const rec = users.get(id);
+    if (!rec?.wallet) return;
+    rec.updatedAt = now();
+    markDirty();
+    const m = meta.get(id);
+    if (client && walletReady && m) queue(m, async () => {
+      check(await client.from(TABLE).update(walletToRow(rec.wallet)).eq('user_id', id), `지갑 저장(${rec.nickname})`);
+      markDb(null);
+    });
+  }
+
   async function ensureAccounts() {
     await schemaReady;
     if (!accountReady && client && now() - accountsProbedAt >= accountRecheckMs) await probeAccounts();
@@ -318,10 +396,13 @@ export function createUserStore({
     } else {
       rec.username ??= row.username;
       rec.passwordHash ??= row.passwordHash;
+      if (row.wallet && !rec.wallet) rec.wallet = row.wallet;
     }
     index(rec);
     return rec;
   }
+
+  const accountSelect = () => (walletReady ? `${ACCOUNT_COLUMNS}, ${WALLET_COLUMNS}` : ACCOUNT_COLUMNS);
 
   async function usernameTaken(username) {
     if (!client) return byUsername.has(username);
@@ -413,9 +494,10 @@ export function createUserStore({
           id: randomUUID(), username, nickname: name, passwordHash,
           wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t,
         };
+        if (walletReady) rec.wallet = defaultWallet(statsOf(rec)); // 첫 지급 탄피 · 기본 스킨
         if (client) {
           try {
-            check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash }), `회원가입(${username})`);
+            check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash, ...(rec.wallet ? walletToRow(rec.wallet) : {}) }), `회원가입(${username})`);
             markDb(null);
           } catch (err) {
             const dup = duplicateOf(err); // 그새 같은 아이디 · 닉네임이 생겼다 (unique 인덱스)
@@ -450,7 +532,7 @@ export function createUserStore({
     if (!(await ensureAccounts())) return { ok: false, error: 'ACCOUNT_SETUP_REQUIRED' };
     let row = null;
     if (client) {
-      const res = check(await client.from(TABLE).select(ACCOUNT_COLUMNS).eq('username', username).maybeSingle(), `로그인(${username})`);
+      const res = check(await client.from(TABLE).select(accountSelect()).eq('username', username).maybeSingle(), `로그인(${username})`);
       markDb(null);
       row = res.data ? fromDbRow(res.data) : null;
     } else {
@@ -477,7 +559,7 @@ export function createUserStore({
     let rec = users.get(parsed.id);
     if (!rec?.passwordHash && client) {
       try {
-        const res = check(await client.from(TABLE).select(ACCOUNT_COLUMNS).eq('user_id', parsed.id).maybeSingle(), '토큰 계정 조회');
+        const res = check(await client.from(TABLE).select(accountSelect()).eq('user_id', parsed.id).maybeSingle(), '토큰 계정 조회');
         markDb(null);
         const row = res.data ? fromDbRow(res.data) : null;
         if (row?.passwordHash && row.username) rec = adopt(row);
@@ -613,6 +695,9 @@ export function createUserStore({
     get: (id) => users.get(id) ?? null,
     recordResult,
     recordMatch,
+    getWallet,
+    commitWallet,
+    walletNow: (id) => users.get(id)?.wallet ?? null, // 이미 불러온 지갑 (판 진행 중 동기로 쓴다 — 소켓 로그인 때 getWallet 으로 미리 불러 둔다)
     leaderboard,
     // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부 · 마지막 DB 오류 · 접속 중인 Supabase 주소(키 제외) · 계정 사용 가능 여부
     health: () => ({
@@ -621,6 +706,7 @@ export function createUserStore({
       dbError,
       dbHost: db ? (() => { try { return new URL(SUPABASE_URL).host; } catch { return `잘못된 URL: ${String(SUPABASE_URL).slice(0, 60)}`; } })() : null,
       accountReady, // 회원가입 · 로그인 가능 (DB 면 계정 컬럼 · 인덱스가 있어야 true)
+      walletReady, // 서버 지갑 가능 (DB 면 지갑 컬럼(WALLET_SQL)이 있어야 true — false 면 탄피 · 스킨은 이 기기에 저장)
       authSecret: Boolean(authSecret), // AUTH_SECRET 설정 여부 (값은 내보내지 않는다)
     }),
     publicView: publicRecord,

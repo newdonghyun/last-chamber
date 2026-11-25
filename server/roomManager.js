@@ -10,6 +10,9 @@
  *   · 방마다 GameEngine 하나 — 서버 권위. 좌석(P1 · P2)은 서버가 소켓에 붙이고, 각자에게는 자기 시점의 상태와 로그만 보낸다
  *   · 20초 턴 타이머(0초가 되면 서버가 대신 격발) · 15초 연결 끊김 부전승 · 친구를 기다리는 방의 10분 만료 · 끝난 판 결과 60초 보관
  *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile) · 로그인한 소켓은 서버가 확인한 닉네임으로(profileOf)
+ *   · 랭킹 어뷰징 방지: 1라운드가 끝나기 전에 항복 · 연결 끊김으로 끝난 판(EARLY_END)과, 같은 두 계정이 하루(한국 시간)에 PAIR_LIMIT 판을 넘겨 만난 판(PAIR_LIMIT)은
+ *     MMR · 전적 · 탄피 보상을 모두 무효로 한다 (참가비는 돌려준다) — game_over 의 voided 로 알린다.
+ *   · 서버 지갑(wallets): 참가비는 대기열에서 이미 냈고(matchmaker), 판이 끝나면 서버가 상금 · 기본 보상을 지급한다 — game_over 의 reward · wallet 으로 알린다.
  *   · 판이 끝나면 로그인한 좌석의 서버 전적(승/패 · 연승 · MMR)을 기록한다 (server/userStore.js) — 랭킹전(공개 방 · 빠른 매칭)만. 친선 비밀방은 기록하지 않는다
  *     game_over 에 그 좌석의 record(현재 서버 전적) · ranked · mmrDelta(랭킹전에서 바뀐 MMR)로 알려 준다
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석, 등급별 대기열은 server/matchmaker.js.
@@ -25,6 +28,8 @@
 
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { GameEngine } from '../src/engine/gameEngine.js';
+import { rewardFor, getTitle, TITLES } from '../src/ui/storeData.js';
+import { kstDate } from './wallet.js';
 
 // ───────── 규칙 · 설정 ─────────
 
@@ -40,6 +45,8 @@ export const ROOM_DEFAULTS = Object.freeze({
   resultTtlMs: RESULT_TTL_MS,
   maxRooms: 5000,
   emoteGapMs: 500, // 이모트 최소 간격
+  pairDailyLimit: 3, // 같은 두 계정의 랭킹 정산(MMR · 보상)이 하루(한국 시간)에 반영되는 최대 판 수
+  clock: () => Date.now(), // 한국 시간 날짜 계산용 시계 (테스트에서 바꾼다)
 });
 
 // 4자리 방 코드: 헷갈리는 글자(0 O 1 I)를 뺀 영문 대문자 + 숫자 32종 → 약 100만 가지
@@ -107,7 +114,12 @@ export function profileOf(socket, raw) {
   const user = socket?.data?.user;
   if (!user) return profile;
   const rec = user.rec; // 로그인한 계정의 서버 기록 (닉네임 변경 · 판 결과가 바로 반영된 같은 객체)
-  return { ...profile, nickname: rec?.nickname ?? user.nickname, ...(Number.isFinite(rec?.mmr) ? { mmr: rec.mmr } : {}) }; // 이름 · MMR 은 서버 값
+  const w = rec?.wallet; // 서버 지갑이 있으면 상대에게 보이는 스킨 · 화염 · 도발 · 칭호도 클라이언트가 보낸 값이 아니라 서버가 아는 장착값
+  const owned = w ? {
+    title: TITLES.find((t) => t.name === profile.title)?.name ?? getTitle(w.extra.equippedTitle)?.name, // 칭호는 꾸밈 — 카탈로그에 있는 이름만 인정 (없으면 서버가 아는 장착 칭호)
+    cosmetics: { gun: w.equipped.gun, table: w.equipped.table, flame: w.extra.equippedFlame, taunt: w.extra.equippedTaunt },
+  } : {};
+  return { ...profile, ...owned, nickname: rec?.nickname ?? user.nickname, ...(Number.isFinite(rec?.mmr) ? { mmr: rec.mmr } : {}) }; // 이름 · MMR 은 서버 값
 }
 
 const EMOTE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
@@ -131,10 +143,12 @@ function validEmote(p) {
  *   log    quiet 을 지키는 로그 함수          guard  타이머 · 콜백의 예외가 프로세스를 죽이지 않게 감싸는 함수
  *   tiers  등급표 { free: { fee, prize }, ... } (matchmaker 의 QUEUE_TIERS) — 사설 방은 'free' 등급이다
  *   users  유저 저장소 (server/userStore.js createUserStore) — 없으면 서버 전적을 기록하지 않는다
+ *   wallets  서버 지갑 창구 { managed(userId), grant(userId, n), view(userId) } — 없으면 탄피 정산은 클라이언트 몫 (예전 방식)
  *   onRoomsChanged()  공개 방 목록이 바뀌었을 때 (index.js 가 로비 채널에 room_list 를 보낸다)
  * 이벤트 처리 함수는 (socket, payload) → ack 로 돌려줄 { ok, ... } 를 반환한다 (소켓 이벤트와의 연결은 server/index.js).
  */
-export function createRoomManager({ io, cfg, log, guard, tiers, users = null, onRoomsChanged = () => {} }) {
+export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wallets = null, onRoomsChanged = () => {} }) {
+  const pairs = new Map(); // '계정A|계정B' → { day, ranked, friendly } — 오늘 이 두 계정의 정산이 반영된 판 수 (서버를 다시 켜면 비워진다)
   const rooms = new Map(); // code → room { code, mode, tier, status: 'waiting'|'playing'|'over', seats, engine, sent, turnTimer, turnSeq, deadline, ttlTimer, result }
 
   // ── 좌석 · 소켓 ──
@@ -147,7 +161,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
   };
   const otherSeat = (room, seat) => room.seats.find((s) => s !== seat);
   // userId: 앉을 때 로그인한 유저 (재접속으로 소켓이 바뀌어도 좌석의 주인은 그대로 — 판 결과는 이 유저에게 기록된다)
-  const makeSeat = (id, socket, profile) => ({ id, token: makeToken(), socketId: socket.id, userId: socket.data.user?.id ?? null, profile, connected: true, graceTimer: null, graceUntil: 0 });
+  const makeSeat = (id, socket, profile, paid = 0) => ({ id, token: makeToken(), socketId: socket.id, userId: socket.data.user?.id ?? null, profile, paid, connected: true, graceTimer: null, graceUntil: 0 }); // paid = 대기열에서 서버가 미리 받은 참가비
   const attach = (socket, room) => {
     socket.data.where = { kind: 'room', code: room.code };
     socket.join(roomChannel(room.code));
@@ -196,7 +210,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
   const matchPayload = (room, seat, resume) => {
     const opp = otherSeat(room, seat);
     const { fee, prize } = tiers[room.tier];
-    return { code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, you: seat.id, token: seat.token, opponent: { id: opp.id, profile: opp.profile }, turnMs: cfg.turnMs, graceMs: cfg.graceMs, resume };
+    return { code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, feePaid: Boolean(wallets?.managed(seat.userId)), you: seat.id, token: seat.token, opponent: { id: opp.id, profile: opp.profile }, turnMs: cfg.turnMs, graceMs: cfg.graceMs, resume };
   };
 
   const snapshot = (room, seat, reason, since, events, extra = {}) => ({
@@ -258,9 +272,12 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
     const players = Object.fromEntries(room.seats.map((s) => [s.id, { mmr: s.profile.mmr }])); // 입장 때 신고한 양쪽의 초기 MMR — 클라이언트가 Elo 정산에 쓴다
     const record = seat.userId && users ? users.publicView(users.get(seat.userId)) : null; // 이 좌석 유저의 서버 전적 (로그인한 좌석만 — 상대 것은 보내지 않는다)
     const mmrDelta = room.deltas?.[seat.id]; // 랭킹전에서 실제로 기록된 이번 판 MMR 변동 (친선전 · 기록 안 된 좌석은 없음)
+    const reward = room.rewards?.[seat.id]; // 서버 지갑이 이 좌석에 지급한 탄피 (지갑을 쓰지 않는 좌석은 없음)
     return {
-      code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won ? prize : 0,
+      code: room.code, mode: room.mode, ranked: isRanked(room), tier: room.tier, fee, prize, winner: room.result.winner, youWon: won, reason: room.result.reason, payout: won && !room.voided ? prize : 0,
       score: { you: view.me.wins, opponent: view.opponent.wins }, players, ...(record ? { record } : {}), ...(Number.isFinite(mmrDelta) ? { mmrDelta } : {}),
+      voided: room.voided ?? null, // 'EARLY_END' | 'PAIR_LIMIT' | null — 무효면 MMR · 전적 · 탄피 보상이 없다 (참가비는 환불)
+      ...(reward ? { reward, wallet: wallets?.view(seat.userId) ?? null } : {}),
     };
   }
 
@@ -273,7 +290,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
    */
   function recordResults(room) {
     room.deltas = {};
-    if (!users || !isRanked(room)) return;
+    if (!users || !isRanked(room) || room.voided) return; // 무효 판(조기 종료 · 같은 상대 반복)은 MMR · 전적을 건드리지 않는다
     const [a, b] = room.seats;
     if (a.userId && a.userId === b.userId) return;
     const before = Object.fromEntries(room.seats.map((s) => [s.id, s.userId ? users.get(s.userId)?.mmr : undefined]));
@@ -288,12 +305,68 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
     }
   }
 
+  /** 1라운드가 끝나기 전에 항복 · 연결 끊김으로 끝난 판인가 (정상 종료는 항상 2라운드 승리라 해당 없음) */
+  function endedEarly(room, reason) {
+    if (reason === 'normal' || !room.engine) return false;
+    const view = room.engine.getPublicState(room.seats[0].id);
+    return view.round === 1 && view.me.wins === 0 && view.opponent.wins === 0;
+  }
+
+  const pairKeyOf = (room) => room.seats.map((s) => s.userId).sort().join('|');
+  /** 이 판의 정산(MMR · 보상)을 무효로 할 이유 → 'EARLY_END' | 'PAIR_LIMIT' | null (반영되는 판이면 오늘 이 두 계정의 횟수를 올린다) */
+  function judge(room, reason) {
+    if (endedEarly(room, reason)) return 'EARLY_END';
+    const [a, b] = room.seats;
+    if (!a.userId || !b.userId || a.userId === b.userId) return null;
+    const day = kstDate(cfg.clock());
+    const key = pairKeyOf(room);
+    let entry = pairs.get(key);
+    if (entry?.day !== day) { // 날이 바뀌면 처음부터 (오래된 항목은 이때 같이 정리)
+      entry = { day, ranked: 0, friendly: 0 };
+      pairs.set(key, entry);
+      for (const [k, v] of pairs) if (v.day !== day) pairs.delete(k);
+    }
+    const kind = isRanked(room) ? 'ranked' : 'friendly';
+    if (entry[kind] >= cfg.pairDailyLimit) return 'PAIR_LIMIT';
+    entry[kind] += 1;
+    return null;
+  }
+
+  /**
+   * 서버 지갑 정산: 무효면 미리 받은 참가비 환불 · 보상 없음. 아니면 참가비 테이블은 승자 상금(참가비는 이미 냈다), 그 밖에는 기본 보상(승 150 · 패 40 — 랭킹전은 연승 보너스).
+   * 계정마다 room.rewards[좌석] = { brass(지급한 탄피), refunded(돌려준 참가비) }.
+   */
+  function payoutBrass(room) {
+    if (!wallets) return;
+    const { fee, prize } = tiers[room.tier];
+    room.rewards = {};
+    for (const seat of room.seats) {
+      if (!seat.userId || !wallets.managed(seat.userId)) continue;
+      const won = room.result.winner === seat.id;
+      let brass = 0;
+      let refunded = 0;
+      if (room.voided) {
+        refunded = seat.paid;
+        if (refunded > 0) wallets.grant(seat.userId, refunded);
+      } else if (fee > 0) {
+        brass = won ? prize : 0;
+      } else {
+        const streak = isRanked(room) && won ? users?.get(seat.userId)?.streak ?? 0 : 0; // 랭킹 연승(이번 승리 포함) 보너스
+        brass = rewardFor(won, streak).total;
+      }
+      if (brass > 0) wallets.grant(seat.userId, brass);
+      room.rewards[seat.id] = { brass, refunded };
+    }
+  }
+
   function finishGame(room, winner, reason) {
     if (room.status !== 'playing' || !winner) return;
     room.status = 'over';
     clearRoomTimers(room);
     room.result = { winner: winner.id, reason };
+    room.voided = judge(room, reason);
     recordResults(room); // game_over 보다 먼저 — 알림에 갱신된 전적이 실린다
+    payoutBrass(room);
     for (const seat of room.seats) {
       emitTo(room, seat, 'game_over', overPayload(room, seat));
       release(socketOf(seat), room.code); // 방 채널에서 나가고 다시 대기열 · 방에 들어갈 수 있다
@@ -411,7 +484,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
   function startMatchedRoom(tier, [a, b]) {
     const room = rooms.size < cfg.maxRooms ? newRoom('queue', tier) : null;
     if (!room) return false;
-    room.seats.push(makeSeat('P1', a.socket, a.profile), makeSeat('P2', b.socket, b.profile));
+    room.seats.push(makeSeat('P1', a.socket, a.profile, a.paid ?? 0), makeSeat('P2', b.socket, b.profile, b.paid ?? 0));
     attach(a.socket, room);
     attach(b.socket, room);
     startGame(room);

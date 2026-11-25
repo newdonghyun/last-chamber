@@ -428,3 +428,45 @@
   .mp-card { gap: 10px; padding: 14px 14px 12px; }
   .mp-view { gap: 12px; }
 }
+
+/* ── 접속자 · 출석 체크 · 긴급 보급 · 대기 안내 · 무상 재화 안내 ───────────────────────────── */
+.mp-online { margin: -2px 0 0; font: 600 11px/1.3 var(--font-ui, sans-serif); letter-spacing: .02em; color: var(--ink-faint, #5f594f); }
+.mp-online::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #6fbf73; vertical-align: 1px; box-shadow: 0 0 6px rgba(111, 191, 115, .7); }
+
+.mp-daily[hidden] { display: none; }
+.mp-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin: 0; padding: 0; list-style: none; }
+.mp-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 2px 5px;
+  border: 1px solid var(--line, rgba(201, 163, 91, .28));
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .35);
+}
+.mp-day b { font: 800 11px/1 var(--font-tech, sans-serif); letter-spacing: .08em; color: var(--brass, #c9a35b); }
+.mp-day span { max-width: 100%; font: 600 9.5px/1.2 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); text-align: center; overflow-wrap: anywhere; }
+.mp-day.is-today { border-color: var(--brass-hi, #f4dda2); box-shadow: 0 0 10px rgba(201, 163, 91, .35); }
+.mp-day.is-today b { color: var(--brass-hi, #f4dda2); }
+.mp-day.is-done { opacity: .55; }
+.mp-day.is-done span::after { content: ' ✓'; color: #a9e6ad; }
+.mp-btn--soft { justify-content: center; text-align: center; border-color: rgba(111, 191, 115, .6); color: #a9e6ad; }
+.mp-btn--soft[hidden], .mp-slow[hidden] { display: none; }
+
+.mp-slow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--brass, #c9a35b);
+  border-radius: 6px;
+  background: rgba(201, 163, 91, .08);
+}
+.mp-slow p { margin: 0; font: 700 13.5px/1.5 var(--font-ui, sans-serif); color: var(--brass-hi, #f4dda2); text-align: center; }
+.mp-slow-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mp-slow-row .mp-btn { justify-content: center; text-align: center; min-height: 44px; }
+
+.mp-disclaimer { margin: 6px 0 0; padding: 10px 6px 2px; border-top: 1px solid var(--line, rgba(201, 163, 91, .18)); font: 500 11px/1.55 var(--font-ui, sans-serif); color: var(--ink-faint, #5f594f); text-align: center; }

@@ -2,6 +2,7 @@
 //   pvpSession.js 는 인게임 이벤트(state_update · game_over · opponent_status · receive_emote · match_found · room_closed · session_replaced)를
 //   ① 지금 세션이고 ② 닫히지 않았고 ③ 이벤트의 방 코드가 내 방과 같을 때만 처리한다 — 다른 방 · 코드 없는 · 끝난 판의 이벤트는 화면 갱신 · 도발 · 알림 없이 버린다.
 //   pvpPause() / pvpResume(): blur · freeze 때 소켓만 끊고(알림 · 재연결 시도 없음) 판은 유지 → 돌아오면 같은 소켓이 다시 붙어 rejoin_room 으로 자리를 되찾는다.
+//   pvpSettle(): 서버 지갑이 정산한 판은 이 기기에서 다시 계산하지 않는다 (참가비 feePaid · 서버 보상 reward · 거울 wallet) · 무효 판(voided)은 MMR · 보상 없이 안내만.
 //   pvpSurrender(): 항복 요청은 서버에 surrender 로만 보낸다 — 승패는 서버의 game_over(reason 'surrender')로만 정해지고, 끝난 판 · 연결 없음 · 시간 초과는 판을 건드리지 않는다.
 const T0 = performance.now();
 let pass = 0;
@@ -12,7 +13,7 @@ const eq = (got, want, name) => ok(JSON.stringify(got) === JSON.stringify(want),
 // pvpSession 이 쓰는 브라우저 전역만 흉내 (window · document 이벤트)
 globalThis.window = new EventTarget();
 globalThis.document = new EventTarget();
-const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine, pvpSurrender, pvpPause, pvpResume } = await import('../src/ui/pvpSession.js');
+const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine, pvpSurrender, pvpPause, pvpResume, pvpSettle } = await import('../src/ui/pvpSession.js');
 
 class FakeSocket {
   handlers = new Map();
@@ -32,9 +33,17 @@ class FakeSocket {
   count() { return [...this.handlers.values()].reduce((n, set) => n + set.size, 0); }
 }
 
-const calls = { start: 0, update: 0, notice: [] };
+const calls = { start: 0, update: 0, notice: [], spent: [], ranked: [], friendly: [], voided: [], adopted: [] };
 initPvp({
-  profile: { activeLoadout: () => ({ gun: 'steel', table: 'obsidian', flame: 'native' }), spendBrass: () => ({ ok: true }) },
+  profile: {
+    activeLoadout: () => ({ gun: 'steel', table: 'obsidian', flame: 'native' }),
+    spendBrass: (n) => { calls.spent.push(n); return { ok: true }; },
+    recordRanked: (won, opts) => { calls.ranked.push([won, opts]); return { mode: 'ranked', ranked: true, won, total: opts.brass ?? opts.reward ?? 0, brass: 100 }; },
+    recordFriendly: (won, opts) => { calls.friendly.push([won, opts]); return { mode: 'friendly', ranked: false, won, total: opts.brass ?? opts.reward ?? 0, brass: 100 }; },
+    recordVoided: (won, opts) => { calls.voided.push([won, opts]); return { mode: opts.ranked ? 'ranked' : 'friendly', won, total: 0, voided: opts.reason, brass: 100 }; },
+    adoptWallet: (w) => { calls.adopted.push(w); return true; },
+    get brass() { return 777; },
+  },
   onStart: () => { calls.start += 1; },
   onUpdate: () => { calls.update += 1; },
   onNotice: (text) => calls.notice.push(text),
@@ -168,6 +177,47 @@ eq(sock5.disconnects, 2, '9 끝난 판은 더 끊지 않는다');
 pvpEnd();
 pvpResume();
 eq(sock5.connects, 2, '9 닫힌 세션은 다시 잇지 않는다');
+
+// 서버 지갑이 정산한 판: 참가비는 서버가 이미 받았고(feePaid) 보상 · 지갑도 서버 값
+const startMatch = (code, extra = {}) => {
+  const socket = new FakeSocket();
+  window.dispatchEvent(new CustomEvent('pvp:start', { detail: { match: { code, mode: 'queue', ranked: true, tier: 'pro', fee: 200, prize: 360, feePaid: true, you: 'P1', token: 'tk', opponent: { id: 'P2', profile: {} }, ...extra }, socket } }));
+  socket.fire('state_update', state(code));
+  return socket;
+};
+{
+  const spentBefore = calls.spent.length;
+  const sockA = startMatch('PAY1');
+  eq(calls.spent.length, spentBefore, '10 feePaid 이면 이 기기에서 참가비를 또 내지 않는다');
+  sockA.fire('game_over', { code: 'PAY1', youWon: true, payout: 360, reason: 'surrender', mmrDelta: 25, record: { nickname: 'a', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, voided: null, reward: { brass: 0, refunded: 0 }, wallet: { brass: 460 } });
+  const outA = await pvpSettle(true);
+  eq([calls.ranked.at(-1)[1].brass, calls.ranked.at(-1)[1].reward, calls.adopted.at(-1), outA.brass], [360, null, { brass: 460 }, 777], '10 판돈 테이블: 서버 상금(360)을 쓰고, 정산 뒤 서버 지갑으로 거울을 맞춘다 (표시 탄피는 거울 값)');
+
+  startMatch('PAY2', { fee: 0, prize: 0, tier: 'free' }).fire('game_over', { code: 'PAY2', youWon: true, payout: 0, reason: 'normal', mmrDelta: 25, record: null, voided: null, reward: { brass: 180, refunded: 0 }, wallet: { brass: 480 } });
+  await pvpSettle(true);
+  eq([calls.ranked.at(-1)[1].brass, calls.ranked.at(-1)[1].reward, calls.adopted.at(-1)], [null, 180, { brass: 480 }], '10 무료 랭킹전: 서버가 지급한 보상(180)을 그대로 보여 준다 (연승 보너스 포함 — 기기가 다시 계산하지 않음)');
+
+  startMatch('PAY3', { fee: 0, prize: 0, tier: 'free', mode: 'private', ranked: false }).fire('game_over', { code: 'PAY3', youWon: false, payout: 0, reason: 'normal', voided: null, reward: { brass: 40, refunded: 0 }, wallet: { brass: 340 } });
+  await pvpSettle(false);
+  eq([calls.friendly.at(-1)[1].reward, calls.adopted.at(-1)], [40, { brass: 340 }], '10 친선전도 서버 보상');
+
+  const rankedBefore = calls.ranked.length;
+  startMatch('VOID1').fire('game_over', { code: 'VOID1', youWon: true, payout: 0, reason: 'surrender', voided: 'EARLY_END', reward: { brass: 0, refunded: 200 }, wallet: { brass: 300 } });
+  const outV = await pvpSettle(true);
+  eq([outV.voided, outV.refunded, calls.ranked.length, calls.voided.at(-1), calls.adopted.at(-1)], ['EARLY_END', 200, rankedBefore, [true, { ranked: true, reason: 'EARLY_END' }], { brass: 300 }], '10 조기 종료(무효): recordRanked 를 부르지 않고(MMR · 보상 없음) 환불된 지갑으로 맞춘다');
+
+  startMatch('VOID2', { fee: 0, prize: 0, tier: 'free' }).fire('game_over', { code: 'VOID2', youWon: false, payout: 0, reason: 'normal', voided: 'PAIR_LIMIT', reward: { brass: 0, refunded: 0 }, wallet: { brass: 300 } });
+  eq((await pvpSettle(false)).voided, 'PAIR_LIMIT', '10 같은 상대 하루 3판 초과(무효)도 같은 방식');
+
+  // 서버 지갑을 안 쓰는 접속(예전 방식): 참가비는 이 기기가 내고 보상도 이 기기가 계산한다
+  const spent0 = calls.spent.length;
+  const old = startMatch('OLD1', { feePaid: false });
+  eq(calls.spent.length, spent0 + 1, '10 feePaid 가 아니면 예전처럼 기기에서 참가비를 낸다');
+  old.fire('game_over', { code: 'OLD1', youWon: true, payout: 360, reason: 'normal', mmrDelta: 25, record: null });
+  const adoptedBefore = calls.adopted.length;
+  await pvpSettle(true);
+  eq([calls.ranked.at(-1)[1].brass, calls.ranked.at(-1)[1].reward, calls.adopted.length], [360, null, adoptedBefore], '10 서버 지갑이 정산하지 않은 판은 예전 방식 (거울 맞춤 없음)');
+}
 
 const ms = Math.round(performance.now() - T0);
 console.log(fails.length === 0 ? `PASS  ${pass} checks, 0 failed — ${ms} ms` : `FAIL  ${pass} passed, ${fails.length} failed — ${ms} ms`);

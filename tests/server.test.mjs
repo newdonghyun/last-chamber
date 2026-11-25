@@ -7,6 +7,8 @@
 //   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
 //   Phase 7 (계정 보안): 비밀번호 오답 잠금 · 비밀번호 미노출 · 토큰 만료 · 위조 · CORS · 동시 가입 · IP 시도 제한
 //   Phase 8 (공개 방): 로비 목록 실시간 · 손님 제한 · 자기 방 · 잘못된 입장 · 클릭 입장 즉시 시작(랭킹전) · 목록에서 빠짐 · 방장 이탈/끊김
+//   Phase 11 (서버 지갑): 지갑 API 검증(구매 · 장착 · 서버 상자) · 출석 7일 사이클(한국 시간 자정 · 날짜 위조 무시) · 긴급 보급 하루 3회 · 연습 보상 하루 5판 · DB 컬럼 저장/복원 · 지갑 컬럼 없는 DB 폴백
+//                (참가비 선결제 · 환불 · 상금 · 조기 종료 무효 · 같은 상대 하루 3판 제한 · 서버가 정한 스킨 표시 · 로비 접속자 통계)
 //   Phase 10 (5초 가입): 닉네임을 비우면 서버가 느와르 닉네임을 중복 없이 붙인다 (메모리 · Supabase 흉내 — 흔한 이름이 모두 찼을 때는 숫자) · 직접 정한 닉네임 호환 · 닉네임 생성기 규칙
 //   Phase 9 (항복): 공개 방 · 빠른 매칭 항복 = 항복자 −20 · 상대 +25 를 DB 요청 하나로 정산 · 친선 비밀방은 기록 없음 · 중복 · 동시 항복 · 재접속 · 끊김 유예 중 항복 · 방 격리
 import http from 'node:http';
@@ -106,6 +108,23 @@ async function player(port, nickname) {
   c.account = account;
   return c;
 }
+/**
+ * 두 좌석이 서로에게만 쏘며 1라운드를 끝낸다 (한쪽 체력이 0 이 되어 2라운드가 시작될 때까지). 랭킹전은 1라운드가 끝나기 전의 항복 · 끊김을 무효로 보므로
+ * 정산(MMR · 상금)을 확인하는 테스트는 먼저 이 도우미로 1라운드를 넘긴다.
+ */
+async function finishRound1(X, Y, code) {
+  const latest = (P) => P.inbox.filter((m) => m.event === 'state_update' && m.payload.code === code).at(-1)?.payload.state;
+  for (let i = 0; i < 120; i += 1) {
+    const sx = latest(X);
+    const sy = latest(Y);
+    if (!sx || !sy) { await sleep(15); continue; }
+    if (sx.round >= 2 || sx.winner) return;
+    const shooter = sx.turn?.isMine ? X : sy.turn?.isMine ? Y : null;
+    if (!shooter) { await sleep(15); continue; }
+    await shooter.call('game_action', { type: 'shoot', target: 'opponent' });
+  }
+  throw new Error('1라운드가 끝나지 않았다');
+}
 /** X · Y 를 빠른 매칭(무료 테이블)으로 붙인다 — 이미 본 방 코드는 건너뛴다 */
 async function queueMatch(X, Y) {
   X.seen ??= new Set();
@@ -165,6 +184,7 @@ async function phase3() {
   eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname, mA.ranked], ['총잡이', 'Ace_7', true], '17 상대 이름표는 계정 닉네임 · 빠른 매칭 = 랭킹전');
   ok(![mA, mB].some((m) => JSON.stringify(m).includes(a.user_id) || JSON.stringify(m).includes(b.user_id)), '17 유저 ID 는 match_found 어디에도 실리지 않는다');
   const [overA, overB] = [A.waitFor('game_over', (p) => p.code === mA.code), B.waitFor('game_over', (p) => p.code === mA.code)];
+  await finishRound1(A, B, mA.code);
   await B.call('leave_room');
   const [goA, goB] = await Promise.all([overA, overB]);
   eq([goA.record?.mmr, goA.record?.wins, goA.mmrDelta, goB.record?.mmr, goB.record?.losses, goB.mmrDelta], [1025, 1, 25, 980, 1, -20], '17 랭킹전: 승 +25 · 패 −20');
@@ -187,6 +207,7 @@ async function phase3() {
   const [mA3, mB3] = await queueMatch(A, B);
   eq(mA3.opponent.profile.nickname, '에이스', '18 바꾼 닉네임이 바로 상대 이름표에');
   const over3 = A.waitFor('game_over', (p) => p.code === mA3.code);
+  await finishRound1(A, B, mA3.code);
   await B.call('leave_room');
   await over3;
   void mB3;
@@ -215,10 +236,11 @@ async function phase3() {
 
 // ───────── Phase 4: 계정 · Supabase 흉내 ─────────
 // accountColumns: false 면 username · password_hash 컬럼이 아직 없는 테이블 (ACCOUNT_SQL 실행 전)
-function fakeSupabase(rows = [], { accountColumns = true } = {}) {
+function fakeSupabase(rows = [], { accountColumns = true, walletColumns = true } = {}) {
   const table = new Map(rows.map((r) => [r.user_id, { ...r }]));
   const calls = [];
   const ACCOUNT = /username|password_hash/;
+  const WALLET = /shells|unlocked_skins|equipped_skin|attendance_days|last_checkin_date|emergency_date|emergency_count|wallet_extra/; // 지갑 컬럼 (WALLET_SQL)
   const noColumn = { data: null, error: { code: '42703', message: 'column players.username does not exist' } };
   const dup = (constraint) => ({ data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${constraint}"` } });
   const clash = (row) => {
@@ -258,10 +280,11 @@ function fakeSupabase(rows = [], { accountColumns = true } = {}) {
     calls,
     addAccountColumns: () => { accountColumns = true; }, // ACCOUNT_SQL 을 실행한 것처럼
     from: () => ({
-      select: (cols = '*') => { calls.push('select'); return query([], [], Infinity, !accountColumns && ACCOUNT.test(cols)); },
+      select: (cols = '*') => { calls.push('select'); return query([], [], Infinity, (!accountColumns && ACCOUNT.test(cols)) || (!walletColumns && WALLET.test(cols))); },
       insert: async (row) => {
         calls.push('insert');
         if (!accountColumns && Object.keys(row).some((k) => ACCOUNT.test(k))) return noColumn;
+        if (!walletColumns && Object.keys(row).some((k) => WALLET.test(k))) return noColumn;
         if (table.has(row.user_id)) return dup('players_pkey');
         const c = clash(row);
         if (c) return c;
@@ -281,6 +304,7 @@ function fakeSupabase(rows = [], { accountColumns = true } = {}) {
       update: (patch) => ({
         eq: async (col, val) => {
           calls.push('update');
+          if (!walletColumns && Object.keys(patch).some((k) => WALLET.test(k))) return noColumn;
           for (const r of table.values()) {
             if (r[col] !== val) continue;
             const c = clash({ ...r, ...patch });
@@ -328,6 +352,7 @@ async function phase4() {
   const R = await client(port, { token: r.token });
   const [mV] = await queueMatch(V, R);
   const over = R.waitFor('game_over', (p) => p.code === mV.code);
+  await finishRound1(V, R, mV.code);
   await V.call('leave_room');
   eq([(await over).record?.mmr, (await over).mmrDelta], [1025, 25], '22 game_over 에 갱신된 MMR');
   await server.users.flush();
@@ -518,8 +543,9 @@ async function phase8() {
   eq(C.inbox.filter((m) => m.event === 'room_list').length, cLists, '34 방에 앉은 소켓은 로비 목록을 더 받지 않는다');
   eq((await C.call('join_public_room', { code: other.code })).error, 'ALREADY_IN_ROOM', '34 판 도중에는 다른 방에 못 들어간다');
   const over = host.waitFor('game_over', (p) => p.code === made.code);
+  await finishRound1(host, C, made.code);
   await C.call('leave_room');
-  eq([(await over).ranked, (await over).mmrDelta, (await over).record?.mmr], [true, 25, 1025], '34 공개 방 결과는 MMR 정산 (+25)');
+  eq([(await over).ranked, (await over).mmrDelta, (await over).record?.mmr], [true, 25, 1025], '34 공개 방 결과는 MMR 정산 (+25) — 1라운드 뒤의 이탈');
 
   // 35. 방장이 나가거나 연결이 끊기면 목록에서 바로 빠진다 · 목록의 MMR 은 서버 전적
   const relist = await host.call('create_public_room', {});
@@ -570,6 +596,7 @@ async function phase9() {
   await A.call('join_public_room', { code: made.code });
   const [mB, mA] = await Promise.all([B.waitFor('match_found', (p) => p.code === made.code), A.waitFor('match_found', (p) => p.code === made.code)]);
   ok(inChannel(A, made.code) && inChannel(B, made.code), '36 판 중에는 둘 다 방 채널에 있다');
+  await finishRound1(A, B, made.code); // 1라운드 전의 항복은 무효 — 1라운드를 넘긴 뒤에 항복
   const upBefore = upserts();
   eq(await A.call('surrender'), { ok: true }, '36 항복 → ok');
   const [oA, oB] = await Promise.all([A.waitFor('game_over', (p) => p.code === made.code), B.waitFor('game_over', (p) => p.code === made.code)]);
@@ -610,6 +637,7 @@ async function phase9() {
   // 39. 빠른 매칭(랭킹전)도 같은 정산 — 이번엔 이긴 쪽(B, 연승 1)이 항복 → 연승 초기화
   const [qB, qA] = await queueMatch(B, A2);
   eq([qB.mode, qB.ranked], ['queue', true], '39 빠른 매칭은 랭킹전');
+  await finishRound1(B, A2, qB.code);
   await B.call('surrender');
   const [qoB, qoA] = await Promise.all([B.waitFor('game_over', (p) => p.code === qB.code), A2.waitFor('game_over', (p) => p.code === qB.code)]);
   eq([qoB.youWon, qoB.mmrDelta, qoB.record.streak, qoB.record.mmr, qoB.record.losses], [false, -20, 0, 1005, 1], '39 항복한 연승자: −20 · 연승 0 · 1005 · 1패');
@@ -638,6 +666,7 @@ async function phase9() {
   const G = await player(port, '동시A');
   const H = await player(port, '동시B');
   const [mG] = await queueMatch(G, H);
+  await finishRound1(G, H, mG.code);
   const upSim = upserts();
   const acks = await Promise.all([G.call('surrender'), H.call('surrender')]);
   eq(acks.filter((a) => a.ok).length, 1, '41 동시 항복: 하나만 처리된다');
@@ -652,6 +681,7 @@ async function phase9() {
   const I = await player(port, '유예A');
   const J = await player(port, '유예B');
   const [mI, mJ] = await queueMatch(I, J);
+  await finishRound1(I, J, mI.code);
   J.socket.disconnect();
   await I.waitFor('opponent_status', (p) => p.code === mI.code && p.connected === false);
   await I.call('surrender');
@@ -719,6 +749,261 @@ async function phase10() {
   await dbServer.stop();
 }
 
+// ───────── Phase 11: 서버 지갑 · 출석 · 긴급 보급 · 조기 종료 · 같은 상대 제한 · 참가비 · 로비 통계 ─────────
+async function phase11() {
+  const DAY = 24 * 60 * 60 * 1000;
+  let clockMs = Date.parse('2026-11-10T03:00:00Z'); // 한국 시간 11월 10일 정오
+  const db = fakeSupabase([]);
+  const options = { quiet: true, onError, supabaseClient: db, authSecret: 'test-secret', clock: () => clockMs, lobbyStatsMs: 60, graceMs: 250 };
+  const server = createGameServer(options);
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+  const w = (token, action, args = {}) => api('wallet', { token, action, ...args });
+  const setBrass = async (acc, n) => { const wl = await server.users.getWallet(acc.user_id); wl.brass = n; server.users.commitWallet(acc.user_id); };
+  const brassOf = async (acc) => (await w(acc.token, 'get')).wallet.brass;
+  const row = (acc) => db.table.get(acc.user_id);
+
+  // 61. 지갑 API: 로그인 필요 · 새 계정의 지갑 · DB 에도 컬럼으로
+  const K = await signupVia(port, '지갑주인');
+  eq([(await w('nope', 'get')).status, (await w('nope', 'get')).error], [401, 'AUTH_REQUIRED'], '61 토큰이 없거나 틀리면 지갑을 열 수 없다');
+  eq((await w(K.token, 'teleport')).error, 'BAD_REQUEST', '61 모르는 동작은 거절');
+  const first = await w(K.token, 'get');
+  eq([first.ok, first.wallet.brass, first.wallet.owned, first.wallet.equipped, first.state.attendance.days, first.state.attendance.todayDay, first.state.emergency.eligible],
+    [true, 300, { gun: ['steel'], table: ['obsidian'] }, { gun: 'steel', table: 'obsidian' }, 0, 1, false], '61 새 계정: 탄피 300 · 기본 스킨 · 출석 1일차 · 긴급 보급 대상 아님');
+  eq([row(K).shells, row(K).attendance_days, row(K).emergency_count, row(K).last_checkin_date], [300, 0, 0, null], '61 Supabase players 행의 지갑 컬럼 (shells · attendance_days …)');
+  eq(first.state.today, '2026-11-10', '61 날짜는 서버가 한국 시간으로 정한다');
+
+  // 62. 구매 · 장착 · 상자: 서버가 검증한다 (모자라면 거절 · 한정 스킨은 탄피로 못 산다 · 모르는 값 거절)
+  eq((await w(K.token, 'buy', { kind: 'gun', id: 'gold' })).result, { ok: false, reason: 'insufficient', short: 200 }, '62 탄피가 모자라면 구매 거절 (서버 값 기준)');
+  await setBrass(K, 2000);
+  const bought = await w(K.token, 'buy', { kind: 'gun', id: 'gold' });
+  eq([bought.result.ok, bought.wallet.brass, bought.wallet.owned.gun], [true, 1500, ['steel', 'gold']], '62 구매 → 탄피 차감 · 보유 스킨');
+  eq((await w(K.token, 'buy', { kind: 'gun', id: 'gold' })).result.reason, 'owned', '62 이미 가진 스킨은 다시 못 산다');
+  eq([(await w(K.token, 'buy', { kind: 'gun', id: 'phantom_black' })).result.reason, (await w(K.token, 'buy', { kind: 'gun', id: 'nope' })).result.reason, (await w(K.token, 'buy', { kind: 'x', id: 'gold' })).result.reason, (await w(K.token, 'buy', { kind: 'gun' })).result.reason],
+    ['not_for_brass', 'unknown', 'bad_request', 'bad_request'], '62 출석 한정 스킨은 탄피로 못 산다 · 없는 스킨 · 잘못된 종류 · 빠진 값');
+  eq([(await w(K.token, 'equip', { kind: 'gun', id: 'cyber' })).result.reason, (await w(K.token, 'equip', { kind: 'gun', id: 'gold' })).result.ok], ['not_owned', true], '62 가진 스킨만 장착');
+  await server.users.flush();
+  eq([row(K).shells, row(K).unlocked_skins.gun, row(K).equipped_skin.gun], [1500, ['steel', 'gold'], 'gold'], '62 DB 컬럼(shells · unlocked_skins · equipped_skin)에 바로 저장');
+  const tampered = await w(K.token, 'buy', { kind: 'table', id: 'lab', brass: 99999, price: 0, owned: ['lab'] }); // 클라이언트가 가격 · 보유를 속여 보내도 서버가 정한다
+  eq([tampered.result.ok, tampered.wallet.brass, tampered.wallet.owned.table], [true, 700, ['obsidian', 'lab']], '62 가격 · 보유를 속인 값은 무시 (lab 800 차감)');
+  const chest = await w(K.token, 'chest');
+  eq([chest.result.ok, typeof chest.result.item.id, Object.keys(chest.result.item), chest.wallet.chest.opened], [true, 'string', ['id'], 1], '62 상자 추첨은 서버가 (결과는 아이템 id 만)');
+  eq([(await w(K.token, 'taunt_buy', { id: 'knock' })).result.reason, (await w(K.token, 'taunt_equip', { id: 'knock' })).result.reason], ['insufficient', 'not_owned'], '62 도발도 서버 값으로 검증');
+
+  // 63. 출석 체크: 한국 시간 하루 한 번 · 7일 사이클 · 서버 시계만 믿는다
+  const D = await signupVia(port, '출석왕');
+  const claim = async () => (await w(D.token, 'checkin', { today: '2099-01-01', day: 7, date: '1999-01-01' })).result; // 클라이언트가 날짜를 속여 보내도 무시
+  const c1 = await claim();
+  eq([c1.ok, c1.day, c1.reward.brass, await brassOf(D)], [true, 1, 100, 400], '63 1일차: 탄피 100 (날짜를 속여 보내도 서버 시계)');
+  eq([(await claim()).error, await brassOf(D)], ['ALREADY_CHECKED_IN', 400], '63 같은 날 두 번째는 거절 — 탄피 그대로');
+  eq((await w(D.token, 'get')).state.attendance, { days: 1, claimedToday: true, todayDay: 1, rewards: (await w(D.token, 'get')).state.attendance.rewards }, '63 오늘 받았다는 상태');
+  clockMs = Date.parse('2026-11-10T14:59:00Z'); // 한국 시간 23:59 — 아직 같은 날
+  eq((await claim()).error, 'ALREADY_CHECKED_IN', '63 한국 시간 23:59 는 아직 같은 날');
+  clockMs = Date.parse('2026-11-10T15:01:00Z'); // 한국 시간 다음 날 00:01 — 새 날
+  const c2 = await claim();
+  eq([c2.ok, c2.day, c2.reward.item], [true, 2, { kind: 'table', id: 'silver_roulette' }], '63 한국 시간 자정이 지나면 2일차: 실버 룰렛 스킨');
+  const days = [c2];
+  for (let d = 3; d <= 7; d += 1) { clockMs += DAY; days.push(await claim()); }
+  eq(days.map((r) => [r.day, r.reward.brass, r.reward.item?.id ?? null]), [[2, 0, 'silver_roulette'], [3, 200, null], [4, 0, 'blue_flame'], [5, 300, null], [6, 0, 'blood_gold'], [7, 500, 'phantom_black']], '63 3일차 200 · 4일차 블루 플레임 · 5일차 300 · 6일차 블러드 골드 · 7일차 500 + 팬텀 블랙');
+  const afterCycle = await w(D.token, 'get');
+  eq([afterCycle.wallet.brass, afterCycle.wallet.owned.gun, afterCycle.wallet.owned.table, afterCycle.wallet.flames], [1400, ['steel', 'blood_gold', 'phantom_black'], ['obsidian', 'silver_roulette'], ['blue_flame']], '63 사이클 보상이 지갑에 (시작 300 + 100 + 200 + 300 + 500 = 1400)');
+  await server.users.flush();
+  eq([row(D).attendance_days, row(D).last_checkin_date, row(D).wallet_extra.flames], [7, '2026-11-16', ['blue_flame']], '63 DB: attendance_days · last_checkin_date(한국 날짜) · wallet_extra');
+  clockMs += DAY;
+  const c8 = await claim();
+  eq([c8.day, c8.reward.brass], [1, 100], '63 7일 다음은 다시 1일차');
+  clockMs += DAY;
+  const c9 = await claim();
+  eq([c9.day, c9.reward.duplicate, c9.reward.brass, c9.reward.item], [2, true, 150, null], '63 이미 가진 스킨이면 탄피 150 으로 대체');
+  clockMs += 3 * DAY; // 며칠 빠뜨려도 사이클은 이어진다
+  eq((await claim()).day, 3, '63 빠뜨린 날이 있어도 사이클은 이어진다 (3일차)');
+
+  // 64. 긴급 보급: 탄피가 가장 싼 유료 테이블 참가비(200) 미만일 때 하루 3번 +50
+  const E = await signupVia(port, '빈털터리');
+  eq((await w(E.token, 'emergency')).result.error, 'NOT_ELIGIBLE', '64 탄피가 충분하면(300) 긴급 보급 불가');
+  await setBrass(E, 0);
+  const status0 = (await w(E.token, 'get')).state.emergency;
+  eq([status0.eligible, status0.left, status0.amount, status0.minFee], [true, 3, 50, 200], '64 탄피 0 → 대상 · 오늘 3번 남음 · 50 탄피 · 기준 200');
+  const e = [];
+  for (let i = 0; i < 4; i += 1) { const r = await w(E.token, 'emergency'); e.push(r.result.ok ? [r.result.amount, r.result.left] : r.result.error); }
+  eq([e, await brassOf(E)], [[[50, 2], [50, 1], [50, 0], 'LIMIT_REACHED'], 150], '64 하루 3번까지 · 4번째는 거절 (탄피 150)');
+  await setBrass(E, 0);
+  eq((await w(E.token, 'emergency')).result.error, 'LIMIT_REACHED', '64 탄피를 다시 0 으로 만들어도 횟수는 그대로 (서버가 센다)');
+  clockMs += DAY;
+  eq((await w(E.token, 'emergency')).result.ok, true, '64 한국 시간 다음 날이면 다시 받을 수 있다');
+  await server.users.flush();
+  eq([row(E).emergency_date, row(E).emergency_count], ['2026-11-22', 1], '64 DB: emergency_date · emergency_count');
+
+  // 65. AI 연습 보상: 하루 5판까지 (승 150 · 패 40) — 서버가 검증할 수 없는 판이라 횟수로 제한
+  const P = await signupVia(port, '연습생');
+  const got = [];
+  for (let i = 0; i < 6; i += 1) { const r = await w(P.token, 'practice', { won: i % 2 === 0 ? true : 'yes' }); got.push(r.result.granted); } // 문자열 'yes' 는 승리로 안 친다
+  eq([got, await brassOf(P)], [[150, 40, 150, 40, 150, 0], 300 + 530], '65 하루 5판까지만 지급 (이긴 판 150 · 진 판 40 · 6번째는 0)');
+  eq((await w(P.token, 'get')).state.practice, { perDay: 5, left: 0 }, '65 남은 횟수 0');
+  clockMs += DAY;
+  eq((await w(P.token, 'practice', { won: true })).result.granted, 150, '65 다음 날에는 다시');
+
+  // 66. 요청 한도 (계정당 10초 40번)
+  const R = await signupVia(port, '연타');
+  const statuses = [];
+  for (let i = 0; i < 46; i += 1) statuses.push((await w(R.token, 'get')).status); // HTTP 상태
+  ok(statuses.slice(0, 40).every((x) => x === 200) && statuses.slice(40).every((x) => x === 429), '66 같은 계정이 지갑을 연타하면 429 RATE_LIMITED');
+
+  // 67. 재시작해도 그대로 (DB 지갑 컬럼에서 다시 읽는다)
+  await server.stop();
+  const again = createGameServer(options);
+  const port2 = await again.start(0, '127.0.0.1');
+  const back = await apiOf(port2)('wallet', { token: D.token, action: 'get' });
+  eq([back.wallet.brass, back.wallet.owned.gun, back.state.attendance.days], [afterCycle.wallet.brass + 100 + 150 + 200, ['steel', 'blood_gold', 'phantom_black'], 3], '67 서버를 다시 켜도 탄피 · 스킨 · 출석 그대로 (Supabase 에서)');
+  await again.stop();
+
+  // 68. 지갑 컬럼이 아직 없는 DB: 지갑만 꺼지고(503) 가입 · 로그인 · 대전은 그대로, 참가비는 클라이언트가 (feePaid false)
+  const bare = fakeSupabase([], { walletColumns: false });
+  const bareErrors = [];
+  const bareServer = createGameServer({ quiet: true, onError: (err) => bareErrors.push(err.message), supabaseClient: bare, authSecret: 'test-secret' });
+  const barePort = await bareServer.start(0, '127.0.0.1');
+  const bareApi = apiOf(barePort);
+  const old = await signupVia(barePort, '예전방식');
+  eq([(await bareApi('wallet', { token: old.token, action: 'get' })).status, (await bareApi('wallet', { token: old.token, action: 'get' })).error], [503, 'WALLET_SETUP_REQUIRED'], '68 지갑 컬럼이 없으면 지갑 API 는 503 (SQL 안내가 서버 로그에)');
+  eq([bareServer.users.health().walletReady, bareServer.users.health().accountReady, (await bareApi('login', { username: old.username, password: PASSWORD })).ok], [false, true, true], '68 그래도 계정 · 로그인은 정상');
+  const [oa, ob] = [await player(barePort, '예전A'), await player(barePort, '예전B')];
+  await oa.call('join_queue', { tier: 'pro', profile: {} });
+  await ob.call('join_queue', { tier: 'pro', profile: {} });
+  const oldMatch = await oa.waitFor('match_found');
+  eq([oldMatch.fee, oldMatch.feePaid], [200, false], '68 지갑이 없으면 참가비는 예전처럼 클라이언트가 (feePaid false)');
+  ok(bareErrors.some((m) => m.includes('shells') && m.includes('alter table public.players add column if not exists shells')), '68 서버 로그에 실행할 SQL(WALLET_SQL)이 그대로 나온다');
+  await bareServer.stop();
+
+  // 69. 참가비 선결제 · 환불 · 상금 (pro 테이블 참가비 200 · 승자 360)
+  const s2 = createGameServer(options);
+  const p2 = await s2.start(0, '127.0.0.1');
+  const api2 = apiOf(p2);
+  const W = (acc, action, args = {}) => api2('wallet', { token: acc.token, action, ...args });
+  const Q1 = await player(p2, '참가자A');
+  const Q2 = await player(p2, '참가자B');
+  const poor = await player(p2, '무일푼');
+  const setB = async (acc, n) => { const wl = await s2.users.getWallet(acc.account.user_id); wl.brass = n; s2.users.commitWallet(acc.account.user_id); };
+  await setB(poor, 150);
+  eq((await poor.call('join_queue', { tier: 'pro', profile: {} })).error, 'INSUFFICIENT_BRASS', '69 서버 지갑의 탄피가 모자라면 입장 거절 (클라이언트가 속일 수 없다)');
+  eq([s2.stats().queued, (await W(poor.account, 'get')).wallet.brass], [0, 150], '69 거절되면 대기열에도 없고 탄피도 그대로');
+  eq((await Q1.call('join_queue', { tier: 'pro', profile: {} })).ok, true, '69 대기열 입장');
+  eq((await W(Q1.account, 'get')).wallet.brass, 100, '69 참가비 200 은 대기열에 들어갈 때 서버가 먼저 받는다 (300 → 100)');
+  await Q1.call('leave_queue');
+  eq([(await W(Q1.account, 'get')).wallet.brass, s2.stats().queued], [300, 0], '69 대기를 취소하면 참가비를 돌려준다');
+  await Q1.call('join_queue', { tier: 'pro', profile: {} });
+  Q1.socket.disconnect();
+  await sleep(60);
+  eq([(await W(Q1.account, 'get')).wallet.brass, s2.stats().queued], [300, 0], '69 대기 중 연결이 끊겨도 돌려준다');
+  const Q1b = await client(p2, { token: Q1.account.token });
+  Q1b.account = Q1.account;
+  await Q1b.call('join_queue', { tier: 'pro', profile: {} });
+  await Q2.call('join_queue', { tier: 'pro', profile: {} });
+  const [pm1, pm2] = await Promise.all([Q1b.waitFor('match_found', (p) => p.mode === 'queue'), Q2.waitFor('match_found', (p) => p.mode === 'queue')]);
+  eq([pm1.fee, pm1.feePaid, pm2.feePaid, (await W(Q2.account, 'get')).wallet.brass], [200, true, true, 100], '69 매칭 → feePaid true (클라이언트는 따로 내지 않는다) · 둘 다 100 남음');
+  await finishRound1(Q1b, Q2, pm1.code);
+  await Q1b.call('surrender');
+  const [po1, po2] = await Promise.all([Q1b.waitFor('game_over', (p) => p.code === pm1.code), Q2.waitFor('game_over', (p) => p.code === pm1.code)]);
+  eq([po1.youWon, po1.reward, po1.wallet.brass, po2.youWon, po2.reward, po2.wallet.brass], [false, { brass: 0, refunded: 0 }, 100, true, { brass: 360, refunded: 0 }, 460], '69 1라운드 뒤 항복: 승자는 상금 360 (100 → 460) · 항복자는 참가비를 잃는다 (game_over 에 reward · wallet)');
+  eq([po1.voided, po2.voided], [null, null], '69 정상 정산');
+
+  // 70. 조기 종료(1라운드 전 항복 · 이탈 · 끊김) → MMR · 전적 · 보상 무효, 참가비 환불
+  const [X1, X2] = [await player(p2, '조기A'), await player(p2, '조기B')];
+  await X1.call('join_queue', { tier: 'pro', profile: {} });
+  await X2.call('join_queue', { tier: 'pro', profile: {} });
+  const xm = await X1.waitFor('match_found', (p) => p.mode === 'queue' && p.code !== pm1.code);
+  await X2.waitFor('match_found', (p) => p.code === xm.code);
+  eq((await W(X1.account, 'get')).wallet.brass, 100, '70 (참가비 200 을 낸 상태)');
+  await X1.call('surrender'); // 1라운드가 끝나기 전
+  const [xo1, xo2] = await Promise.all([X1.waitFor('game_over', (p) => p.code === xm.code), X2.waitFor('game_over', (p) => p.code === xm.code)]);
+  eq([xo1.voided, xo2.voided, xo1.mmrDelta, xo2.mmrDelta, xo1.record?.mmr, xo2.record?.mmr, xo1.record?.losses, xo2.record?.wins], ['EARLY_END', 'EARLY_END', undefined, undefined, 1000, 1000, 0, 0], '70 조기 종료: voided EARLY_END · MMR · 전적 변동 없음');
+  eq([xo1.reward, xo2.reward, xo1.payout, xo2.payout, xo2.youWon], [{ brass: 0, refunded: 200 }, { brass: 0, refunded: 200 }, 0, 0, true], '70 보상 없음 · 상금 없음 · 참가비 200 환불 (승패 표시는 그대로)');
+  eq([(await W(X1.account, 'get')).wallet.brass, (await W(X2.account, 'get')).wallet.brass], [300, 300], '70 두 사람 탄피 모두 원래대로 (300)');
+  eq([s2.users.get(X1.account.user_id).losses, s2.users.get(X2.account.user_id).wins], [0, 0], '70 서버 전적에도 반영 없음');
+  // 공개 방 이탈 · 끊김도 마찬가지
+  const [Y1, Y2] = [await player(p2, '이탈A'), await player(p2, '이탈B')];
+  const yroom = await Y1.call('create_public_room', {});
+  await Y2.call('join_public_room', { code: yroom.code });
+  await Promise.all([Y1.waitFor('match_found', (p) => p.code === yroom.code), Y2.waitFor('match_found', (p) => p.code === yroom.code)]);
+  await Y2.call('leave_room');
+  eq([(await Y1.waitFor('game_over', (p) => p.code === yroom.code)).voided, s2.users.get(Y1.account.user_id).wins], ['EARLY_END', 0], '70 공개 방에서 1라운드 전에 나가면 무효');
+  const [Z1, Z2] = [await player(p2, '끊김A'), await player(p2, '끊김B')];
+  const [zm] = await queueMatch(Z1, Z2);
+  Z2.socket.disconnect(); // 유예(250ms) 안에 돌아오지 않는다
+  const zo = await Z1.waitFor('game_over', (p) => p.code === zm.code, 3000);
+  eq([zo.reason, zo.voided, zo.mmrDelta], ['forfeit', 'EARLY_END', undefined], '70 1라운드 전 연결 끊김(부전승)도 무효');
+  // 친선 비밀방은 MMR 이 없지만 보상은 같은 규칙
+  const [F1, F2] = [await player(p2, '친선가A'), await player(p2, '친선가B')];
+  const froom = await F1.call('create_private_room', {});
+  await F2.call('join_private_room', froom.code);
+  await Promise.all([F1.waitFor('match_found', (p) => p.code === froom.code), F2.waitFor('match_found', (p) => p.code === froom.code)]);
+  await F1.call('surrender');
+  const fo = await F2.waitFor('game_over', (p) => p.code === froom.code);
+  eq([fo.voided, fo.reward.brass, (await W(F2.account, 'get')).wallet.brass], ['EARLY_END', 0, 300], '70 친선 비밀방도 1라운드 전 종료면 보상 없음 (친선방 보상 어뷰징 차단)');
+
+  // 71. 정상 종료의 보상: 랭킹전 승자 150 + 연승 보너스 30 · 패자 40 / 친선 150 · 40 (연승 보너스 없음)
+  const [G1, G2] = [await player(p2, '정산A'), await player(p2, '정산B')];
+  const [gm] = await queueMatch(G1, G2);
+  await finishRound1(G1, G2, gm.code);
+  await G1.call('surrender');
+  const [go1, go2] = await Promise.all([G1.waitFor('game_over', (p) => p.code === gm.code), G2.waitFor('game_over', (p) => p.code === gm.code)]);
+  eq([go1.reward.brass, go2.reward.brass, go1.wallet.brass, go2.wallet.brass, go2.voided], [40, 180, 340, 480, null], '71 랭킹전: 패자 +40 · 승자 +150 + 연승 보너스 30 (서버가 지급 — game_over.wallet 이 정산 뒤 지갑)');
+  const proom = await G1.call('create_private_room', {});
+  await G2.call('join_private_room', proom.code);
+  await Promise.all([G1.waitFor('match_found', (p) => p.code === proom.code), G2.waitFor('match_found', (p) => p.code === proom.code)]);
+  await finishRound1(G1, G2, proom.code);
+  await G1.call('surrender');
+  const [fo1, fo2] = await Promise.all([G1.waitFor('game_over', (p) => p.code === proom.code), G2.waitFor('game_over', (p) => p.code === proom.code)]);
+  eq([fo1.reward.brass, fo2.reward.brass, fo2.mmrDelta], [40, 150, undefined], '71 친선: 패자 +40 · 승자 +150 (연승 보너스 · MMR 없음)');
+
+  // 72. 같은 두 계정은 하루(한국 시간) 3판까지만 랭킹 정산
+  const [U, V] = [await player(p2, '단골A'), await player(p2, '단골B')];
+  const outcomes = [];
+  for (let i = 0; i < 4; i += 1) {
+    const [m] = await queueMatch(U, V);
+    await finishRound1(U, V, m.code);
+    await V.call('surrender');
+    const o = await U.waitFor('game_over', (p) => p.code === m.code);
+    outcomes.push([o.voided, o.mmrDelta ?? null, o.reward.brass]);
+  }
+  eq(outcomes.map((o) => o[0]), [null, null, null, 'PAIR_LIMIT'], '72 같은 상대와 4번째 판은 PAIR_LIMIT 으로 무효');
+  eq(outcomes.map((o) => o[1]), [25, 25, 25, null], '72 앞 3판은 MMR +25, 4번째는 변동 없음');
+  eq([s2.users.get(U.account.user_id).mmr, s2.users.get(V.account.user_id).mmr, s2.users.get(U.account.user_id).wins], [1075, 940, 3], '72 서버 전적: 3판만 반영 (1075 · 940)');
+  eq(outcomes[3][2], 0, '72 무효가 된 판은 탄피 보상도 없다');
+  const other = await player(p2, '다른상대');
+  const [m5] = await queueMatch(U, other);
+  await finishRound1(U, other, m5.code);
+  await other.call('surrender');
+  eq((await U.waitFor('game_over', (p) => p.code === m5.code)).voided, null, '72 다른 상대와는 따로 센다');
+  clockMs += DAY;
+  const [m6] = await queueMatch(U, V);
+  await finishRound1(U, V, m6.code);
+  await V.call('surrender');
+  eq((await U.waitFor('game_over', (p) => p.code === m6.code)).voided, null, '72 한국 시간으로 날이 바뀌면 다시 반영');
+
+  // 73. 상대에게 보이는 스킨 · 칭호는 서버 지갑의 장착값 (클라이언트가 보낸 값 무시)
+  const [S1, S2] = [await player(p2, '장착A'), await player(p2, '장착B')];
+  await setB(S1, 2000);
+  await W(S1.account, 'buy', { kind: 'gun', id: 'gold' });
+  await W(S1.account, 'equip', { kind: 'gun', id: 'gold' });
+  const sroom = await S1.call('create_private_room', { profile: { cosmetics: { gun: 'crimson', table: 'velvet', flame: 'plasma', taunt: 'knock' } } });
+  await S2.call('join_private_room', sroom.code);
+  const [, sm2] = await Promise.all([S1.waitFor('match_found', (p) => p.code === sroom.code), S2.waitFor('match_found', (p) => p.code === sroom.code)]);
+  eq(sm2.opponent.profile.cosmetics, { gun: 'gold', table: 'obsidian', flame: 'native', taunt: null }, '73 상대 화면의 스킨 = 서버가 아는 장착값 (보낸 crimson · velvet · plasma · knock 은 무시)');
+  await S1.call('leave_room');
+
+  // 74. 로비: 접속자 · 대기 인원 (watch_rooms 응답 + lobby_stats 주기 방송)
+  const L1 = await client(p2);
+  const watched = await L1.call('watch_rooms');
+  ok(watched.ok && Number.isInteger(watched.online) && watched.online >= 2 && Number.isInteger(watched.queued), '74 watch_rooms 응답에 online(접속자) · queued(대기 인원)');
+  const stat = await L1.waitFor('lobby_stats', () => true, 1500);
+  ok(Number.isInteger(stat.online) && Number.isInteger(stat.queued) && Number.isInteger(stat.rooms), '74 lobby_stats 가 몇 초마다 온다 (online · queued · rooms)');
+  await L1.call('unwatch_rooms');
+  const seen = L1.inbox.filter((m) => m.event === 'lobby_stats').length;
+  await sleep(250);
+  eq(L1.inbox.filter((m) => m.event === 'lobby_stats').length, seen, '74 로비를 그만 보면 더는 받지 않는다');
+  await s2.stop();
+}
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
@@ -745,8 +1030,8 @@ async function phase1() {
   eq([mA.you, mB.you].sort(), ['P1', 'P2'], '2 서로 다른 좌석');
   eq([mA.opponent.id, mB.opponent.id], [mB.you, mA.you], '2 상대 좌석 id');
   eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo_7', 1000], '2 A 가 보는 상대 프로필(B) — 이름 · MMR 은 서버 계정 값 (보낸 900 이 아니라)');
-  eq(mA.opponent.profile.cosmetics, { gun: null, table: 'obsidian', flame: null, taunt: null }, '2 위험한 코스메틱 id 는 걸러진다');
-  eq(mB.opponent.profile, { nickname: '알파', mmr: 1000, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A)');
+  eq(mA.opponent.profile.cosmetics, { gun: 'steel', table: 'obsidian', flame: 'native', taunt: null }, '2 상대에게 보이는 스킨은 서버 지갑의 장착값 — 클라이언트가 보낸 이상한 id 는 무시');
+  eq(mB.opponent.profile, { nickname: '알파', mmr: 1000, tier: 'silver', title: '새로 온 손님', cosmetics: { gun: 'steel', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A) — 가진 적 없는 gold 를 보냈어도 서버 지갑의 기본 스킨');
   ok(mA.token.length === 32 && mB.token.length === 32 && mA.token !== mB.token, '2 재접속 토큰은 각자 따로');
   eq(await B.call('join_private_room', created.code), { ok: false, error: 'ALREADY_IN_ROOM' }, '2 이미 시작된 방에 또 들어갈 수 없다');
 
@@ -818,6 +1103,7 @@ async function phase1() {
   const sniper = await player(port, '저격수');
   eq((await sniper.call('join_private_room', qA.code)).error, 'ROOM_NOT_FOUND', '8 매칭 방은 코드로 들어올 수 없다');
   const overQ = B.waitFor('game_over', (p) => p.code === qA.code);
+  await finishRound1(A, B, qA.code);
   await A.call('leave_room');
   const goQ = await overQ;
   eq([goQ.youWon, goQ.payout, goQ.prize, goQ.reason], [true, 360, 360, 'forfeit'], '8 승자는 pro 상금 360');
@@ -986,6 +1272,7 @@ try {
   await phase8();
   await phase9();
   await phase10();
+  await phase11();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

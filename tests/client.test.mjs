@@ -5,6 +5,7 @@
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 토큰도 손님 표시도 없으면 html.needs-login
 //   6. 계정 API(accountApi): 회원가입 · 로그인 → 이 기기에 저장 (비밀번호는 저장 안 함) · 형식 검사 · 오류 문구 · 토큰 만료 → 다시 로그인 · 닉네임 변경 · 아이디/비밀번호 규칙이 서버와 같다
 //   9. 5초 가입 · 첫 판 가이드 · 초대 링크 · 서버 깨우기: invite.js · wake.js · guide.js · signUp(닉네임 생략) · 화면 연결(index.html · multiplayer.js · app.js)
+//  10. 서버 지갑 거울(walletClient · PlayerProfile.adoptWallet) · 무효/서버 보상 결과 · 매칭 대기 15초 안내 · 로비 출석/긴급 보급/안내문 · 모바일 터치 값(격발 버튼 간격 16px · 0.35초 잠금 · 상단 버튼 40px)
 //   8. 소리 출력 지점 감사: Web Audio 는 soundEngine.js 한 곳뿐 · <audio> · new Audio · 음성 합성 · 시스템 벨(\x07) 없음 · 앱의 소리 호출 가드(포커스 · 인게임 화면)
 //   7. 인게임 [항복] / [나가기]: app.js 가 쓰는 요소가 index.html 에 모두 있다 · 확인 모달 · AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 · 온라인 항복은 서버 요청뿐
 //   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
@@ -19,6 +20,7 @@ import { cleanNickname as serverNickname } from '../server/userStore.js';
 import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
 import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, captureInvite, INVITE_KEY, INVITE_TTL_MS } from '../src/ui/invite.js';
 import { retryUntil } from '../src/ui/wake.js';
+import { WalletClient } from '../src/ui/walletClient.js';
 import { GuideState, GUIDE_KEY, GUIDED_TURN_MS, RULE_LINES, COACH_STEPS } from '../src/ui/guide.js';
 import { MMR_RULE as SERVER_MMR } from '../server/userStore.js';
 
@@ -456,6 +458,118 @@ function memoryStorage(initial = {}) {
     const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
     ok(/const turnLimit = \(\) => \(online \? TURN_MS : guidedGame \? GUIDED_TURN_MS : TURN_MS\)/.test(app) && /el\.coach\.open/.test(app), '9 첫 AI 판만 턴 제한이 길고, 코치마크가 열려 있는 동안 시간이 멈춘다 (온라인은 서버의 20초 그대로)');
     ok(/guide\.shouldCoach\(\{ online \}\) && !coaching/.test(app) && /guide\.markCoachDone\(\)/.test(app) && /guide\.markRuleCard\(\)/.test(app), '9 코치마크는 첫 AI 판 내 첫 턴에 한 번 · 끝(건너뛰기 포함)이면 기록');
+  }
+}
+
+// ───────── 10. 서버 지갑 거울 · 무효/서버 보상 · 로비 · 모바일 터치 ─────────
+{
+  const mem = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), map: m }; };
+  const newProfile = (data) => { const st = mem(); if (data) st.setItem(STORAGE_KEY, JSON.stringify(data)); return { st, p: new PlayerProfile({ storage: st }) }; };
+  const walletOf = (over = {}) => ({
+    brass: 1234, owned: { gun: ['steel', 'gold', 'blood_gold'], table: ['obsidian', 'silver_roulette'] }, equipped: { gun: 'blood_gold', table: 'silver_roulette' },
+    flames: ['blue_flame'], equippedFlame: 'blue_flame', taunts: ['knock'], equippedTaunt: 'knock', titles: ['newcomer', 'brave_heart'], equippedTitle: 'newcomer', chest: { pity: 2, opened: 4 },
+    hasNoAdsPass: false, starterPurchased: false, streakShields: 0, ...over,
+  });
+
+  // PlayerProfile.adoptWallet — 서버 지갑으로 거울을 맞춘다 (이 기기에서 고친 값은 되돌아간다)
+  {
+    const { p } = newProfile({ v: 5, brass: 99_999_999, owned: { gun: ['steel', 'gold', 'cyber', 'crimson'], table: ['obsidian', 'emerald', 'lab', 'velvet'] }, equipped: { gun: 'cyber', table: 'velvet' }, starterPurchased: true, hasNoAdsPass: true, streakShields: 50, practice: { wins: 4, losses: 1, streak: 4, maxStreak: 4 } });
+    eq([p.brass, p.owns('gun', 'cyber'), p.hasNoAdsPass, p.starterPurchased], [99_999_999, true, true, true], '10 (조작된 기기: 탄피 · 스킨 · VIP · 스타터가 전부 있다)');
+    eq(p.adoptWallet(walletOf()), true, '10 서버 지갑을 받으면 바뀐 것이 있다');
+    eq([p.brass, p.owns('gun', 'cyber'), p.owns('gun', 'crimson'), p.owns('table', 'velvet'), p.equippedId('gun'), p.equippedId('table')], [1234, false, false, false, 'blood_gold', 'silver_roulette'], '10 탄피 · 보유 · 장착이 서버 값으로 되돌아간다 (조작한 cyber · crimson · velvet 은 사라짐)');
+    eq([p.hasNoAdsPass, p.starterPurchased, p.streakShields, p.owns('gun', 'silver_vampire')], [false, false, 0, false], '10 결제 권한(VIP · 스타터 · 보호권)도 서버 값 — 이 기기에서 켜도 되돌아간다');
+    eq([p.flames, p.equippedFlame, p.taunts, p.equippedTaunt, p.chestPity, p.chestOpened], [['blue_flame'], 'blue_flame', ['knock'], 'knock', 2, 4], '10 화염 · 도발 · 상자 기록도 서버 값 (출석 보상 화염 포함)');
+    eq([p.practice.wins, p.practice.maxStreak], [4, 4], '10 AI 연습 기록(이 기기 것)은 그대로');
+    eq(p.adoptWallet(walletOf()), false, '10 같은 값을 다시 받으면 바뀐 것 없음');
+    eq(p.adoptWallet(null), false, '10 잘못된 값은 무시');
+    p.adoptWallet(walletOf({ owned: { gun: ['steel', 'nope_skin'], table: ['obsidian'] }, equipped: { gun: 'nope_skin', table: 'obsidian' }, brass: -50 }));
+    eq([p.owns('gun', 'nope_skin'), p.equippedId('gun'), p.brass >= 0], [false, 'steel', true], '10 카탈로그에 없는 스킨 · 음수 탄피는 걸러진다');
+    const { p: q } = newProfile(null);
+    q.equipTitle('newcomer');
+    q.adoptWallet(walletOf());
+    eq([q.titles.includes('brave_heart'), q.equippedTitle], [true, 'newcomer'], '10 칭호는 꾸밈 — 서버가 아는 칭호를 더하고 장착은 이 기기 값');
+  }
+
+  // 무효 판 · 서버가 정한 보상
+  {
+    const { p } = newProfile(null);
+    const v = p.recordVoided(true, { ranked: true, reason: 'EARLY_END' });
+    eq([v.voided, v.total, v.mmrDelta, v.mode, v.tierChange, p.wins, p.mmr, p.brass], ['EARLY_END', 0, 0, 'ranked', null, 0, 1000, 300], '10 무효 판: 보상 0 · MMR 변동 0 · 전적 그대로');
+    eq(p.recordVoided(false, { ranked: false, reason: 'PAIR_LIMIT' }).mode, 'friendly', '10 친선 무효 판은 friendly');
+    const win = p.recordRanked(true, { record: { wins: 1, losses: 0, mmr: 1025, streak: 1, maxStreak: 1 }, mmrDelta: 25, reward: 180 });
+    eq([win.base, win.bonus, win.total, p.brass], [150, 30, 180, 480], '10 서버가 정한 보상 180 = 기본 150 + 연승 보너스 30');
+    const lose = p.recordRanked(false, { record: { wins: 1, losses: 1, mmr: 1005, streak: 0, maxStreak: 1 }, mmrDelta: -20, reward: 40 });
+    eq([lose.base, lose.bonus, lose.total], [40, 0, 40], '10 패배 보상 40');
+    eq([p.recordFriendly(true, { reward: 150 }).total, p.recordFriendly(false, { reward: 40 }).total], [150, 40], '10 친선전 서버 보상');
+    eq(p.recordRanked(true, { brass: 360, reward: 999 }).total, 360, '10 판돈 테이블은 서버 상금(brass)이 먼저');
+  }
+
+  // WalletClient — 로그인한 계정은 서버가, 손님은 이 기기가
+  {
+    const calls = [];
+    const server = { brass: 1500, owned: { gun: ['steel', 'gold'], table: ['obsidian'] } };
+    const fakeCall = async (action, args) => {
+      calls.push([action, args]);
+      if (action === 'buy') return { ok: true, result: { ok: true, brass: 1000 }, wallet: walletOf({ brass: 1000 }), state: { today: '2026-11-10', attendance: { days: 0, claimedToday: false, todayDay: 1, rewards: [] }, emergency: { eligible: false }, practice: { left: 5 } } };
+      if (action === 'chest') return { ok: true, result: { ok: true, item: { id: 'brave_heart' }, duplicate: false, payback: 0, pity: 1, brass: 700, opened: 1 }, wallet: walletOf({ brass: 700 }) };
+      if (action === 'checkin') return { ok: true, result: { ok: true, day: 1, reward: { brass: 100, item: null, duplicate: false } }, wallet: walletOf({ brass: 1334 }) };
+      if (action === 'practice') return { ok: true, result: { ok: true, granted: 150, limited: false, left: 4 }, wallet: walletOf({ brass: 1384 }) };
+      if (action === 'get') return { ok: true, result: { ok: true }, wallet: walletOf(), state: { today: '2026-11-10', attendance: { days: 3, claimedToday: true, todayDay: 3, rewards: [] }, emergency: { eligible: false }, practice: { left: 5 } } };
+      return { ok: false, error: 'BAD_REQUEST' };
+    };
+    void server;
+    const session = (loggedIn) => ({ isLoggedIn: loggedIn });
+
+    const { p } = newProfile({ v: 5, brass: 77_777 });
+    const events = [];
+    globalThis.document = { dispatchEvent: (e) => events.push(e.type) };
+    const w = new WalletClient({ profile: p, session: session(true), call: fakeCall });
+    eq([w.remote, w.state], [true, null], '10 로그인했으면 서버 지갑을 쓴다 (처음엔 상태 없음)');
+    const sync = await w.sync();
+    eq([sync.ok, sync.changed, p.brass, w.state.attendance.days], [true, true, 1234, 3], '10 sync: 서버 값으로 거울을 맞춘다 (조작한 77,777 → 1,234) · 출석 상태 보관');
+    const bought = await w.buyWithBrass('gun', 'gold');
+    eq([bought, calls.at(-1), p.brass], [{ ok: true, brass: 1000 }, ['buy', { kind: 'gun', id: 'gold' }], 1000], '10 구매는 서버에 요청 — 결과는 PlayerProfile 과 같은 모양, 거울은 서버 값');
+    const chest = await w.openChest();
+    eq([chest.ok, chest.item.id, chest.item.name, chest.item.type, p.brass], [true, 'brave_heart', '강심장', 'title', 700], '10 상자: 서버가 id 만 보내면 이 기기의 카탈로그 항목으로 복원');
+    eq((await w.checkIn()).day, 1, '10 출석 체크는 서버 호출');
+    eq(await w.practice(true), { ok: true, granted: 150, limited: false, left: 4 }, '10 AI 연습 보상은 서버가 정한 값');
+    eq(events.includes('lastchamber:wallet-changed'), true, '10 지갑이 바뀌면 wallet-changed 를 낸다 (화면이 다시 그려진다)');
+
+    const before = calls.length;
+    const off = new WalletClient({ profile: p, session: session(true), call: async () => ({ ok: false, error: 'OFFLINE', message: 'x' }) });
+    const down = await off.buyWithBrass('gun', 'gold');
+    eq([down.ok, down.reason, p.brass, calls.length], [false, 'offline', 1384, before], '10 서버에 닿지 못하면 offline — 탄피 · 보유는 바꾸지 않는다 (기기가 대신 사 주지 않는다)');
+
+    const { p: legacyProfile } = newProfile({ v: 5, brass: 5000 });
+    const legacy = new WalletClient({ profile: legacyProfile, session: session(true), call: async () => ({ ok: false, error: 'WALLET_SETUP_REQUIRED' }) });
+    const r = await legacy.buyWithBrass('gun', 'gold');
+    eq([r.ok, legacyProfile.owns('gun', 'gold'), legacyProfile.brass, legacy.remote], [true, true, 4500, false], '10 서버에 지갑 컬럼이 아직 없으면(WALLET_SETUP_REQUIRED) 이번 접속은 예전 방식 — 게임이 멈추지 않는다');
+
+    const { p: guestProfile } = newProfile({ v: 5, brass: 2000 });
+    const guestCalls = [];
+    const guest = new WalletClient({ profile: guestProfile, session: session(false), call: async (...a) => { guestCalls.push(a); return { ok: true }; } });
+    eq([(await guest.buyWithBrass('gun', 'gold')).ok, guestProfile.brass, guestCalls.length, guest.remote, guest.state], [true, 1500, 0, false, null], '10 손님은 서버를 부르지 않고 이 기기에서 (AI 연습만 하는 계정 없는 사용자)');
+    eq([(await guest.checkIn()).error, (await guest.emergency()).error, await guest.practice(true)], ['LOGIN_REQUIRED', 'LOGIN_REQUIRED', null], '10 출석 · 긴급 보급은 로그인 필요 · 연습 보상은 기기 처리');
+    delete globalThis.document;
+  }
+
+  // 정적 점검: 로비 · 모바일 터치 · 연결
+  {
+    const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    const lobby = readFileSync(new URL('../src/ui/multiplayer.js', import.meta.url), 'utf8');
+    const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
+    ok(/QUEUE_PROMPT_S = 15/.test(lobby) && lobby.includes('현재 대기 인원이 적습니다. AI 딜러와 바로 연습하시겠습니까?') && lobby.includes('AI 연습 바로가기') && lobby.includes('계속 대기'), '10 빠른 매칭 15초 넘게 기다리면 "현재 대기 인원이 적습니다…" + [AI 연습 바로가기] / [계속 대기]');
+    ok(/case 'queue-ai':[\s\S]*?request\('leave_queue'\);[\s\S]*?startSolo\(\)/.test(lobby) && /case 'queue-wait':[\s\S]*?slowDismissed = true/.test(lobby), '10 [AI 연습 바로가기]는 대기를 접고 AI 연습으로 · [계속 대기]는 이번 대기에서 다시 묻지 않는다');
+    ok(lobby.includes("s.on('lobby_stats', onLobbyStats)") && /온라인 \$\{fmt\(lastStats\.online\)\}명/.test(lobby) && /data-ui="online"/.test(lobby), '10 로비 상단에 온라인 접속자 · 매칭 대기 · 공개 방 수');
+    ok(/data-act="checkin"/.test(lobby) && /data-act="emergency"/.test(lobby) && lobby.includes('본 게임 내 탄피는 무상 재화이며 현금 결제·환전 및 유저 간 거래가 불가능합니다'), '10 로비: [출석 체크] · [긴급 보급] · 맨 아래 무상 재화 안내문');
+    ok(/wallet\.checkIn\(\)/.test(lobby) && /wallet\.emergency\(\)/.test(lobby) && !/profile\.grantBrass/.test(lobby), '10 출석 · 긴급 보급은 서버 지갑 호출 (로비가 이 기기에서 탄피를 더하지 않는다)');
+    ok(/\.trigger-panel \{[^}]*gap: 16px/.test(css), '10 격발 버튼 사이 간격 16px');
+    ok(/id="btn-shoot-opponent"[\s\S]*?#i-left[\s\S]*?id="btn-shoot-self"[\s\S]*?#i-right/.test(html), '10 왼쪽 [상대에게 격발] ◀ · 오른쪽 [나에게 격발] ▶ — 좌우 배치에 맞는 화살표');
+    ok(/const SHOOT_LOCK_MS = 350/.test(app) && /if \(myTurn && !wasMyTurn\) armShootLock\(token\)/.test(app) && /setDisabled\(el\.btnOpponent, !canAct \|\| shootLocked\(\)\)/.test(app) && /if \(!playerCanAct\(\) \|\| shootLocked\(\)\) return;/.test(app), '10 내 턴이 시작되면 0.35초 동안 격발 버튼 잠금 (버튼 · 단축키 모두)');
+    ok(/\.hud-tools \.icon-btn \{ width: max\(var\(--hud-h\), 40px\); height: max\(var\(--hud-h\), 40px\); \}/.test(css) && /\.leave-btn \{[^}]*min-height: 40px/.test(css), '10 소리 · 도움말 · 항복/나가기 버튼은 높이 40px 이상');
+    ok(/wallet\.practice\(won\)/.test(app) && /await wallet\.buyWithBrass\(kind, id\)/.test(app) && /await wallet\.openChest\(\)/.test(app) && !/profile\.buyWithBrass|profile\.openChest\(\)/.test(app), '10 상점 구매 · 상자 · AI 연습 보상은 서버 지갑을 거친다 (app.js 가 profile 로 직접 사지 않는다)');
+    ok(/모든 아이템을 이미 모았어요/.test(app) && /VOID_TEXT/.test(app) && app.includes('조기 종료로 인해 MMR이 변동되지 않았습니다'), '10 결과 화면: 조기 종료 안내 문구');
   }
 }
 

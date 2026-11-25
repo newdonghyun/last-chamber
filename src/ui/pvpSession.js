@@ -68,7 +68,7 @@ function onPvpStart(e) {
   };
   S = s;
   bind(s); // ★ 가장 먼저, 동기로 — 첫 state_update 를 놓치지 않는다
-  if (match.fee > 0) { // 참가비 (프로 200 · VIP 1,000)
+  if (match.fee > 0 && !match.feePaid) { // 참가비 (프로 200 · VIP 1,000) — 서버 지갑을 쓰는 계정은 서버가 대기열에서 이미 받았다 (feePaid)
     const paid = hooks.profile.spendBrass(match.fee);
     if (!paid.ok) {
       s.socket.emit('leave_room');
@@ -94,6 +94,9 @@ function bind(s) {
     reason: m?.reason ?? 'normal',
     record: readServerRecord(m?.record), // 서버(Supabase players)의 내 랭킹 기록 { wins, losses, mmr, streak, maxStreak } (로그인한 경우만 — 아니면 null)
     mmrDelta: Number.isFinite(m?.mmrDelta) ? m.mmrDelta : null, // 랭킹전에서 서버가 실제로 기록한 이번 판 MMR 변동 (친선전 · 기록 실패면 없음)
+    voided: m?.voided === 'EARLY_END' || m?.voided === 'PAIR_LIMIT' ? m.voided : null, // 서버가 무효로 판정한 판 (MMR · 전적 · 탄피 보상 없음)
+    reward: m?.reward && Number.isFinite(m.reward.brass) ? { brass: Math.max(0, Math.floor(m.reward.brass)), refunded: Math.max(0, Math.floor(m.reward.refunded) || 0) } : null, // 서버 지갑이 지급한 탄피
+    wallet: m?.wallet && typeof m.wallet === 'object' ? m.wallet : null, // 정산 뒤 서버 지갑 (이 기기의 거울을 맞춘다)
   }));
   on('opponent_status', (m) => onOpponent(s, m));
   on('receive_emote', ({ code: _room, ...emote }) => document.dispatchEvent(new CustomEvent(TAUNT_IN, { detail: emote }))); // 방 코드는 떼고 도발 모양만
@@ -321,15 +324,23 @@ export async function pvpSettle(won) {
   const until = performance.now() + OVER_WAIT_MS;
   while (!s.over && !s.closed && performance.now() < until) await nextUpdate(s, until - performance.now());
   const fee = s.match.fee > 0 ? s.match.fee : 0;
-  const payout = s.over ? s.over.payout : (won ? Number(s.match.prize) || 0 : 0);
+  const over = s.over;
+  const payout = over ? over.payout : (won ? Number(s.match.prize) || 0 : 0);
+  const managed = Boolean(over?.wallet && over?.reward); // 서버 지갑이 이 판의 탄피를 정산했다 — 이 기기에서 다시 계산하지 않는다
   const brass = fee > 0 ? payout : null;
   const ranked = isRankedMatch(s.match);
-  const record = s.over?.record ?? null;
-  const outcome = ranked
-    ? hooks.profile.recordRanked(won, { record, mmrDelta: s.over?.mmrDelta ?? null, brass })
-    : hooks.profile.recordFriendly(won, { brass });
+  const record = over?.record ?? null;
+  let outcome;
+  if (over?.voided) { // 무효 판: 결과 화면용 값만 (MMR · 전적 · 보상은 서버가 건드리지 않았다)
+    outcome = hooks.profile.recordVoided(won, { ranked, reason: over.voided });
+  } else if (ranked) {
+    outcome = hooks.profile.recordRanked(won, { record, mmrDelta: over?.mmrDelta ?? null, brass, reward: managed && fee === 0 ? over.reward.brass : null });
+  } else {
+    outcome = hooks.profile.recordFriendly(won, { brass, reward: managed && fee === 0 ? over.reward.brass : null });
+  }
+  if (managed) hooks.profile.adoptWallet(over.wallet); // 지갑의 원본은 서버 — 거울을 맞춘다 (위에서 더한 탄피는 이 값으로 덮인다)
   pvpEnd();
-  return { ...outcome, pvp: { tier: s.match.tier, mode: s.match.mode, ranked, fee, payout, record } };
+  return { ...outcome, brass: managed ? hooks.profile.brass : outcome.brass, refunded: over?.reward?.refunded ?? 0, pvp: { tier: s.match.tier, mode: s.match.mode, ranked, fee, payout, record } };
 }
 
 /** 리스너를 떼고 소켓을 끊는다 (여러 번 불러도 안전). 서버는 끊김을 보고 방을 정리한다 */

@@ -23,6 +23,10 @@
  * ── 서버 주소 ──  window.LAST_CHAMBER_SERVER → 없으면 페이지를 서빙한 서버(location.origin) → file:// 같은 비 http 에서는 Render 서버(DEFAULT_SERVER).
  *   Socket.io 클라이언트는 서버가 주는 /socket.io/socket.io.js 를 처음 필요할 때 불러온다 → 서버가 꺼져 있어도 AI 딜러 대전은 영향이 없다.
  *
+ * ── 서버 지갑 (src/ui/walletClient.js) ──  로그인한 계정의 탄피 · 스킨 · 출석 · 긴급 보급은 서버가 원본. 로비 상단에서 [출석 체크](한국 시간 하루 1회 · 7일 사이클)와
+ *   [긴급 보급](탄피가 가장 싼 유료 테이블 참가비 미만일 때 하루 3회 +50)을 받는다. 빠른 매칭을 15초 넘게 기다리면 [AI 연습 바로가기] / [계속 대기]를 묻는다.
+ *   상단에는 접속자 수 · 매칭 대기 인원이 작게 (watch_rooms 응답 + 서버가 몇 초마다 보내는 lobby_stats).
+ *
  * ── 잠든 서버 깨우기 ──  무료 호스팅은 한동안 접속이 없으면 서버가 잠들고 첫 연결에 30~60초가 걸린다. 연결 시도 하나는 30초까지 기다리고,
  *   실패하면 정해진 시간(WAKE_DEADLINE_MS) 안에서 다시 시도한다 (src/ui/wake.js). 그동안 '서버를 깨우는 중입니다…' 안내가 뜬다 — 바로 에러로 접지 않는다.
  *
@@ -39,6 +43,8 @@ import { PlayerProfile, getTitle, MMR as RANKED_MMR } from './storeData.js';
 import { userSession } from './session.js';
 import { requireLogin } from './accountApi.js';
 import { retryUntil } from './wake.js';
+import { sharedWallet, WALLET_CHANGED } from './walletClient.js';
+import { getItem, getFlame } from './storeData.js';
 import { captureInvite, peekInvite, clearInvite, buildInviteLink } from './invite.js';
 
 const START_BUTTON_ID = 'btn-start';
@@ -52,6 +58,7 @@ const WAKE_TEXT = '서버를 깨우는 중입니다… (잠들어 있었다면 �
 const ACK_TIMEOUT_MS = 8000;
 const CODE_LENGTH = 4;
 const COPY_RESET_MS = 1800;
+const QUEUE_PROMPT_S = 15; // 빠른 매칭을 이만큼(초) 기다리면 AI 연습을 권한다
 
 /** 빠른 매칭 테이블 — 참가비 · 상금은 server/matchmaker.js 의 QUEUE_TIERS 와 같은 값 (화면 표시와 탄피 부족 판정용, 최종 값은 서버 응답을 따른다) */
 const TABLES = Object.freeze([
@@ -93,6 +100,10 @@ const PROFILE_CHANGED = 'lastchamber:profile-changed'; // monetization.js 의 PR
 
 let sock = null; // 이번 로비 세션의 소켓 (매칭이 성사되면 pvp:start 로 넘기고 null 로 돌린다)
 let session = 0; // 로비 세션 번호 — 닫히거나 끊길 때마다 올려서, 늦게 도착한 비동기 결과를 버린다
+const wallet = sharedWallet();
+let lastStats = null; // { online, queued } — 서버가 알려 준 접속자 수 · 매칭 대기 인원
+let slowDismissed = false; // 이번 매칭 대기에서 [계속 대기]를 눌렀다
+let dailyBusy = false;
 let phase = 'menu'; // 'menu' | 'public'(공개 방 대기) | 'room'(비밀방 대기) | 'queue'(빠른 매칭 대기)
 let busy = false; // 요청이 오가는 동안 버튼 잠금
 let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보내는 동안만 true
@@ -135,11 +146,20 @@ dialog.innerHTML = `
       </div>
       <button class="mp-close" type="button" data-act="close" aria-label="닫기">&#10005;</button>
     </header>
+    <p class="mp-online" data-ui="online" aria-live="off">접속자 수를 불러오는 중…</p>
     <p class="mp-me"><span class="mp-tier" data-ui="me-tier">—</span><b data-ui="me-name"></b><button class="mp-edit" type="button" data-act="edit-nick" data-ui="me-btn" aria-label="닉네임 변경">변경</button><small data-ui="me-record"></small></p>
     <p class="mp-wallet"><span>보유 탄피</span><b data-ui="brass">0</b></p>
 
     <div class="mp-view" data-ui="menu">
       <!-- 모드: AI 딜러 대전(연습 · 손님도) · 온라인 랭킹전(공개 방 · 빠른 매칭 — MMR) · 친선 비밀방(방 코드 — MMR 미반영) -->
+      <section class="mp-sec mp-daily" data-ui="daily" aria-labelledby="mp-h-daily" hidden>
+        <h3 class="mp-sec-title" id="mp-h-daily">출석 체크 · 7일 보상 <small>DAILY</small></h3>
+        <ol class="mp-days" data-ui="days" aria-label="7일 출석 보상"></ol>
+        <button class="mp-btn" type="button" data-act="checkin" data-ui="checkin"><span class="mp-btn-main" data-ui="checkin-label">출석 체크</span></button>
+        <button class="mp-btn mp-btn--soft" type="button" data-act="emergency" data-ui="emergency" hidden><span class="mp-btn-main" data-ui="emergency-label">긴급 보급</span></button>
+        <p class="mp-hint" data-ui="daily-note"></p>
+      </section>
+
       <section class="mp-sec" aria-labelledby="mp-h-solo">
         <h3 class="mp-sec-title" id="mp-h-solo">AI 딜러 대전 (연습) <small>PRACTICE</small></h3>
         <button class="mp-btn mp-btn--solo" type="button" data-act="solo" data-ui="solo" autofocus>
@@ -199,6 +219,8 @@ dialog.innerHTML = `
         <p class="mp-hint" data-ui="board-note">랭킹을 불러오는 중…</p>
         <p class="mp-hint">온라인 랭킹전을 1판 이상 둔 계정만 순위에 올라요</p>
       </section>
+
+      <p class="mp-disclaimer" data-ui="disclaimer">본 게임 내 탄피는 무상 재화이며 현금 결제·환전 및 유저 간 거래가 불가능합니다</p>
     </div>
 
     <div class="mp-view mp-wait" data-ui="public" hidden>
@@ -227,6 +249,13 @@ dialog.innerHTML = `
       <p class="mp-wait-label" data-ui="queue-name">매칭 중</p>
       <p class="mp-elapsed" data-ui="elapsed">0:00</p>
       <p class="mp-wait-note" data-ui="queue-meta"></p>
+      <div class="mp-slow" data-ui="slow" role="alert" hidden>
+        <p>현재 대기 인원이 적습니다. AI 딜러와 바로 연습하시겠습니까?</p>
+        <div class="mp-slow-row">
+          <button class="mp-btn" type="button" data-act="queue-ai"><span class="mp-btn-main">AI 연습 바로가기</span></button>
+          <button class="mp-btn mp-btn--ghost" type="button" data-act="queue-wait"><span class="mp-btn-main">계속 대기</span></button>
+        </div>
+      </div>
       <button class="mp-btn mp-btn--ghost" type="button" data-act="cancel"><span class="mp-btn-main">매칭 취소</span></button>
     </div>
 
@@ -267,6 +296,15 @@ const ui = {
   inviteLabel: q('copy-invite-label'),
   queueName: q('queue-name'),
   queueMeta: q('queue-meta'),
+  slow: q('slow'),
+  online: q('online'),
+  daily: q('daily'),
+  days: q('days'),
+  checkin: q('checkin'),
+  checkinLabel: q('checkin-label'),
+  emergency: q('emergency'),
+  emergencyLabel: q('emergency-label'),
+  dailyNote: q('daily-note'),
   elapsed: q('elapsed'),
   publicElapsed: q('public-elapsed'),
   status: q('status'),
@@ -336,6 +374,7 @@ function paintBoard(top) {
 function paintRooms(rooms) {
   lastRooms = Array.isArray(rooms) ? rooms.filter((r) => r && typeof r.code === 'string') : [];
   ui.roomsCount.textContent = `대기 중 ${lastRooms.length}`;
+  paintOnline();
   ui.rooms.replaceChildren(...lastRooms.map((r) => {
     const mine = r.code === myPublicCode;
     const li = document.createElement('li');
@@ -374,7 +413,10 @@ async function refreshLobby() {
     if (mine !== session) return;
     const watched = await request('watch_rooms'); // 이 소켓을 로비 채널에 — 이후 room_list 가 바뀔 때마다 온다
     if (mine !== session) return;
-    if (watched.ok) paintRooms(watched.rooms);
+    if (watched.ok) {
+      lastStats = { online: watched.online, queued: watched.queued };
+      paintRooms(watched.rooms);
+    }
     let res = await registered; // 연결 즉시 보낸 register_player 의 응답 = 내 전적 + TOP 10
     if (mine !== session) return;
     if (!res?.top) res = await request('get_leaderboard'); // 손님이거나 등록이 실패했으면 랭킹만
@@ -421,6 +463,7 @@ function setPhase(next) {
   ui.room.hidden = next !== 'room';
   ui.queue.hidden = next !== 'queue';
   [ui.eyebrow.textContent, ui.title.textContent] = HEADINGS[next];
+  if (next === 'queue') { slowDismissed = false; ui.slow.hidden = true; } // 새 대기: 안내를 처음부터
   if (next !== 'queue' && next !== 'public') stopTicker();
   if (next !== 'public') myPublicCode = null;
 }
@@ -453,12 +496,13 @@ function closeDialog() {
   if (dialog.open) dialog.close();
 }
 
-function startTicker(node) {
+function startTicker(node, onSecond = null) {
   stopTicker();
   tickFrom = Date.now();
   const paint = () => {
     const s = Math.floor((Date.now() - tickFrom) / 1000);
     node.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    onSecond?.(s);
   };
   paint();
   tickTimer = setInterval(paint, 1000);
@@ -594,6 +638,7 @@ async function connectSocket(mine) {
   s.on('match_found', onMatchFound);
   s.on('room_closed', onRoomClosed);
   s.on('room_list', onRoomList);
+  s.on('lobby_stats', onLobbyStats);
   s.on('disconnect', onDisconnect);
   registered = registerPlayer(s); // 연결 즉시 로그인 확인 — 방 만들기 · 매칭 요청은 서버가 토큰 확인을 기다렸다 처리한다
   return s;
@@ -603,6 +648,7 @@ function detach(s) {
   s.off('match_found', onMatchFound);
   s.off('room_closed', onRoomClosed);
   s.off('room_list', onRoomList);
+  s.off('lobby_stats', onLobbyStats);
   s.off('disconnect', onDisconnect);
 }
 
@@ -677,12 +723,123 @@ function onDisconnect(reason) {
 
 // ───────── 동작 ─────────
 
+// ───────── 접속자 · 출석 체크 · 긴급 보급 · 대기 안내 ─────────
+
+function onLobbyStats(stats) {
+  if (!stats || typeof stats !== 'object') return;
+  lastStats = { online: stats.online, queued: stats.queued };
+  paintOnline();
+}
+
+/** 상단의 작은 한 줄: 온라인 접속자 · 매칭 대기 · 기다리는 공개 방 */
+function paintOnline() {
+  if (!lastStats || !Number.isFinite(lastStats.online)) return;
+  const queued = Number.isFinite(lastStats.queued) ? ` · 매칭 대기 ${fmt(lastStats.queued)}명` : '';
+  ui.online.textContent = `온라인 ${fmt(lastStats.online)}명${queued} · 공개 방 ${fmt(lastRooms.length)}개`;
+}
+
+const rewardName = (r) => {
+  const parts = [];
+  if (r.brass) parts.push(`탄피 ${fmt(r.brass)}`);
+  if (r.item) parts.push((r.item.kind === 'flame' ? getFlame(r.item.id) : getItem(r.item.kind, r.item.id))?.name ?? r.item.id);
+  return parts.join(' + ');
+};
+
+/** 출석 7칸 · [출석 체크] · [긴급 보급] — 서버가 알려 준 상태(wallet.state)대로. 손님 · 서버 지갑이 없는 접속에서는 접어 둔다 */
+function paintDaily() {
+  const state = wallet.state;
+  ui.daily.hidden = !state || !loggedIn();
+  if (ui.daily.hidden) return;
+  const att = state.attendance;
+  const done = !att.claimedToday && att.days >= att.rewards.length ? 0 : att.days; // 7일을 다 받았고 오늘 아직이면 새 사이클
+  ui.days.replaceChildren(...att.rewards.map((r) => {
+    const li = document.createElement('li');
+    const isDone = r.day <= done;
+    li.className = `mp-day${isDone ? ' is-done' : ''}${r.day === att.todayDay ? ' is-today' : ''}`;
+    const day = document.createElement('b');
+    day.textContent = `${r.day}일`;
+    const what = document.createElement('span');
+    what.textContent = rewardName(r);
+    li.append(day, what);
+    li.setAttribute('aria-label', `${r.day}일차 ${rewardName(r)}${isDone ? ' · 받음' : ''}`);
+    return li;
+  }));
+  ui.checkin.disabled = dailyBusy || att.claimedToday;
+  ui.checkinLabel.textContent = att.claimedToday ? '오늘 출석 완료 ✓' : `출석 체크 — ${att.todayDay}일차 보상 받기`;
+  const em = state.emergency;
+  profile.reload();
+  const needs = profile.brass < em.minFee;
+  ui.emergency.hidden = !needs;
+  ui.emergency.disabled = dailyBusy || em.left <= 0;
+  ui.emergencyLabel.textContent = em.left > 0 ? `긴급 보급 +${em.amount} 탄피 · 오늘 ${em.left}/${em.perDay}회 남음` : '오늘 긴급 보급을 모두 받았어요';
+}
+
+/** 로비를 열 때 서버 지갑으로 거울을 맞추고(탄피 · 스킨 · 오늘의 출석 상태) 화면을 그린다 */
+function refreshWallet() {
+  if (!loggedIn()) return;
+  wallet.sync().then(() => {
+    if (!dialog.open) return;
+    profile.reload();
+    syncControls();
+    paintDaily();
+  });
+}
+
+async function onCheckin() {
+  if (dailyBusy || needLogin()) return;
+  dailyBusy = true;
+  paintDaily();
+  const res = await wallet.checkIn();
+  dailyBusy = false;
+  if (res.ok) {
+    say(`출석 ${res.day}일차 — ${rewardName(res.reward)}${res.reward.duplicate ? ' (이미 가진 스킨이라 탄피로 대신 지급)' : ''}`, 'ok');
+  } else if (res.error === 'ALREADY_CHECKED_IN') {
+    say('오늘은 이미 출석했어요 — 한국 시간 자정이 지나면 다시 받을 수 있어요', 'error');
+  } else {
+    say(res.reason === 'offline' || res.reason === 'server' ? '서버에 연결할 수 없어요. 잠시 뒤에 다시 시도해 주세요' : '출석 체크를 할 수 없어요', 'error');
+  }
+  profile.reload();
+  syncControls();
+  paintDaily();
+}
+
+async function onEmergency() {
+  if (dailyBusy || needLogin()) return;
+  dailyBusy = true;
+  paintDaily();
+  const res = await wallet.emergency();
+  dailyBusy = false;
+  if (res.ok) say(`긴급 보급 +${res.amount} 탄피 — 오늘 ${res.left}번 더 받을 수 있어요`, 'ok');
+  else if (res.error === 'LIMIT_REACHED') say('오늘 긴급 보급을 모두 받았어요', 'error');
+  else if (res.error === 'NOT_ELIGIBLE') say('탄피가 충분하면 긴급 보급을 받을 수 없어요', 'error');
+  else say('서버에 연결할 수 없어요. 잠시 뒤에 다시 시도해 주세요', 'error');
+  profile.reload();
+  syncControls();
+  paintDaily();
+}
+
+/** 빠른 매칭을 QUEUE_PROMPT_S 초 넘게 기다리면 AI 연습을 권한다 (한 번 거절하면 이번 대기에서는 다시 묻지 않는다) */
+function promptSlowQueue(seconds) {
+  if (phase !== 'queue' || slowDismissed || seconds < QUEUE_PROMPT_S || !ui.slow.hidden) return;
+  ui.slow.hidden = false;
+  ui.slow.querySelector('[data-act="queue-ai"]')?.focus({ preventScroll: true });
+}
+
+document.addEventListener(WALLET_CHANGED, () => {
+  profile.reload();
+  if (dialog.open) {
+    syncControls();
+    paintDaily();
+  }
+});
+
 /** 로비를 연다 (이미 열려 있으면 그대로) — PLAY 가로채기 · 가입 직후 · 초대 입장이 같이 쓴다 */
 function openLobby() {
   if (dialog.open) return;
   resetUi();
   dialog.showModal();
   refreshLobby();
+  refreshWallet();
 }
 
 /** 보관해 둔 초대 코드가 있으면 곧바로 그 친선 비밀방에 입장한다 (로그인한 상태에서만 — 코드는 한 번만 쓴다) */
@@ -825,7 +982,7 @@ function startQueue(table) {
     ui.queueName.textContent = `${table.name} · ${fee > 0 ? `${fmt(fee)} 탄피` : '무료'}`;
     ui.queueMeta.textContent = `${prize > 0 ? `승자 상금 ${fmt(prize)} 탄피` : '참가비 · 상금 없음'} · 랭킹 MMR 승 +${RANKED_MMR.win} / 패 −${RANKED_MMR.loss}`;
     setPhase('queue');
-    startTicker(ui.elapsed);
+    startTicker(ui.elapsed, promptSlowQueue);
     say('');
     ui.queue.querySelector('[data-act="cancel"]').focus();
   });
@@ -904,6 +1061,16 @@ dialog.addEventListener('click', (e) => {
     case 'create': createFriendlyRoom(); break;
     case 'copy': onCopy(); break;
     case 'copy-invite': onCopyInvite(); break;
+    case 'checkin': onCheckin(); break;
+    case 'emergency': onEmergency(); break;
+    case 'queue-ai': // 대기를 그만두고(서버가 참가비를 돌려준다) 바로 AI 연습
+      request('leave_queue');
+      startSolo();
+      break;
+    case 'queue-wait':
+      slowDismissed = true;
+      ui.slow.hidden = true;
+      break;
     case 'cancel': cancelWait(); break;
     case 'table': {
       const table = TABLES.find((t) => t.tier === el.dataset.tier);
@@ -971,6 +1138,8 @@ userSession.subscribe((user) => {
   }
   paintMe();
   paintAccess();
+  paintDaily();
+  if (user) refreshWallet();
 });
 
 // 초대 링크로 접속했다: 주소의 ?room=코드 를 보관하고 주소창에서 지운다. 이미 로그인한 사람이면 곧바로 입장 (아니면 가입 · 로그인 직후 위의 signed-in 이벤트가 입장시킨다)

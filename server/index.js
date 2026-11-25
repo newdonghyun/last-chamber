@@ -18,6 +18,12 @@
  *   POST /api/rename { token, nickname }                닉네임 변경 (players 바로 UPDATE) → { ok, nickname, me }   NICKNAME_TAKEN · AUTH_REQUIRED
  *     token = 로그인 토큰(server/auth.js) — 클라이언트가 localStorage 에 두고 자동 로그인에 쓴다. 비밀번호는 해시로만 저장한다.
  *
+ *   POST /api/wallet { token, action, ...args }          서버 지갑 (탄피 · 스킨 · 출석 · 긴급 보급) — 로그인한 계정의 원본은 이 서버다 → { ok, result, wallet, state }
+ *     action: get · buy{kind,id} · equip{kind,id} · chest · flame{id} · taunt_buy{id} · taunt_equip{id|null} · title{id} · checkin · emergency · practice{won}
+ *     result = 그 동작의 결과 (PlayerProfile 메서드와 같은 { ok, reason, short, ... } · 출석 { ok, day, reward } · 긴급 보급 { ok, amount, left } · 연습 보상 { ok, granted, limited })
+ *     wallet = 클라이언트가 거울로 받는 지갑 · state = 출석 · 긴급 보급 · 연습 보상의 지금 상태.  오류: AUTH_REQUIRED · RATE_LIMITED · WALLET_SETUP_REQUIRED(DB 지갑 컬럼 없음 — server/userStore.js WALLET_SQL)
+ *     시간 규칙은 모두 한국 시간(Asia/Seoul) 날짜 기준 (server/wallet.js).
+ *
  *   ── 소켓 로그인 ── io(url, { auth: { token } }) 또는 register_player({ token }) → 그 소켓을 그 계정으로 기억한다(socket.data.user)
  *     · 토큰이 없거나 틀리면 손님(익명) 소켓: 로비 방 목록 · TOP 10 은 볼 수 있지만 방 만들기 · 입장 · 매칭은 AUTH_REQUIRED (AI 딜러 연습은 서버 없이 된다)
  *     · 상대에게 보내는 프로필 닉네임은 서버가 확인한 계정 닉네임으로 덮어쓴다 (유저 ID 는 상대에게 절대 보내지 않는다)
@@ -27,7 +33,7 @@
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
  *   register_player({ token })                    로비 접속 즉시: 토큰 확인 → { ok, user, me, top }  (me · top = get_leaderboard 와 같다) · 틀린 토큰은 AUTH_REQUIRED
  *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (랭킹전 1판 이상 둔 계정만 · mmr 내림차순 10명), me: 내 전적 | null }
- *   watch_rooms() / unwatch_rooms()               로비 방 목록 보기 시작 · 그만 → { ok, rooms }  (+ 바뀔 때마다 room_list)
+ *   watch_rooms() / unwatch_rooms()               로비 방 목록 보기 시작 · 그만 → { ok, rooms, online, queued }  (+ 바뀔 때마다 room_list, 주기적으로 lobby_stats)
  *   create_public_room({ profile })               공개 방 (로비 목록에 보임 · 랭킹전) → { ok, code, mode }  (+ room_created { code, mode })   ⟵ 로그인 필요
  *   join_public_room({ code, profile })           목록에서 누른 공개 방에 입장 → 곧바로 판이 시작된다                                    ⟵ 로그인 필요
  *   create_private_room({ profile })              친선 비밀방 (목록에 안 보임 · 친선전) → { ok, code, mode }   code = 4자리 영문/숫자 (예: A7K9)  ⟵ 로그인 필요
@@ -44,12 +50,15 @@
  *   ── 서버 → 클라이언트 ──
  *   ※ 인게임 이벤트는 모두 그 방 좌석의 소켓에게만 간다 (io.emit · socket.broadcast 없음). 모두 방 코드(code)를 싣는다 — 자기 방 코드가 아니면 버릴 것.
  *   ※ room_list 만 로비 채널(watch_rooms 한 소켓)에 보낸다 — 방 목록이지 인게임 이벤트가 아니다.
+ *   lobby_stats   { online, queued, rooms }   접속자 수 · 빠른 매칭 대기 인원 · 기다리는 공개 방 수 — 로비를 보는 소켓에게 몇 초마다
  *   room_list     { rooms: [{ code, host, mmr, players, capacity, createdAt }] }   상대를 기다리는 공개 방 (방장 닉네임 · 방장 서버 MMR · 1/2)
- *   match_found   { code, mode: 'public'|'queue'|'private', ranked, tier, fee, prize, you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
+ *   match_found   { code, mode: 'public'|'queue'|'private', ranked, tier, fee, prize, feePaid(서버 지갑이 이미 참가비를 받았다 — 클라이언트는 따로 내지 않는다), you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
  *   state_update  { code, reason: 'start'|'shoot'|'item'|'timeout'|'rejoin', by?, auto?, state, logFrom, events, deadline, now, opponentConnected }
  *                 state = getPublicState(내 좌석) · events = getLog(내 좌석, logFrom) (rejoin 은 logFrom 0 부터 전체) · deadline = 이 턴이 자동 격발되는 서버 시각(ms) · now = 서버 현재 시각(시계 보정용)
  *   game_over     { code, mode, ranked, tier, fee, prize, winner, youWon, reason: 'normal'|'forfeit'|'surrender', payout, score: { you, opponent }, players: { P1: { mmr }, P2: { mmr } }, record?, mmrDelta? (랭킹전에서 기록된 내 MMR 변동) }
  *                 record = { nickname, wins, losses, games, streak, maxStreak, mmr } — 받는 사람의 계정 서버 전적 (이번 판까지 반영)
+ *                 voided = 'EARLY_END'(1라운드가 끝나기 전 항복 · 끊김) | 'PAIR_LIMIT'(같은 두 계정이 하루 3판을 넘김) | null — 무효면 MMR · 전적 · 탄피 보상 없음 (참가비는 환불)
+ *                 reward = { brass, refunded } 서버 지갑이 이 판에 지급한 탄피 · 돌려준 참가비,  wallet = 정산 뒤 지갑 (거울을 맞춘다)
  *   opponent_status { code, connected: false, graceMs, until } | { code, connected: true }     receive_emote (보낸 객체 + code)     room_closed { code, reason }     session_replaced { code }
  *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
  *
@@ -76,6 +85,7 @@
  */
 
 import { createServer } from 'node:http';
+import { randomInt } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,6 +95,7 @@ import { createRoomManager, fail, cleanProfile, ROOM_DEFAULTS, TURN_MS, GRACE_MS
 import { createMatchmaker, QUEUE_TIERS } from './matchmaker.js';
 import { createUserStore, cleanNickname, supabaseOrigin, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
 import { cleanUsername, cleanPassword, issueToken, createLoginLimiter, LOGIN_LIMITS } from './auth.js';
+import { runStoreAction, checkIn, claimEmergency, claimPractice, walletView, walletStatus, grantBrass, spendBrass } from './wallet.js';
 
 // 테스트 · 이후 단계가 server/index.js 하나만 import 해도 되도록 규칙 상수와 프로필 검사기를 그대로 다시 내보낸다
 export { TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, QUEUE_TIERS, USER_NICK_RULE, cleanProfile };
@@ -106,6 +117,8 @@ const SERVER_DEFAULTS = {
   supabaseClient: null, // 이미 만든 클라이언트 (테스트용 가짜 등)
   authSecret: null, // 로그인 토큰 서명 비밀 (null = 환경 변수 AUTH_SECRET)
   loginLimits: null, // 로그인 시도 제한 (테스트에서 줄인다) — 기본 LOGIN_LIMITS
+  lobbyStatsMs: 10_000, // 로비를 보는 소켓에게 접속자 수 · 대기 인원을 보내는 간격
+  walletRatePer10s: 40, // 계정당 지갑 요청 (10초 안에)
 };
 const LEADERBOARD_SIZE = 10;
 
@@ -164,6 +177,7 @@ const TOSS_ORIGIN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.tossmini\.com$/i;
 /** 계정 API 오류 코드 → HTTP 상태 */
 export const API_STATUS = Object.freeze({
   BAD_REQUEST: 400, INVALID_USERNAME: 400, INVALID_PASSWORD: 400, INVALID_NICKNAME: 400,
+  WALLET_SETUP_REQUIRED: 503,
   BAD_CREDENTIALS: 401, AUTH_REQUIRED: 401, USERNAME_TAKEN: 409, NICKNAME_TAKEN: 409,
   LOGIN_LOCKED: 429, RATE_LIMITED: 429, ACCOUNT_SETUP_REQUIRED: 503, SERVER_BUSY: 503, SERVER_ERROR: 500,
 });
@@ -229,8 +243,32 @@ export function createGameServer(options = {}) {
     ...(cfg.accountRecheckMs !== undefined ? { accountRecheckMs: cfg.accountRecheckMs } : {}),
   });
   const sendRoomList = () => io.to(LOBBY_CHANNEL).emit('room_list', { rooms: rooms.publicRooms() }); // 로비 목록을 보는 소켓에게만
-  const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users, onRoomsChanged: sendRoomList });
-  const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS });
+  // 서버 지갑 창구 (대기열 · 방이 쓴다): 이미 불러 둔 지갑만 다룬다 — 소켓 로그인 때 getWallet 으로 미리 불러 두고, 불러오지 못한 계정은 예전 방식(클라이언트 정산)
+  const nowMs = () => cfg.clock();
+  const wallets = {
+    managed: (userId) => Boolean(userId && users.walletNow(userId)),
+    spend: (userId, amount) => {
+      const w = users.walletNow(userId);
+      if (!w || !spendBrass(w, amount)) return false;
+      users.commitWallet(userId);
+      return true;
+    },
+    grant: (userId, amount) => {
+      const w = users.walletNow(userId);
+      if (!w) return null;
+      grantBrass(w, amount);
+      users.commitWallet(userId);
+      return w.brass;
+    },
+    view: (userId) => {
+      const w = users.walletNow(userId);
+      return w ? walletView(w) : null;
+    },
+  };
+  const MIN_ENTRY_FEE = Math.min(...Object.values(QUEUE_TIERS).map((t) => t.fee).filter((f) => f > 0)); // 가장 싼 유료 테이블의 참가비 — 이 미만이면 긴급 보급 대상
+  const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users, wallets, onRoomsChanged: sendRoomList });
+  const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS, wallets });
+  const lobbyStats = () => ({ online: io.engine.clientsCount, queued: matchmaker.queued(), rooms: rooms.publicRooms().length });
   const stats = () => {
     const health = users.health();
     const dbKey = keyKind ?? (health.storage === 'supabase' ? 'publishable(기본값)' : null);
@@ -290,6 +328,35 @@ export function createGameServer(options = {}) {
     return { ok: true, nickname, me: users.publicView(res.user) };
   }
 
+  /** POST /api/wallet { token, action, ...args } */
+  const walletHits = new Map(); // 계정 → { start, n } 10초 창
+  async function apiWallet(req) {
+    const rec = await users.authenticate(req.body?.token);
+    if (!rec) return fail('AUTH_REQUIRED');
+    const t = Date.now();
+    const hit = walletHits.get(rec.id);
+    if (!hit || t - hit.start >= 10_000) walletHits.set(rec.id, { start: t, n: 1 });
+    else if ((hit.n += 1) > cfg.walletRatePer10s) return fail('RATE_LIMITED');
+    const wallet = await users.getWallet(rec.id);
+    if (!wallet) return fail('WALLET_SETUP_REQUIRED');
+    const args = req.body ?? {};
+    const stats = { wins: rec.wins, losses: rec.losses, streak: rec.streak, maxStreak: rec.maxStreak, mmr: rec.mmr, nickname: rec.nickname };
+    // 한 번에 하나씩 — 아래 동작은 await 없이 동기로 지갑을 바꾸므로 같은 계정의 요청이 겹쳐도 서로 끼어들지 못한다
+    let result;
+    switch (args.action) {
+      case 'get': result = { ok: true }; break;
+      case 'checkin': result = checkIn(wallet, nowMs()); break;
+      case 'emergency': result = claimEmergency(wallet, nowMs(), MIN_ENTRY_FEE); break;
+      case 'practice': result = claimPractice(wallet, args.won === true, nowMs()); break;
+      case 'buy': case 'equip': case 'chest': case 'flame': case 'taunt_buy': case 'taunt_equip': case 'title':
+        result = runStoreAction(wallet, stats, args.action, args, () => randomInt(2 ** 32) / 2 ** 32); // 상자 추첨은 서버 난수
+        break;
+      default: return fail('BAD_REQUEST');
+    }
+    if (args.action !== 'get') users.commitWallet(rec.id);
+    return { ok: true, result, wallet: walletView(wallet), state: walletStatus(wallet, nowMs(), MIN_ENTRY_FEE) };
+  }
+
   const respond = (res, result) => Promise.resolve(result).then(
     (body) => res.status(body?.ok ? 200 : (API_STATUS[body?.error] ?? 400)).json(body),
     (err) => { cfg.onError(err); res.status(500).json(fail('SERVER_ERROR')); },
@@ -302,6 +369,7 @@ export function createGameServer(options = {}) {
     if (!rec) return null;
     const current = socket.data.user;
     if (current && current.id !== rec.id && socket.data.where) return null; // 판 · 대기열 도중에 다른 계정으로 바꿀 수 없다
+    await users.getWallet(rec.id).catch(() => null); // 서버 지갑을 미리 불러 둔다 (판 진행 중에는 동기로 쓴다) — 못 불러오면 지갑 없이 (예전 방식)
     socket.data.user = { id: rec.id, nickname: rec.nickname, rec }; // rec = 서버 계정 기록 (상대에게 보이는 이름 · MMR 은 여기서)
     return rec;
   }
@@ -344,6 +412,7 @@ export function createGameServer(options = {}) {
   app.post('/api/signup', (req, res) => respond(res, apiSignup(req)));
   app.post('/api/login', (req, res) => respond(res, apiLogin(req)));
   app.post('/api/rename', (req, res) => respond(res, apiRename(req)));
+  app.post('/api/wallet', (req, res) => respond(res, apiWallet(req)));
   app.use('/api', (err, req, res, next) => { // 깨진 JSON 등
     if (res.headersSent) { next(err); return; }
     res.status(400).json(fail('BAD_REQUEST'));
@@ -355,7 +424,7 @@ export function createGameServer(options = {}) {
   const handlers = {
     register_player: registerPlayer,
     get_leaderboard: getLeaderboard,
-    watch_rooms: (socket) => { socket.join(LOBBY_CHANNEL); return { ok: true, rooms: rooms.publicRooms() }; },
+    watch_rooms: (socket) => { socket.join(LOBBY_CHANNEL); const { online, queued } = lobbyStats(); return { ok: true, rooms: rooms.publicRooms(), online, queued }; },
     unwatch_rooms: (socket) => { socket.leave(LOBBY_CHANNEL); return { ok: true }; },
     create_public_room: needUser(rooms.createPublicRoom),
     join_public_room: needUser(rooms.joinPublicRoom),
@@ -407,6 +476,12 @@ export function createGameServer(options = {}) {
     }));
   });
 
+  // 로비를 보는 소켓에게 접속자 수 · 대기 인원을 몇 초마다 (보는 사람이 없으면 보내지 않는다)
+  const statsTimer = setInterval(() => {
+    if (io.sockets.adapter.rooms.get(LOBBY_CHANNEL)?.size) io.to(LOBBY_CHANNEL).emit('lobby_stats', lobbyStats());
+  }, cfg.lobbyStatsMs);
+  statsTimer.unref?.();
+
   // ── 시작 · 종료 ──
   const start = (port = Number(process.env.PORT || 3000), host) => new Promise((resolve, reject) => {
     httpServer.once('error', reject);
@@ -417,6 +492,7 @@ export function createGameServer(options = {}) {
   });
 
   async function stop() {
+    clearInterval(statsTimer);
     rooms.shutdown();
     matchmaker.clear();
     const closed = new Promise((resolve) => { io.close(resolve); }); // 소켓을 모두 끊고 HTTP 서버도 닫는다
