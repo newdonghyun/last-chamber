@@ -6,6 +6,7 @@
  *     'queue'   빠른 매칭 — matchmaker 가 같은 등급 2명을 맺어 준 방 (랭킹전)
  *     'private' 친선 비밀방 — 목록에 보이지 않고 4자리 코드로만 들어온다 (친선전: MMR · 전적 미반영)
  *   · 생성 / 입장 / 재접속 토큰(rejoin_room) / 나가기 / 연결 끊김
+ *   · 항복(surrender): 진행 중인 판에서 내가 패배로 끝낸다 — 랭킹전이면 항복자 −20 · 상대 +25 를 서버가 정산하고 둘 다 game_over(reason 'surrender'), 친선 비밀방이면 기록 없이 상대 승리
  *   · 방마다 GameEngine 하나 — 서버 권위. 좌석(P1 · P2)은 서버가 소켓에 붙이고, 각자에게는 자기 시점의 상태와 로그만 보낸다
  *   · 20초 턴 타이머(0초가 되면 서버가 대신 격발) · 15초 연결 끊김 부전승 · 친구를 기다리는 방의 10분 만료 · 끝난 판 결과 60초 보관
  *   · 이모트(send_emote) 중계 · 클라이언트가 보낸 프로필의 모양 검사(cleanProfile) · 로그인한 소켓은 서버가 확인한 닉네임으로(profileOf)
@@ -267,17 +268,23 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
    * 서버 전적 기록 — 랭킹전(무작위 매칭 'queue')만. 친구 초대 방('private')은 친선전이라 MMR · 전적 · 연승을 건드리지 않는다
    * (지인끼리 점수를 몰아주는 어뷰징 방지). 로그인한 좌석만 · 같은 유저가 두 자리에 앉은 판(창 두 개로 혼자 둔 판)은 세지 않는다.
    * 좌석별 MMR 변동은 room.deltas 에 남겨 game_over 로 알려 준다.
+   * 두 좌석이 모두 로그인한 계정이면 승자 · 패자를 한 번에 기록한다 (users.recordMatch — DB 에도 요청 하나로 써서 한쪽만 반영되지 않는다).
+   * finishGame 이 판마다 한 번만 부르므로(상태가 'playing' 일 때만) 정상 종료 · 항복 · 부전승 어느 경로로 끝나도 정산은 한 번이다.
    */
   function recordResults(room) {
     room.deltas = {};
     if (!users || !isRanked(room)) return;
     const [a, b] = room.seats;
     if (a.userId && a.userId === b.userId) return;
+    const before = Object.fromEntries(room.seats.map((s) => [s.id, s.userId ? users.get(s.userId)?.mmr : undefined]));
+    const winner = room.seats.find((s) => s.id === room.result.winner);
+    const loser = otherSeat(room, winner);
+    if (!(winner.userId && loser.userId && users.recordMatch(winner.userId, loser.userId))) { // 한쪽이 손님이었던 옛 판 등: 좌석별로
+      for (const seat of room.seats) if (seat.userId) users.recordResult(seat.userId, seat.id === winner.id);
+    }
     for (const seat of room.seats) {
-      if (!seat.userId) continue;
-      const before = users.get(seat.userId)?.mmr;
-      const after = users.recordResult(seat.userId, seat.id === room.result.winner)?.mmr;
-      if (Number.isFinite(before) && Number.isFinite(after)) room.deltas[seat.id] = after - before;
+      const after = seat.userId ? users.get(seat.userId)?.mmr : undefined;
+      if (Number.isFinite(before[seat.id]) && Number.isFinite(after)) room.deltas[seat.id] = after - before[seat.id];
     }
   }
 
@@ -311,6 +318,19 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
 
   function forfeit(room, loser) { // 연결 끊김 · 나가기 → 상대 부전승
     finishGame(room, otherSeat(room, loser), 'forfeit');
+  }
+
+  /**
+   * 항복: 진행 중인 판에서 이 소켓의 좌석이 지고 상대가 이긴 것으로 끝낸다 (reason 'surrender').
+   * 정산은 finishGame → recordResults 한 곳 — 랭킹전(공개 방 · 빠른 매칭)이면 항복자 −20 · 패배 +1 · 연승 초기화, 상대 +25 · 승리 +1 · 연승 +1 을 서버가 기록하고,
+   * 친선 비밀방이면 기록 없이 상대 승리로만 끝난다. 두 사람 모두에게 game_over 를 보낸 뒤 방 채널에서 내보낸다.
+   * 이미 끝난 판 · 동시에 서로 항복한 두 번째 요청은 NOT_IN_GAME (좌석이 이미 풀려 있다) — 두 번 정산되지 않는다.
+   */
+  function surrender(socket) {
+    const seated = seatOfSocket(socket);
+    if (!seated || seated.room.status !== 'playing') return fail('NOT_IN_GAME');
+    finishGame(seated.room, otherSeat(seated.room, seated.seat), 'surrender');
+    return { ok: true };
   }
 
   // ── 이벤트 처리 ──
@@ -491,5 +511,5 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, on
     rooms.clear();
   }
 
-  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, rejoinRoom, gameAction, sendEmote, onDisconnect, stats, shutdown };
+  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, gameAction, sendEmote, onDisconnect, stats, shutdown };
 }

@@ -1,5 +1,6 @@
 // 효과음 설계 검증 (브라우저 없음 · 소리 그래프를 기록하는 가짜 AudioContext): node tests/sound.test.mjs
-//   1. 실탄: ① 160→35Hz 0.12초 펀치 ② 1200→180Hz 로 닫히는 노이즈 0.35초 ③ 짧은 잔향 — 전부 지수 감쇠로 0.4초 안에 끝 · 고음 오실레이터 없음
+//   1. 실탄(스마트폰 스피커용): ① 0~0.03초 2200→400Hz 뇌관 파열음 ② 280→65Hz 0.18초 사각 · 삼각파 + WaveShaper 포화 ③ 2500→350Hz 로우패스 노이즈 0.45초(2배 출력)
+//      — 총성 전용 체인(증폭 → DynamicsCompressor → 소프트클립 → 마스터) · 전부 지수 감쇠로 0.45초 안에 끝 · 2.2kHz 소리는 0.03초뿐
 //   2. 공포탄: 0.06초에 끝나는 800~2500Hz 노이즈 클릭 · 오실레이터 없음
 //   3. 피격 · 아이템: 총성 뒤에 '띠딩'으로 들리던 경고음 · 귀울림 · 고배음 없음
 //   4. 배경음: 드문 먼 소리까지 전부 돌려 봐도 1kHz 이상 오실레이터 없음 (유리잔 '챙' 제거)
@@ -28,6 +29,8 @@ class Node {
     this.frequency = new Param(440);
     this.Q = new Param(1);
     this.playbackRate = new Param(1);
+    for (const name of ['threshold', 'knee', 'ratio', 'attack', 'release']) this[name] = new Param(0); // DynamicsCompressorNode
+    this.curve = null; // WaveShaperNode
     ctx.nodes.push(this);
   }
   connect(to) { this.to = to; return to; }
@@ -41,6 +44,8 @@ class FakeAudioContext {
   createOscillator() { return new Node(this, 'osc'); }
   createBufferSource() { return new Node(this, 'source'); }
   createBiquadFilter() { return new Node(this, 'filter'); }
+  createWaveShaper() { return new Node(this, 'shaper'); }
+  createDynamicsCompressor() { return new Node(this, 'compressor'); }
   createBuffer(_ch, length, rate) { return { duration: length / rate, getChannelData: () => new Float32Array(length) }; }
 }
 
@@ -57,13 +62,21 @@ function render(play) {
   for (const src of ctx.nodes.slice(before).filter((n) => (n.kind === 'osc' || n.kind === 'source') && n.started && n.onended)) {
     const filters = [];
     let node = src.to;
-    while (node && node.kind === 'filter') { filters.push(node); node = node.to; }
+    let shaped = false;
+    while (node && (node.kind === 'filter' || node.kind === 'shaper')) { if (node.kind === 'filter') filters.push(node); else shaped = true; node = node.to; }
+    const route = []; // 엔벌로프 뒤 경로: 노드 종류들 (마지막은 destination)
+    for (let n = node?.to; n; n = n.to) route.push(n.kind);
+    const out = node?.to ?? null; // 엔벌로프 다음 노드
     const env = node?.gain.events ?? [];
     const exps = env.filter((e) => e[0] === 'exp');
     const fe = src.frequency.events;
     voices.push({
       kind: src.kind,
       type: src.type,
+      shaped,
+      route,
+      out,
+      comp: (() => { for (let n = out; n; n = n.to) if (n.kind === 'compressor') return { threshold: n.threshold.value, ratio: n.ratio.value, knee: n.knee.value, attack: n.attack.value }; return null; })(),
       f0: fe[0]?.[1] ?? src.frequency.value,
       fEnd: fe.findLast((e) => e[0] === 'exp')?.[1] ?? null,
       glide: fe.findLast((e) => e[0] === 'exp') ? fe.findLast((e) => e[0] === 'exp')[2] - fe[0][2] : 0,
@@ -87,26 +100,48 @@ function render(play) {
 // ───────── 1. 실탄 ─────────
 {
   const g = render((s) => s.playGunshot());
-  ok(g.voices.length >= 3, `1 실탄은 세 겹 이상 (${g.voices.length}겹)`);
-  ok(g.returned > 0 && g.returned < 0.4, `1 실탄은 0.4초 안에 끝 — 반환 ${g.returned.toFixed(3)}초`);
-  ok(g.length <= 0.37, `1 소리가 −80dB 에 닿는 시각 ${g.length.toFixed(3)}초 ≤ 0.37`);
-  ok(g.voices.every((v) => v.allExponential && v.endLevel <= 0.0001), '1 모든 겹이 지수 감쇠(exponentialRamp)로 무음까지');
-  ok(g.oscs.every((v) => ['sine', 'triangle'].includes(v.type)), '1 오실레이터는 사인 · 트라이앵글뿐 (톱니 · 사각 없음)');
-  ok(g.oscs.every((v) => v.f0 <= 160), `1 오실레이터 최고 음정 ${Math.max(...g.oscs.map((v) => v.f0))}Hz ≤ 160 (고음 '띠딩' 없음)`);
-  const punch = g.oscs.find((v) => v.type === 'sine');
-  ok(punch && punch.f0 === 160 && punch.fEnd === 35, '1 ① 사인 펀치 160Hz → 35Hz');
-  near(punch?.glide ?? 0, 0.12, 0.0005, '1 ① 펀치가 0.12초에 급강하');
-  ok(g.oscs.every((v) => v.fEnd === 35), '1 ① 트라이앵글도 같은 35Hz 로 떨어진다');
-  const burst = g.noises.find((v) => v.filters[0]?.type === 'lowpass' && v.filters[0].f0 === 1200);
-  ok(burst && burst.filters[0].fEnd === 180, '1 ② 노이즈 폭음: 로우패스 1200Hz → 180Hz');
-  ok(burst && burst.filters[0].sweep <= 0.3, `1 ② 필터가 빠르게 닫힌다 (${burst?.filters[0].sweep.toFixed(3)}초)`);
-  near((burst?.end ?? 0) - g.t0, 0.35, 0.002, '1 ② 폭음 버스트 길이 0.35초');
-  const tail = g.noises.filter((v) => v.start - g.t0 > 0.02);
-  ok(tail.length >= 1 && tail.every((v) => v.end - g.t0 <= 0.37), '1 ③ 잔향 꼬리가 0.4초 안에 끝');
-  ok(tail.every((v) => v.filters.every((f) => (f.type === 'lowpass' ? f.f0 <= 800 : f.f0 <= 500))), '1 ③ 잔향은 어둡고 낮은 소리 (고음 반사음 없음)');
-  ok(g.noises.every((v) => v.filters.every((f) => f.f0 <= 1500)), '1 노이즈 필터 중심 1500Hz 이하 (귀를 찌르는 고역 없음)');
-  const sum = g.voices.reduce((a, v) => a + v.peak, 0);
-  ok(sum <= 2.2, `1 겹들의 최대 합 ${sum.toFixed(2)} (한꺼번에 터져도 마스터에서 찌그러지지 않는 수준)`);
+  ok(g.voices.length === 4, `1 세 겹 = 뇌관 1 + 바디 2(사각 · 삼각) + 노이즈 1 (${g.voices.length}개 소리)`);
+  ok(g.returned > 0 && g.returned <= 0.5, `1 실탄 전체가 0.45초 안에 끝 — 반환 ${g.returned.toFixed(3)}초`);
+  ok(g.length <= 0.4511, `1 소리가 −80dB 에 닿는 시각 ${g.length.toFixed(4)}초 ≤ 0.451`);
+  ok(g.voices.every((v) => v.allExponential && v.endLevel <= 0.0001), '1 모든 겹이 지수 감쇠(exponentialRamp)로 무음까지 — 뒤에 꼬리가 남지 않는다');
+  ok(g.oscs.every((v) => ['triangle', 'square'].includes(v.type)), '1 오실레이터는 삼각 · 사각파뿐 (사인 알림음 · 톱니 없음)');
+
+  // ① 뇌관 파열음
+  const snap = g.oscs.find((v) => v.f0 === 2200);
+  ok(snap && snap.fEnd === 400 && snap.type === 'triangle', '1 ① 뇌관 파열음 2200Hz → 400Hz');
+  near(snap?.glide ?? 0, 0.03, 0.0001, '1 ① 급강하 0.03초');
+  ok(snap && snap.end - snap.start <= 0.0306, `1 ① 뇌관 파열음은 0~0.03초 구간에서 끝 (${((snap?.end ?? 0) - (snap?.start ?? 0)).toFixed(4)}초)`);
+  ok(g.oscs.filter((v) => v.f0 > 400).length === 1, '1 400Hz 넘는 오실레이터는 뇌관 파열음 하나뿐 (고음 띠딩 없음)');
+
+  // ② 중저음 바디
+  const body = g.oscs.filter((v) => v.f0 === 280);
+  ok(body.length === 2 && body.some((v) => v.type === 'square') && body.some((v) => v.type === 'triangle'), '1 ② 바디: 280Hz 사각파 + 삼각파');
+  ok(body.every((v) => v.fEnd === 65), '1 ② 바디가 65Hz 까지 떨어진다');
+  ok(body.every((v) => Math.abs(v.glide - 0.18) < 0.0001), '1 ② 바디가 0.18초 동안 떨어진다');
+  ok(body.every((v) => v.shaped), '1 ② 바디는 WaveShaper(포화)를 통과 — 배음 증폭');
+  ok(body.every((v) => v.end - v.start <= 0.2311), `1 ② 바디도 0.23초 안에 끝 (${Math.max(...body.map((v) => v.end - v.start)).toFixed(3)}초)`);
+
+  // ③ 화약 폭발 노이즈
+  const burst = g.noises[0];
+  ok(g.noises.length === 1 && burst.filters[0]?.type === 'lowpass' && burst.filters[0].f0 === 2500 && burst.filters[0].fEnd === 350, '1 ③ 화이트 노이즈: 로우패스 2500Hz → 350Hz');
+  near(burst?.filters[0].sweep ?? 0, 0.45, 0.0001, '1 ③ 필터가 0.45초 동안 닫힌다');
+  near((burst?.end ?? 0) - g.t0, 0.45, 0.001, '1 ③ 폭발 노이즈 길이 0.45초');
+  ok(burst.peak >= 1.1, `1 ③ 노이즈 출력 ${burst.peak} ≥ 1.1 (기존 0.55 의 2배 이상)`);
+
+  // 총성 전용 체인: 증폭 버스(gain) → 컴프레서 → 소프트클립(shaper) → 마스터(gain) → 출력(destination)
+  ok(g.voices.every((v) => JSON.stringify(v.route) === JSON.stringify(['gain', 'compressor', 'shaper', 'gain', null])), `1 모든 겹이 총성 체인을 지난다: 증폭 버스 → 컴프레서 → 소프트클립 → 마스터 (경로 ${JSON.stringify(g.voices[0].route)})`);
+  ok(g.voices.every((v) => v.out.kind === 'gain' && v.out.gain.value > 1), '1 총성 버스는 1 보다 크게 증폭');
+  ok(g.voices.every((v) => v.comp && v.comp.ratio >= 4 && v.comp.threshold <= -6), `1 DynamicsCompressor 가 피크를 누른다 (threshold ${g.voices[0].comp?.threshold}dB · ratio ${g.voices[0].comp?.ratio})`);
+}
+{
+  // 소프트클립 곡선: 어떤 입력에도 ±1 을 넘지 않고, 0 은 0, 단조 증가 — 컴프레서가 놓친 피크의 마지막 방어선
+  const { ctx } = engine();
+  const clip = ctx.nodes.find((n) => n.kind === 'shaper');
+  const c = clip?.curve;
+  ok(c instanceof Float32Array && c.length >= 256, '1 소프트클립 곡선이 설정돼 있다');
+  ok(c && Math.max(...c) <= 1 && Math.min(...c) >= -1, '1 소프트클립 출력은 ±1 을 넘지 않는다');
+  ok(c && Math.abs(c[0] + 1) < 1e-6 && Math.abs(c.at(-1) - 1) < 1e-6, '1 소프트클립 양 끝은 ±1 (큰 입력도 ±1 로)');
+  ok(c && c.every((v, i) => i === 0 || v >= c[i - 1]), '1 소프트클립은 단조 증가 (소리가 뒤집히지 않는다)');
 }
 
 // ───────── 2. 공포탄 ─────────
@@ -121,6 +156,7 @@ function render(play) {
   ok(c.voices.every((v) => v.allExponential && v.endLevel <= 0.0001), '2 모든 겹이 지수 감쇠로 깔끔하게 끝');
   const gun = render((s) => s.playGunshot());
   ok(c.length < gun.length / 4, '2 실탄보다 훨씬 짧다 — 확실히 구분');
+  ok(c.voices.every((v) => JSON.stringify(v.route) === JSON.stringify(['gain', null])), '2 공포탄은 총성 체인(컴프레서)을 타지 않는다 — 날카로운 클릭이 눌리지 않게');
 }
 
 // ───────── 3. 피격 · 아이템 · 그 밖 ─────────

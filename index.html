@@ -30,7 +30,7 @@
     · 시작 화면(#login-modal): [로그인] 아이디 · 비밀번호 / [회원가입] 아이디 · 비밀번호 · 닉네임 → 로그인 토큰을 이 기기에 저장, 다음부터 자동 로그인 · [로그인 없이 둘러보기] = AI 딜러 연습만
       → 타이틀. 타이틀 우상단 계정 버튼(#btn-account) → #account-modal 닉네임 [변경] · 로그아웃 (손님이면 로그인 화면)
     · 타이틀(#start-modal, 경기가 끝나면 결과 화면으로 재사용) → 게임 시작 / 프로필 & 랭킹(#profile-modal, 좌상단 미니 카드) / 상점 & 무기고(#store-modal: 총기 · 테이블 · 암시장 상자 & 이펙트 · 도발 액션 4탭) / 룰 & 도감(#rules-modal)
-    · 인게임: 상단 딜러 · 중앙 테이블 · 하단 플레이어 (100dvh 안에 스크롤 없이). 장착한 도발이 있으면 테이블 우상단 구석에 작은 도발 버튼(#btn-taunt), 쓰면 테이블 중앙에 #taunt-fx 연출
+    · 인게임: 상단 딜러 · 중앙 테이블 · 하단 플레이어 (100dvh 안에 스크롤 없이). 상단 모서리에 [항복](온라인 대전 — 서버가 정산) / [나가기](AI 연습 — 기록 없음) 버튼(#btn-leave) → 확인 모달(#leave-modal). 장착한 도발이 있으면 테이블 우상단 구석에 작은 도발 버튼(#btn-taunt), 쓰면 테이블 중앙에 #taunt-fx 연출
     · 총기·테이블 색은 style.css :root 의 CSS 변수 → 상점에서 스킨을 장착하면 src/ui/storeData.js 의 값으로 바뀐다
   -->
 
@@ -90,6 +90,8 @@
           <span>DEALER</span><b id="score-dealer">0</b><i>:</i><b id="score-player">0</b><span>YOU</span>
         </div>
         <div class="hud-tools">
+          <!-- 판 도중 [항복](온라인 대전) / [나가기](AI 연습) — 누르면 확인 모달(#leave-modal). 판이 아닐 때는 숨김 (app.js setInMatch) -->
+          <button class="leave-btn" id="btn-leave" type="button" hidden aria-haspopup="dialog" aria-controls="leave-modal"><span id="leave-label">나가기</span></button>
           <button class="icon-btn" id="btn-sound" type="button" aria-label="소리 설정" aria-expanded="false" aria-controls="sound-panel" title="소리 설정 (M: 음소거)">
             <svg aria-hidden="true"><use id="sound-icon" href="#i-sound"></use></svg>
           </button>
@@ -801,6 +803,18 @@
       </form>
       <button class="login-guest" id="login-guest" type="button">로그인 없이 둘러보기 <small>AI 딜러 연습만</small></button>
       <p class="login-note">랭킹전 · 공개 방 · 친선 비밀방은 로그인한 계정으로만 참여할 수 있어요 · 다른 기기에서도 같은 아이디로 전적이 이어지고, 이 기기에서는 다음 접속부터 자동으로 로그인됩니다</p>
+    </div>
+  </dialog>
+
+  <!-- ───────── 항복 · 나가기 확인 (인게임 #btn-leave) — 모드별 문구는 app.js openLeave 가 채운다 ───────── -->
+  <dialog class="acct-modal leave-modal" id="leave-modal" aria-labelledby="leave-title" aria-describedby="leave-text">
+    <div class="acct-card leave-card">
+      <h2 class="leave-title" id="leave-title">정말 항복하시겠습니까?</h2>
+      <p class="leave-text" id="leave-text"></p>
+      <div class="acct-confirm-row">
+        <button class="acct-btn" type="button" data-leave="cancel">취소</button>
+        <button class="acct-btn is-danger" id="leave-confirm" type="button" data-leave="confirm">항복하기</button>
+      </div>
     </div>
   </dialog>
 

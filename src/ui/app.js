@@ -41,7 +41,7 @@ import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
   CHEST, CHEST_ITEMS, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
-import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
+import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
 import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
 import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절)
 
@@ -208,6 +208,12 @@ const el = {
   chestProgress: $('chest-progress'),
   chestList: $('list-chest'),
   tauntList: $('list-taunts'),
+  btnLeave: $('btn-leave'),
+  leaveLabel: $('leave-label'),
+  leave: $('leave-modal'),
+  leaveTitle: $('leave-title'),
+  leaveText: $('leave-text'),
+  leaveConfirm: $('leave-confirm'),
   btnTaunt: $('btn-taunt'),
   tauntIcon: $('taunt-icon'),
   tauntFx: $('taunt-fx'),
@@ -284,6 +290,8 @@ let tabHidden = document.hidden; // 다른 탭·창에 나가 있는 동안 게�
 let crisisLevel = ''; // '' | 'tense'(마지막 1발) | 'danger'(내 체력 1) → #crisis 위기 비네팅
 let lastTension = -1; // 배경음 긴장도 (바뀔 때만 엔진에 전달)
 const slotKeys = { [PLAYER]: null, [AI]: null }; // 지금 화면에 그려진 아이템 줄 ('SCOPE|DOUBLE|…') — 같으면 슬롯을 다시 만들지 않는다
+let inMatch = false; // 판이 진행 중인가 (인게임 [항복] / [나가기] 버튼을 보이는 동안) — 결과가 나오거나 나가면 false
+let leaving = false; // 항복 요청을 서버에 보내고 답을 기다리는 중 (중복 클릭 방지)
 let audioUnlockArmed = false; // PvP 시작 때 붙이는 '첫 터치에 오디오 깨우기' 리스너가 이미 대기 중인가 (판마다 쌓이지 않게)
 
 const profile = new PlayerProfile(); // 탄피 · 해금/장착 · 체험 · 연승 (localStorage에 영구 저장)
@@ -323,7 +331,7 @@ const thinking = (on) => el.speech.classList.toggle('is-thinking', on);
 const lobbyOpen = () => document.getElementById('mp-lobby')?.open === true;
 const onGameScreen = (token = gameId) => token === gameId && Boolean(engine) && !el.title.open && !lobbyOpen();
 const gameSfx = (play, token = gameId) => { if (onGameScreen(token)) play(); };
-const isPaused = () => !online && (el.rules.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
+const isPaused = () => !online && (el.rules.open || el.leave.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
 
 function guard(promise) {
   promise.catch((err) => {
@@ -1561,6 +1569,7 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   idleTimer();
   say(pick(LINES.start));
   render();
+  setInMatch(true); // [항복] / [나가기] 버튼
 
   guard((async () => {
     await present(token); // ROUND_START → LOAD(장전 연출) → DEAL → TURN
@@ -1604,6 +1613,9 @@ async function catchUp(token) {
 
 async function endGame(s, token) {
   const won = s.winner === PLAYER;
+  const surrendered = online && pvpOver()?.reason === 'surrender'; // 서버가 항복으로 끝낸 판 (won = 상대가 항복) — 문구만 다르고 정산은 같은 경로
+  setInMatch(false); // 결과가 나왔다 — 항복 버튼과 확인 모달은 치운다
+  closeLeave();
   stopTimer();
   idleTimer();
   busy = true;
@@ -1618,13 +1630,13 @@ async function endGame(s, token) {
     outcome = online ? await pvpSettle(won) : profile.recordPractice(won); // PvP: 랭킹전/친선전별 정산 + 소켓 정리 · AI 딜러: 연습 기록만 (랭킹 MMR 미반영)
   }
   say(pick(won ? LINES.gameWon : LINES.gameLost));
-  subtitle(won ? '딜러가 쓰러졌다 — 당신의 승리' : '당신이 쓰러졌다 — 딜러의 승리', won ? 'info' : 'danger');
+  subtitle(surrendered ? (won ? '상대가 항복했다 — 당신의 승리' : '당신은 항복했다 — 상대의 승리') : won ? '딜러가 쓰러졌다 — 당신의 승리' : '당신이 쓰러졌다 — 딜러의 승리', won ? 'info' : 'danger');
   if (token === gameId) platform.triggerHaptic(won ? 'win' : 'lose'); // 승패 확정: 진동 1회 (승리 Medium · 패배 Heavy)
-  await headline(won ? 'VICTORY' : 'DEFEAT', won ? 'info' : 'danger', 1900);
+  await headline(surrendered && !won ? 'SURRENDER' : won ? 'VICTORY' : 'DEFEAT', won ? 'info' : 'danger', 1900);
   if (token !== gameId) return;
   setHtml(el.titleHeading, won ? 'YOU<span>SURVIVED</span>' : 'GAME<span>OVER</span>'); // 같은 결과가 이어지면 다시 파싱하지 않는다
-  el.titleSub.textContent = vsFoe(won ? '딜러가 테이블 위에 쓰러졌다. 오늘 밤 마지막 약실은 당신의 것.' : '마지막 약실은 딜러의 것이었다. 다시 앉겠는가?');
-  el.titleResult.textContent = `${online ? 'OPPONENT' : 'DEALER'} ${s.opponent.wins} : ${s.me.wins} YOU`;
+  el.titleSub.textContent = surrendered ? (won ? '상대가 테이블을 떠났다. 오늘 밤 마지막 약실은 당신의 것.' : '당신은 테이블을 떠났다. 다시 앉겠는가?') : vsFoe(won ? '딜러가 테이블 위에 쓰러졌다. 오늘 밤 마지막 약실은 당신의 것.' : '마지막 약실은 딜러의 것이었다. 다시 앉겠는가?');
+  el.titleResult.textContent = `${online ? 'OPPONENT' : 'DEALER'} ${s.opponent.wins} : ${s.me.wins} YOU${surrendered ? (won ? ' · 상대 항복' : ' · 항복') : ''}`;
   el.titleResult.hidden = false;
   el.btnStart.querySelector('.title-btn-main').textContent = '다시 하기';
   el.btnStart.querySelector('.title-btn-sub').textContent = 'PLAY AGAIN';
@@ -1635,6 +1647,91 @@ async function endGame(s, token) {
   el.titleInner.scrollTop = 0; // 첫 포커스(광고 버튼)가 화면을 밀어 제목이 잘리지 않게
   syncWallet({ animate: true }); // 획득한 탄피가 배지로 굴러 들어간다
   syncPlayerCard(); // 전적·티어가 바뀌었으니 좌상단 미니 카드도
+}
+
+// ───────── 항복 · 나가기 ─────────
+// 온라인 대전([항복]): 확인 → 서버에 surrender → 서버가 판을 끝내고 정산(랭킹전 항복자 −20 · 상대 +25 · 친선전은 기록 없음)한 뒤 양쪽에 game_over 를 보낸다.
+//   결과 화면은 그 game_over 가 열어 준다(endGame) — 클라이언트는 전적 · MMR 을 직접 바꾸지 않는다.
+// AI 연습([나가기]): 확인 → 판을 그 자리에서 버리고 타이틀(로비로 가는 화면)로. 전적 · MMR · 탄피는 건드리지 않는다 (recordPractice 를 부르지 않는다).
+
+function setInMatch(on) {
+  inMatch = on;
+  setHidden(el.btnLeave, !on);
+  if (!on) return;
+  setText(el.leaveLabel, online ? '항복' : '나가기');
+  el.btnLeave.classList.toggle('is-quit', !online);
+  el.btnLeave.setAttribute('aria-label', online ? '항복하고 판을 끝내기' : '연습 게임 나가기');
+}
+
+function openLeave() {
+  if (!inMatch || el.leave.open || leaving || adBusy) return;
+  const ranked = online && pvpMode() === 'ranked';
+  if (!online) {
+    el.leaveTitle.textContent = '연습 게임을 나갈까요?';
+    el.leaveText.textContent = '연습 게임을 종료하고 로비로 돌아갑니다.\n전적과 MMR은 변하지 않아요.';
+    el.leaveConfirm.textContent = '나가기';
+  } else {
+    el.leaveTitle.textContent = '정말 항복하시겠습니까?';
+    el.leaveText.textContent = ranked ? '랭킹전은 패배로 기록됩니다.\nMMR −20 · 상대는 +25 를 받아요.' : '친선전은 전적과 MMR에 기록되지 않아요.\n상대의 승리로 판이 끝납니다.';
+    el.leaveConfirm.textContent = '항복하기';
+  }
+  setSoundPanel(false);
+  el.leave.showModal();
+}
+
+function closeLeave() {
+  if (el.leave.open) el.leave.close();
+}
+
+async function confirmLeave() {
+  closeLeave();
+  if (!inMatch || leaving) return;
+  if (!online) {
+    leaveAiGame();
+    return;
+  }
+  if (pvpOver()) return; // 이미 서버가 판을 끝냈다 (결과 화면이 곧 열린다)
+  leaving = true;
+  setDisabled(el.btnLeave, true);
+  const res = await pvpSurrender();
+  leaving = false;
+  setDisabled(el.btnLeave, false);
+  if (!res.ok && res.error !== 'NOT_IN_GAME') toast('서버에 닿지 않아 항복하지 못했어요. 잠시 뒤 다시 눌러 주세요', true); // 판은 그대로 — 결과는 서버의 game_over 로만 열린다
+}
+
+// AI 연습에서 나가기: 진행 중인 연출 · 타이머 · 딜러 턴을 토큰으로 끊고 타이틀로. 결과를 기록하지 않는다 (recordedGame 은 그대로 → 지급 · 전적 없음)
+function leaveAiGame() {
+  ++gameId; // 이 판의 비동기 흐름(연출 · 딜러 턴 · 타이머)이 다음 확인에서 모두 멈춘다
+  busy = true;
+  setInMatch(false);
+  stopTimer();
+  idleTimer();
+  thinking(false);
+  clearSubtitles();
+  clearTimeout(headlineTimer);
+  clearTimeout(sparkTimer);
+  el.headline.classList.remove('is-visible');
+  el.reveal.classList.remove('is-visible');
+  el.sparks.classList.remove('is-active');
+  el.gun.classList.remove('aim-up', 'aim-down', 'fire', 'barrel-spin', 'is-doubled', 'shock');
+  el.app.classList.remove('shake-hard');
+  el.flash.classList.remove('flash-red');
+  el.table.classList.remove('zoom-tension', 'zoom-hit');
+  document.body.classList.remove('slowmo');
+  setCrisis('');
+  syncTauntButton();
+  sound.stopAmbient({ fade: 1.5 });
+  applyLoadout(profile.activeLoadout()); // 1판 체험 스킨이었다면 장착해 둔 스킨으로 복귀
+  setHtml(el.titleHeading, 'LAST<span>CHAMBER</span>');
+  el.titleSub.textContent = '연습 게임을 마쳤다. 다시 앉겠는가?';
+  el.titleResult.hidden = true;
+  el.btnStart.querySelector('.title-btn-main').textContent = '게임 시작';
+  el.btnStart.querySelector('.title-btn-sub').textContent = 'AI 연습 · 랭킹전 · 친선전';
+  syncTitleExtras();
+  if (!el.title.open) el.title.showModal();
+  el.titleInner.scrollTop = 0;
+  syncWallet();
+  syncPlayerCard();
 }
 
 // ───────── 플레이어 입력 ─────────
@@ -2504,6 +2601,13 @@ document.addEventListener(TAUNT_IN, (ev) => { // Step B: 상대가 보낸 도발
   playTaunt(event, { from: 'opponent' });
 });
 
+el.btnLeave.addEventListener('click', openLeave);
+el.leave.addEventListener('click', (ev) => {
+  if (ev.target === el.leave) { closeLeave(); return; } // 바깥 어두운 곳 = 취소
+  const act = ev.target.closest('button[data-leave]')?.dataset.leave;
+  if (act === 'cancel') closeLeave();
+  else if (act === 'confirm') guardUi(confirmLeave());
+});
 el.btnOpponent.addEventListener('click', () => guard(handleShoot('opponent')));
 el.btnSelf.addEventListener('click', () => guard(handleShoot('self')));
 el.playerItems.addEventListener('click', (ev) => {
@@ -2535,7 +2639,7 @@ document.addEventListener('keydown', (ev) => {
     el.btnSound.focus();
     return;
   }
-  if (el.title.open || el.rules.open || el.store.open || el.profile.open) return;
+  if (el.title.open || el.rules.open || el.store.open || el.profile.open || el.leave.open) return;
   if (ev.target instanceof HTMLInputElement) return; // 슬라이더를 방향키·숫자로 조작할 때 격발·아이템이 나가지 않게
   if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
     ev.preventDefault();

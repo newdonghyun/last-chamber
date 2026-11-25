@@ -5,6 +5,7 @@
  *   · 서버의 state_update 를 '원격 엔진'(pvpEngine)에 쌓아 두면, app.js 의 렌더러 · 로그 연출이 로컬 GameEngine 을 읽던 그대로 읽는다 (getPublicState / getLog).
  *     서버 좌석 id(P1/P2)는 화면용 id(player/ai)로 바꿔서 건넨다. 로컬 엔진 · 딜러 AI 는 PvP 중에 돌지 않는다.
  *   · 내 입력은 pvpEngine().shoot / useItem 이 game_action 으로 보내고, 서버가 확정한 결과(그 행동이 만든 state_update)를 돌려준다.
+ *   · 항복: pvpSurrender() 가 surrender 를 보내면 서버가 판을 끝내고(랭킹전이면 항복자 −20 · 상대 +25 정산) 양쪽에 game_over(reason 'surrender')를 보낸다 — 결과 화면은 그 game_over 로만 연다.
  *   · 도발: app.js 가 쏘는 document 'lastchamber:taunt-out' → send_emote / 서버의 receive_emote → document 'lastchamber:taunt-in'.
  *   · 참가비 차감 · 전적/MMR/상금 정산은 app.js 가 initPvp 로 넘겨 준 PlayerProfile 로 한다 (같은 인스턴스 → 탄피 배지가 어긋나지 않는다).
  *     모드별: 랭킹전(무작위 매칭 · match.ranked) → recordRanked(서버 기록으로 랭킹 MMR · 전적 · 연승을 맞춤) / 친선전(방 코드) → recordFriendly(탄피만).
@@ -114,6 +115,19 @@ function bind(s) {
       if (res?.ok) hooks.onNotice?.('다시 연결되었습니다.', 'info');
       else finish(s, { youWon: false, payout: 0, reason: 'disconnect' }); // 자리를 잃었다 → 부전패
     });
+  });
+}
+
+/**
+ * 항복 요청 → { ok: true } | { ok: false, error }.  결과(승패 · MMR)는 ack 가 아니라 서버가 보내는 game_over 로 온다 (app.js 가 거기서 결과 화면을 연다).
+ * NOT_IN_GAME = 이미 끝난 판(상대가 먼저 끝냈거나 동시에 항복) · OFFLINE · TIMEOUT = 서버에 닿지 않았다 (판은 그대로 — 다시 시도할 수 있다)
+ */
+export function pvpSurrender() {
+  const s = S;
+  if (!s || s.closed || s.over) return Promise.resolve({ ok: false, error: 'NOT_IN_GAME' });
+  if (!s.socket.connected) return Promise.resolve({ ok: false, error: 'OFFLINE' });
+  return new Promise((resolve) => {
+    s.socket.timeout(ACK_MS).emit('surrender', (err, res) => resolve(err ? { ok: false, error: 'TIMEOUT' } : (res ?? { ok: false, error: 'SERVER_ERROR' })));
   });
 }
 

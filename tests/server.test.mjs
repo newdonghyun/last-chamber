@@ -7,6 +7,7 @@
 //   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
 //   Phase 7 (계정 보안): 비밀번호 오답 잠금 · 비밀번호 미노출 · 토큰 만료 · 위조 · CORS · 동시 가입 · IP 시도 제한
 //   Phase 8 (공개 방): 로비 목록 실시간 · 손님 제한 · 자기 방 · 잘못된 입장 · 클릭 입장 즉시 시작(랭킹전) · 목록에서 빠짐 · 방장 이탈/끊김
+//   Phase 9 (항복): 공개 방 · 빠른 매칭 항복 = 항복자 −20 · 상대 +25 를 DB 요청 하나로 정산 · 친선 비밀방은 기록 없음 · 중복 · 동시 항복 · 재접속 · 끊김 유예 중 항복 · 방 격리
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -264,12 +265,14 @@ function fakeSupabase(rows = [], { accountColumns = true } = {}) {
         table.set(row.user_id, { ...row });
         return { data: null, error: null };
       },
-      upsert: async (row) => {
+      upsert: async (rows) => { // 행 하나 또는 배열 — 배열은 SQL 문 하나라 전부 반영되거나 하나도 반영되지 않는다
         calls.push('upsert');
-        const merged = { ...table.get(row.user_id), ...row };
-        const c = clash(merged);
-        if (c) return c;
-        table.set(row.user_id, merged);
+        const merged = [].concat(rows).map((row) => ({ ...table.get(row.user_id), ...row }));
+        for (const m of merged) {
+          const c = clash(m);
+          if (c) return c;
+        }
+        for (const m of merged) table.set(m.user_id, m);
         return { data: null, error: null };
       },
       update: (patch) => ({
@@ -539,6 +542,128 @@ async function phase8() {
 
 
 
+// ───────── Phase 9: 항복 (랭킹전 정산 · 친선전 · 중복 · 동시 · 재접속) ─────────
+async function phase9() {
+  const db = fakeSupabase([]); // Supabase 흉내 — 두 계정 정산이 요청 하나(upsert 배열)로 가는지도 본다
+  const server = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const port = await server.start(0, '127.0.0.1');
+  const mem = (X) => { const r = server.users.get(X.account.user_id); return { w: r.wins, l: r.losses, s: r.streak, m: r.mmr }; }; // 서버 메모리 전적
+  const row = (X) => { const r = db.table.get(X.account.user_id); return { w: r.wins, l: r.losses, s: r.streak, m: r.mmr }; }; // DB(players) 행
+  const upserts = () => db.calls.filter((c) => c === 'upsert').length;
+  const overs = (X, code) => X.inbox.filter((m) => m.event === 'game_over' && m.payload.code === code);
+  const inChannel = (X, code) => server.io.sockets.sockets.get(X.socket.id)?.rooms.has(roomChannel(code)) === true;
+  const A = await player(port, '항복자');
+  const B = await player(port, '승자');
+
+  // 구경꾼 판(다른 방) — 항복이 다른 방에 새지 않는지
+  const D1 = await player(port, '구경1');
+  const D2 = await player(port, '구경2');
+  const bystander = await D1.call('create_private_room', {});
+  await D2.call('join_private_room', bystander.code);
+  await D1.waitFor('match_found', (p) => p.code === bystander.code);
+
+  // 36. 공개 방(랭킹전): 항복자 −20 · 패배 +1 · 연승 0 / 상대 +25 · 승리 +1 · 연승 +1 — 양쪽에 결과, 방 채널에서 나감
+  const made = await B.call('create_public_room', {});
+  await A.call('join_public_room', { code: made.code });
+  const [mB, mA] = await Promise.all([B.waitFor('match_found', (p) => p.code === made.code), A.waitFor('match_found', (p) => p.code === made.code)]);
+  ok(inChannel(A, made.code) && inChannel(B, made.code), '36 판 중에는 둘 다 방 채널에 있다');
+  const upBefore = upserts();
+  eq(await A.call('surrender'), { ok: true }, '36 항복 → ok');
+  const [oA, oB] = await Promise.all([A.waitFor('game_over', (p) => p.code === made.code), B.waitFor('game_over', (p) => p.code === made.code)]);
+  eq([oA.reason, oA.youWon, oA.ranked, oA.mmrDelta, oA.payout], ['surrender', false, true, -20, 0], '36 항복자 결과: 항복 패배 · −20');
+  eq([oB.reason, oB.youWon, oB.ranked, oB.mmrDelta], ['surrender', true, true, 25], '36 상대 결과: 상대 항복 승리 · +25');
+  eq([oA.record.wins, oA.record.losses, oA.record.streak, oA.record.mmr], [0, 1, 0, 980], '36 항복자 서버 전적: 0승 1패 · 연승 0 · 980');
+  eq([oB.record.wins, oB.record.losses, oB.record.streak, oB.record.mmr], [1, 0, 1, 1025], '36 상대 서버 전적: 1승 0패 · 연승 1 · 1025');
+  eq([mem(A), mem(B)], [{ w: 0, l: 1, s: 0, m: 980 }, { w: 1, l: 0, s: 1, m: 1025 }], '36 서버 메모리 전적');
+  await sleep(80);
+  eq([row(A), row(B)], [{ w: 0, l: 1, s: 0, m: 980 }, { w: 1, l: 0, s: 1, m: 1025 }], '36 Supabase players 행에도 반영');
+  eq(upserts() - upBefore, 1, '36 두 계정 정산이 DB 요청 하나(upsert 배열) — 한쪽만 반영되지 않는다');
+  ok(!inChannel(A, made.code) && !inChannel(B, made.code), '36 정산 뒤 둘 다 방 채널(socket.leave)에서 나갔다');
+  eq([overs(A, made.code).length, overs(B, made.code).length], [1, 1], '36 결과(game_over)는 각자 한 번만');
+  eq(D1.inbox.concat(D2.inbox).filter((m) => m.event === 'game_over' || m.payload?.code === made.code).length, 0, '36 다른 방(구경꾼)에는 아무것도 가지 않는다');
+
+  // 37. 이미 끝난 판에 다시 항복 · 방에 없는 소켓의 항복 → NOT_IN_GAME, 두 번 정산되지 않는다
+  eq([(await A.call('surrender')).error, (await B.call('surrender')).error], ['NOT_IN_GAME', 'NOT_IN_GAME'], '37 끝난 판에 다시 항복하면 NOT_IN_GAME');
+  const lone = await player(port, '혼자');
+  const guest = await client(port);
+  eq([(await lone.call('surrender')).error, (await guest.call('surrender')).error], ['NOT_IN_GAME', 'NOT_IN_GAME'], '37 방에 없는 소켓 · 손님의 항복은 NOT_IN_GAME');
+  await sleep(60);
+  eq([mem(A), mem(B), upserts() - upBefore], [{ w: 0, l: 1, s: 0, m: 980 }, { w: 1, l: 0, s: 1, m: 1025 }, 1], '37 전적 · DB 쓰기는 그대로 (중복 정산 없음)');
+  const waiting = await lone.call('create_public_room', {});
+  eq((await lone.call('surrender')).error, 'NOT_IN_GAME', '37 상대를 기다리는 방에서는 항복할 수 없다 (나가기는 leave_room)');
+  ok((await guest.call('watch_rooms')).rooms.some((r) => r.code === waiting.code), '37 그 방은 그대로 목록에 남는다');
+  await lone.call('leave_room');
+
+  // 38. 끝난 판의 결과는 재접속으로 다시 받아도 새로 정산하지 않는다
+  A.socket.disconnect();
+  const A2 = await client(port, { token: A.account.token });
+  A2.account = A.account;
+  eq(await A2.call('rejoin_room', { code: made.code, token: mA.token }), { ok: true, over: true }, '38 끝난 판에 재접속 → 결과만 다시');
+  const again = await A2.waitFor('game_over', (p) => p.code === made.code);
+  eq([again.reason, again.youWon], ['surrender', false], '38 다시 받은 결과도 항복 패배');
+  await sleep(60);
+  eq([mem(A), upserts() - upBefore], [{ w: 0, l: 1, s: 0, m: 980 }, 1], '38 재접속해도 전적 · DB 쓰기는 그대로');
+
+  // 39. 빠른 매칭(랭킹전)도 같은 정산 — 이번엔 이긴 쪽(B, 연승 1)이 항복 → 연승 초기화
+  const [qB, qA] = await queueMatch(B, A2);
+  eq([qB.mode, qB.ranked], ['queue', true], '39 빠른 매칭은 랭킹전');
+  await B.call('surrender');
+  const [qoB, qoA] = await Promise.all([B.waitFor('game_over', (p) => p.code === qB.code), A2.waitFor('game_over', (p) => p.code === qB.code)]);
+  eq([qoB.youWon, qoB.mmrDelta, qoB.record.streak, qoB.record.mmr, qoB.record.losses], [false, -20, 0, 1005, 1], '39 항복한 연승자: −20 · 연승 0 · 1005 · 1패');
+  eq([qoA.youWon, qoA.mmrDelta, qoA.record.streak, qoA.record.mmr, qoA.record.wins], [true, 25, 1, 1005, 1], '39 상대: +25 · 연승 1 · 1005 · 1승');
+  eq([qoB.reason, qoA.reason], ['surrender', 'surrender'], '39 두 사람 모두 reason surrender');
+  ok(qA.code === qB.code, '39 같은 방');
+
+  // 40. 친선 비밀방: 항복해도 MMR · 전적 변동 없음, 상대에게 승리 결과만, 방은 끝난다
+  const C = await player(port, '친선A');
+  const E = await player(port, '친선B');
+  const pr = await C.call('create_private_room', {});
+  await E.call('join_private_room', pr.code);
+  await Promise.all([C.waitFor('match_found', (p) => p.code === pr.code), E.waitFor('match_found', (p) => p.code === pr.code)]);
+  const upPrivate = upserts();
+  const memC = mem(C);
+  await C.call('surrender');
+  const [pC, pE] = await Promise.all([C.waitFor('game_over', (p) => p.code === pr.code), E.waitFor('game_over', (p) => p.code === pr.code)]);
+  eq([pC.reason, pC.youWon, pC.ranked, pC.mmrDelta, pC.record?.mmr], ['surrender', false, false, undefined, 1000], '40 친선 항복자: 패배 · MMR 변동 없음 (ranked false)');
+  eq([pE.reason, pE.youWon, pE.ranked, pE.mmrDelta], ['surrender', true, false, undefined], '40 친선 상대: 승리 · MMR 변동 없음');
+  await sleep(60);
+  eq([mem(C), mem(E), upserts() - upPrivate], [memC, { w: 0, l: 0, s: 0, m: 1000 }, 0], '40 친선전은 전적도 DB 쓰기도 없다');
+  ok(!inChannel(C, pr.code) && !inChannel(E, pr.code), '40 방이 끝나 둘 다 방 채널에서 나갔다');
+  ok(['ROOM_FULL', 'ROOM_NOT_FOUND'].includes((await (await player(port, '늦은손님')).call('join_private_room', pr.code)).error), '40 끝난 친선방에는 다시 들어갈 수 없다');
+
+  // 41. 동시에 서로 항복 → 한 판은 한 번만 끝난다 (결과 한 번 · 한 명 승리 · 한 명 패배 · 정산 한 번)
+  const G = await player(port, '동시A');
+  const H = await player(port, '동시B');
+  const [mG] = await queueMatch(G, H);
+  const upSim = upserts();
+  const acks = await Promise.all([G.call('surrender'), H.call('surrender')]);
+  eq(acks.filter((a) => a.ok).length, 1, '41 동시 항복: 하나만 처리된다');
+  eq(acks.filter((a) => a.error === 'NOT_IN_GAME').length, 1, '41 나머지는 NOT_IN_GAME');
+  const [sG, sH] = await Promise.all([G.waitFor('game_over', (p) => p.code === mG.code), H.waitFor('game_over', (p) => p.code === mG.code)]);
+  eq([sG.youWon, sH.youWon].sort(), [false, true], '41 한 명 승리 · 한 명 패배');
+  eq([overs(G, mG.code).length, overs(H, mG.code).length], [1, 1], '41 결과 화면은 각자 한 번만');
+  await sleep(80);
+  eq([mem(G).m + mem(H).m, upserts() - upSim], [2005, 1], '41 정산은 한 번 (+25 −20)');
+
+  // 42. 상대가 끊겨 15초 유예 중일 때 항복 → 바로 끝, 끊긴 쪽이 이김 · 돌아오면 그 결과를 받는다 · 유예 타이머는 정리됨
+  const I = await player(port, '유예A');
+  const J = await player(port, '유예B');
+  const [mI, mJ] = await queueMatch(I, J);
+  J.socket.disconnect();
+  await I.waitFor('opponent_status', (p) => p.code === mI.code && p.connected === false);
+  await I.call('surrender');
+  const oI = await I.waitFor('game_over', (p) => p.code === mI.code);
+  eq([oI.youWon, oI.mmrDelta, oI.reason], [false, -20, 'surrender'], '42 유예 중에도 항복 즉시 정산');
+  const J2 = await client(port, { token: J.account.token });
+  eq(await J2.call('rejoin_room', { code: mJ.code, token: mJ.token }), { ok: true, over: true }, '42 끊겼던 쪽이 돌아오면 결과만');
+  const oJ = await J2.waitFor('game_over', (p) => p.code === mJ.code);
+  eq([oJ.youWon, oJ.mmrDelta, oJ.record.wins], [true, 25, 1], '42 끊겼던 쪽은 승리 · +25 로 기록돼 있다');
+  await sleep(60);
+  eq([mem(I).m, mem(J).m], [980, 1025], '42 정산은 한 번 (유예 타이머가 또 부전패를 만들지 않는다)');
+
+  await server.stop();
+}
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
@@ -804,6 +929,7 @@ try {
   await phase6();
   await phase7();
   await phase8();
+  await phase9();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

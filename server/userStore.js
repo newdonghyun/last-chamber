@@ -177,7 +177,7 @@ const duplicateOf = (err) => {
  *   saveDelayMs 바뀐 뒤 파일에 쓰기까지 모으는 시간
  *   authSecret  로그인 토큰 서명에 섞는 서버 비밀 (환경 변수 AUTH_SECRET)
  *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)        log(...)  상태 로그
- * → { signup, login, authenticate, rename, ready, get, recordResult, leaderboard, health, publicView, size, flush, close }
+ * → { signup, login, authenticate, rename, ready, get, recordResult, recordMatch, leaderboard, health, publicView, size, flush, close }
  */
 export function createUserStore({
   file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, authSecret = '',
@@ -516,6 +516,38 @@ export function createUserStore({
   }
 
   /**
+   * 한 판의 결과를 승자 · 패자 두 계정에 한꺼번에 기록한다 (랭킹전 정산 — 정상 종료 · 항복 · 부전승 모두) → { winner, loser } | null(모르는 유저 · 같은 계정)
+   * 메모리는 둘 다 한 번에(동기) 고치고, DB 는 두 행을 요청 하나(upsert 배열 = SQL 문 하나)로 써서 '승자만 올라가고 패자는 그대로인' 중간 상태가 남지 않게 한다.
+   * 두 계정의 앞선 쓰기가 모두 끝난 뒤에 쓰고, 그 쓰기가 끝나기 전에는 두 계정 모두 다음 쓰기를 기다린다 (계정별 쓰기 순서 유지).
+   */
+  function recordMatch(winnerId, loserId) {
+    const win = users.get(winnerId);
+    const lose = users.get(loserId);
+    if (!win || !lose || win === lose) return null;
+    applyResult(win, true);
+    applyResult(lose, false);
+    win.updatedAt = lose.updatedAt = now();
+    board.at = -Infinity; // 순위가 바뀌었을 수 있다
+    const mw = meta.get(winnerId);
+    const ml = meta.get(loserId);
+    if (client && mw && ml) {
+      const run = Promise.all([mw.chain, ml.chain]).then(async () => {
+        await dbReady;
+        check(await client.from(TABLE).upsert([toRow(win), toRow(lose)], { onConflict: 'user_id' }), `players upsert(${win.nickname} · ${lose.nickname})`);
+        markDb(null);
+        board.at = -Infinity; // 바뀐 전적이 랭킹에 바로 보이게
+      }).catch((err) => { markDb(err); onError(err); });
+      mw.chain = ml.chain = run;
+      inflight.add(run);
+      run.finally(() => inflight.delete(run));
+    } else {
+      for (const [m, rec] of [[mw, win], [ml, lose]]) if (m) queue(m, () => upsert(rec));
+    }
+    markDirty();
+    return { winner: win, loser: lose };
+  }
+
+  /**
    * mmr 내림차순 상위 limit 명 (기록 객체 — id 포함, 밖으로 보낼 때는 publicView). DB 가 안 되면 메모리 캐시로.
    * 계정이고 랭킹전을 1판 이상 둔 유저(wins + losses > 0)만 — 로비에만 들렀다 간 계정(1000점) · 예전 행이 순위를 채우지 않게.
    */
@@ -561,6 +593,7 @@ export function createUserStore({
     ready: (id) => meta.get(id)?.chain ?? Promise.resolve(), // 그 유저의 DB 쓰기가 지금까지 줄 선 것까지 다 끝날 때 (메모리 모드면 바로)
     get: (id) => users.get(id) ?? null,
     recordResult,
+    recordMatch,
     leaderboard,
     // /healthz — 어디에 저장 중인지 · 마지막 DB 작업 성공 여부 · 마지막 DB 오류 · 접속 중인 Supabase 주소(키 제외) · 계정 사용 가능 여부
     health: () => ({

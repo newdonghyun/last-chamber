@@ -37,6 +37,8 @@
  *   send_emote({ type: 'TAUNT', id, ... })        상대에게 그대로 중계 — 값이 문자열(32자)·숫자·불리언인 작은 평면 객체만, 0.5초에 1번
  *   rejoin_room({ code, token })                  연결이 끊겼다 돌아올 때 (match_found 로 받은 좌석 token 필요, 끊긴 뒤 15초 안에)
  *   leave_room()                                  방 나가기: 기다리는 방은 닫히고(공개 방이면 목록에서도 빠짐), 진행 중이면 항복(상대 승)
+ *   surrender()                                   진행 중인 판에서 항복 → { ok: true } | NOT_IN_GAME.  두 사람 모두 game_over(reason 'surrender') — 항복자는 youWon false, 상대는 true.
+ *                                                 랭킹전(공개 방 · 빠른 매칭): 항복자 −20 MMR · 패배 +1 · 연승 0, 상대 +25 MMR · 승리 +1 · 연승 +1 을 서버가 한 번에 기록.  친선 비밀방: 기록 없음.
  *
  *   ── 서버 → 클라이언트 ──
  *   ※ 인게임 이벤트는 모두 그 방 좌석의 소켓에게만 간다 (io.emit · socket.broadcast 없음). 모두 방 코드(code)를 싣는다 — 자기 방 코드가 아니면 버릴 것.
@@ -45,7 +47,7 @@
  *   match_found   { code, mode: 'public'|'queue'|'private', ranked, tier, fee, prize, you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
  *   state_update  { code, reason: 'start'|'shoot'|'item'|'timeout'|'rejoin', by?, auto?, state, logFrom, events, deadline, now, opponentConnected }
  *                 state = getPublicState(내 좌석) · events = getLog(내 좌석, logFrom) (rejoin 은 logFrom 0 부터 전체) · deadline = 이 턴이 자동 격발되는 서버 시각(ms) · now = 서버 현재 시각(시계 보정용)
- *   game_over     { code, mode, ranked, tier, fee, prize, winner, youWon, reason: 'normal'|'forfeit', payout, score: { you, opponent }, players: { P1: { mmr }, P2: { mmr } }, record?, mmrDelta? (랭킹전에서 기록된 내 MMR 변동) }
+ *   game_over     { code, mode, ranked, tier, fee, prize, winner, youWon, reason: 'normal'|'forfeit'|'surrender', payout, score: { you, opponent }, players: { P1: { mmr }, P2: { mmr } }, record?, mmrDelta? (랭킹전에서 기록된 내 MMR 변동) }
  *                 record = { nickname, wins, losses, games, streak, maxStreak, mmr } — 받는 사람의 계정 서버 전적 (이번 판까지 반영)
  *   opponent_status { code, connected: false, graceMs, until } | { code, connected: true }     receive_emote (보낸 객체 + code)     room_closed { code, reason }     session_replaced { code }
  *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
@@ -358,6 +360,7 @@ export function createGameServer(options = {}) {
     join_private_room: needUser(rooms.joinPrivateRoom),
     join_queue: needUser(matchmaker.joinQueue),
     leave_queue: matchmaker.leaveQueue,
+    surrender: rooms.surrender,
     leave_room: (socket) => (socket.data.where?.kind === 'queue' ? matchmaker.leaveQueue(socket) : rooms.leaveRoom(socket)), // 대기 중이면 대기열에서, 아니면 방에서
     rejoin_room: rooms.rejoinRoom,
     game_action: rooms.gameAction,

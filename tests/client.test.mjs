@@ -4,6 +4,7 @@
 //   3. 세션(UserSession): 서버가 준 토큰으로 로그인 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(아이디는 기본값으로) · 손님 · 예전(닉네임 · PIN) 세션 · 손상된 저장값
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 토큰도 손님 표시도 없으면 html.needs-login
 //   6. 계정 API(accountApi): 회원가입 · 로그인 → 이 기기에 저장 (비밀번호는 저장 안 함) · 형식 검사 · 오류 문구 · 토큰 만료 → 다시 로그인 · 닉네임 변경 · 아이디/비밀번호 규칙이 서버와 같다
+//   7. 인게임 [항복] / [나가기]: app.js 가 쓰는 요소가 index.html 에 모두 있다 · 확인 모달 · AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 · 온라인 항복은 서버 요청뿐
 //   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -281,6 +282,27 @@ function memoryStorage(initial = {}) {
   delete globalThis.window;
   eq([expired.ok, fresh.isLoggedIn, asked], [false, false, ['lastchamber:need-login']], '6 토큰이 거절되면 로그아웃하고 로그인 화면을 연다');
   eq(serverBase({ LAST_CHAMBER_SERVER: 'https://x.example/', location: { protocol: 'https:', origin: 'https://y' } }), 'https://x.example', '6 서버 주소: LAST_CHAMBER_SERVER 우선');
+}
+
+// ───────── 7. 인게임 [항복] / [나가기] (화면 · 연결 — 동작은 tests/pvp-guard.test.mjs · server.test.mjs Phase 9 · 브라우저 확인) ─────────
+{
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
+  const ids = [...app.matchAll(/\$\('([a-z0-9-]+)'\)/g)].map((m) => m[1]);
+  const missing = [...new Set(ids)].filter((id) => !html.includes(`id="${id}"`));
+  eq(missing, [], '7 app.js 가 찾는 요소 id 가 index.html 에 모두 있다 (항복 버튼 · 확인 모달 포함)');
+  ok(/id="btn-leave"[^>]*\bhidden\b/.test(html), '7 [항복]/[나가기] 버튼은 판이 아닐 때 숨김이 기본');
+  ok(/<dialog[^>]*id="leave-modal"/.test(html) && /data-leave="cancel"/.test(html) && /data-leave="confirm"/.test(html), '7 확인 모달: 취소 · 확인 두 버튼');
+
+  const fn = (name) => app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n`))?.[0] ?? '';
+  const leaveAi = fn('leaveAiGame');
+  ok(leaveAi.length > 200, '7 leaveAiGame 을 찾았다');
+  ok(!/record|spendBrass|earn|settle/i.test(leaveAi.replace(/\/\/.*$/gm, '')), '7 AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 (정산 함수를 부르지 않음)');
+  ok(/\+\+gameId/.test(leaveAi) && /stopTimer\(\)/.test(leaveAi), '7 AI 나가기는 진행 중인 연출 · 타이머를 끊는다');
+  const confirm = fn('confirmLeave');
+  ok(/pvpSurrender\(\)/.test(confirm) && !/profile\./.test(confirm), '7 온라인 항복은 서버에 요청만 한다 — 클라이언트가 전적 · MMR 을 직접 바꾸지 않는다');
+  ok(/if \(!online\)[\s\S]*leaveAiGame\(\)/.test(confirm), '7 AI 연습이면 서버 없이 바로 나간다');
+  ok(/recordedGame !== token/.test(app) && /pvpSettle\(won\)/.test(app), '7 온라인 결과 정산은 기존 endGame 한 곳 (판당 한 번)');
 }
 
 const ms = Math.round(performance.now() - T0);

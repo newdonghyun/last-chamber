@@ -30,6 +30,8 @@ class Node {
     this.frequency = new Param(440);
     this.Q = new Param(1);
     this.playbackRate = new Param(1);
+    for (const name of ['threshold', 'knee', 'ratio', 'attack', 'release']) this[name] = new Param(0); // DynamicsCompressorNode
+    this.curve = null; // WaveShaperNode
     ctx.nodes.push(this);
   }
   connect(to) { return to; }
@@ -53,6 +55,8 @@ class FakeAudioContext {
   createOscillator() { return new Node(this, 'osc'); }
   createBufferSource() { return new Node(this, 'source'); }
   createBiquadFilter() { return new Node(this, 'filter'); }
+  createWaveShaper() { return new Node(this, 'shaper'); }
+  createDynamicsCompressor() { return new Node(this, 'compressor'); }
   createBuffer(_ch, length, rate) { return { duration: length / rate, getChannelData: () => new Float32Array(length) }; }
   suspend() { this.calls.push('suspend'); if (this.state !== 'closed') this.state = 'suspended'; return Promise.resolve(); }
   resume() {

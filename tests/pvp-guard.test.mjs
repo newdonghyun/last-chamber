@@ -1,6 +1,7 @@
 // PvP 수신 가드 검증 (브라우저 없음 · 가짜 소켓): node tests/pvp-guard.test.mjs
 //   pvpSession.js 는 인게임 이벤트(state_update · game_over · opponent_status · receive_emote · match_found · room_closed · session_replaced)를
 //   ① 지금 세션이고 ② 닫히지 않았고 ③ 이벤트의 방 코드가 내 방과 같을 때만 처리한다 — 다른 방 · 코드 없는 · 끝난 판의 이벤트는 화면 갱신 · 도발 · 알림 없이 버린다.
+//   pvpSurrender(): 항복 요청은 서버에 surrender 로만 보낸다 — 승패는 서버의 game_over(reason 'surrender')로만 정해지고, 끝난 판 · 연결 없음 · 시간 초과는 판을 건드리지 않는다.
 const T0 = performance.now();
 let pass = 0;
 const fails = [];
@@ -10,15 +11,16 @@ const eq = (got, want, name) => ok(JSON.stringify(got) === JSON.stringify(want),
 // pvpSession 이 쓰는 브라우저 전역만 흉내 (window · document 이벤트)
 globalThis.window = new EventTarget();
 globalThis.document = new EventTarget();
-const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine } = await import('../src/ui/pvpSession.js');
+const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine, pvpSurrender } = await import('../src/ui/pvpSession.js');
 
 class FakeSocket {
   handlers = new Map();
   connected = true;
   sent = [];
+  acks = []; // emit 에 넘긴 ack 콜백 (테스트가 서버 답을 흉내 낸다)
   on(event, fn) { if (!this.handlers.has(event)) this.handlers.set(event, new Set()); this.handlers.get(event).add(fn); return this; }
   off(event, fn) { this.handlers.get(event)?.delete(fn); return this; }
-  emit(event, ...args) { this.sent.push(event); return this; }
+  emit(event, ...args) { this.sent.push(event); if (typeof args.at(-1) === 'function') this.acks.push(args.at(-1)); return this; }
   timeout() { return this; }
   connect() {}
   disconnect() { this.connected = false; this.fire('disconnect', 'io client disconnect'); }
@@ -95,6 +97,41 @@ sock2.fire('state_update', state(MY));
 eq([calls.start, pvpMode()], [before.start, 'friendly'], '7 새 판(친선전)에는 지난 판 · 다른 방 이벤트가 섞이지 않는다');
 sock2.fire('state_update', state('NEW1'));
 eq(calls.start, before.start + 1, '7 새 판의 내 방 이벤트만 판을 연다');
+pvpEnd();
+
+// 항복: 서버에 surrender 만 보낸다 — ack 는 접수 여부일 뿐, 승패는 game_over 로만
+const sock3 = new FakeSocket();
+window.dispatchEvent(new CustomEvent('pvp:start', { detail: { match: { code: 'SUR1', mode: 'public', ranked: true, tier: 'free', fee: 0, prize: 0, you: 'P1', token: 'v', opponent: { id: 'P2', profile: {} } }, socket: sock3 } }));
+sock3.fire('state_update', state('SUR1'));
+const pending = pvpSurrender();
+eq(sock3.sent.filter((e) => e === 'surrender').length, 1, '8 항복 → 서버에 surrender 한 번');
+sock3.acks.at(-1)(null, { ok: true });
+eq(await pending, { ok: true }, '8 서버가 받아들이면 { ok: true }');
+eq(pvpOver(), null, '8 ack 만으로는 판이 끝나지 않는다 (승패는 서버의 game_over 로만)');
+sock3.fire('game_over', { code: 'OTHR', youWon: true, reason: 'surrender' });
+eq(pvpOver(), null, '8 다른 방의 항복 결과는 내 판을 끝내지 않는다');
+sock3.fire('game_over', { code: 'SUR1', youWon: false, payout: 0, reason: 'surrender', mmrDelta: -20, record: { wins: 0, losses: 1, games: 1, streak: 0, maxStreak: 0, mmr: 980 } });
+eq([pvpOver()?.reason, pvpOver()?.youWon, pvpOver()?.mmrDelta, pvpOver()?.record?.mmr], ['surrender', false, -20, 980], '8 내 방 game_over(surrender) → 항복 패배 · 서버가 정산한 MMR 을 그대로 받는다');
+const sentBefore = sock3.sent.length;
+eq(await pvpSurrender(), { ok: false, error: 'NOT_IN_GAME' }, '8 이미 끝난 판에는 다시 항복하지 않는다');
+sock3.fire('game_over', { code: 'SUR1', youWon: true, reason: 'normal' });
+eq([pvpOver()?.reason, pvpOver()?.youWon, sock3.sent.length], ['surrender', false, sentBefore], '8 결과 화면은 한 번 — 늦게 온 두 번째 game_over 는 무시, 요청도 더 보내지 않는다');
+pvpEnd();
+eq(await pvpSurrender(), { ok: false, error: 'NOT_IN_GAME' }, '8 닫힌 세션에서는 NOT_IN_GAME');
+
+const sock4 = new FakeSocket();
+window.dispatchEvent(new CustomEvent('pvp:start', { detail: { match: { code: 'SUR2', mode: 'private', ranked: false, tier: 'free', fee: 0, prize: 0, you: 'P2', token: 'w', opponent: { id: 'P1', profile: {} } }, socket: sock4 } }));
+sock4.fire('state_update', state('SUR2'));
+sock4.connected = false;
+eq([await pvpSurrender(), sock4.sent.includes('surrender')], [{ ok: false, error: 'OFFLINE' }, false], '8 연결이 없으면 OFFLINE — 요청도 보내지 않는다');
+sock4.connected = true;
+const late = pvpSurrender();
+sock4.acks.at(-1)(new Error('operation has timed out'));
+eq(await late, { ok: false, error: 'TIMEOUT' }, '8 서버가 답하지 않으면 TIMEOUT');
+eq(pvpOver(), null, '8 TIMEOUT 이어도 판은 그대로 (결과는 서버만 정한다)');
+const again = pvpSurrender();
+sock4.acks.at(-1)(null, { ok: false, error: 'NOT_IN_GAME' });
+eq(await again, { ok: false, error: 'NOT_IN_GAME' }, '8 서버가 이미 끝난 판이라고 하면 그대로 전달 (동시 항복 · 상대가 먼저 끝냄)');
 pvpEnd();
 
 const ms = Math.round(performance.now() - T0);
