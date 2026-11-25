@@ -12,7 +12,8 @@
  *   · 프로필 · 코스메틱 · 이모트는 상대 화면에 그려지는 값이라 서버가 모양을 검사해 걸러서 넘긴다. 이벤트는 소켓당 초당 30개까지.
  *
  *   ── 계정 (HTTP · JSON) ── 오류: { ok: false, error } + HTTP 상태(API_STATUS)
- *   POST /api/signup { username, password, nickname }  회원가입 → { ok, token, user_id, username, nickname, me }   USERNAME_TAKEN · NICKNAME_TAKEN · INVALID_*
+ *   POST /api/signup { username, password, nickname? } 회원가입 → { ok, token, user_id, username, nickname, me }   USERNAME_TAKEN · NICKNAME_TAKEN · INVALID_*
+ *     nickname 을 빼면(또는 빈 값) 서버가 '붉은총잡이' 같은 느와르 닉네임을 중복 없이 붙여 돌려준다 — 나중에 /api/rename 으로 바꿀 수 있다 (server/nicknames.js)
  *   POST /api/login  { username, password }             로그인   → 같은 모양   BAD_CREDENTIALS(아이디가 없거나 비밀번호가 틀림) · LOGIN_LOCKED(5번 틀리면 15분)
  *   POST /api/rename { token, nickname }                닉네임 변경 (players 바로 UPDATE) → { ok, nickname, me }   NICKNAME_TAKEN · AUTH_REQUIRED
  *     token = 로그인 토큰(server/auth.js) — 클라이언트가 localStorage 에 두고 자동 로그인에 쓴다. 비밀번호는 해시로만 저장한다.
@@ -249,8 +250,10 @@ export function createGameServer(options = {}) {
     if (!username) return fail('INVALID_USERNAME');
     const password = cleanPassword(req.body?.password);
     if (!password) return fail('INVALID_PASSWORD');
-    const nickname = cleanNickname(req.body?.nickname);
-    if (!nickname) return fail('INVALID_NICKNAME');
+    const raw = req.body?.nickname;
+    const auto = raw === undefined || raw === null || raw === ''; // 닉네임을 안 보내면 서버가 느와르 닉네임을 붙인다 (5초 가입)
+    const nickname = auto ? null : cleanNickname(raw);
+    if (!auto && !nickname) return fail('INVALID_NICKNAME');
     const res = await users.signup({ username, password, nickname });
     if (!res.ok) return fail(res.error);
     log('회원가입', username);

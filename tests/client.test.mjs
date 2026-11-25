@@ -4,6 +4,7 @@
 //   3. 세션(UserSession): 서버가 준 토큰으로 로그인 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(아이디는 기본값으로) · 손님 · 예전(닉네임 · PIN) 세션 · 손상된 저장값
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 토큰도 손님 표시도 없으면 html.needs-login
 //   6. 계정 API(accountApi): 회원가입 · 로그인 → 이 기기에 저장 (비밀번호는 저장 안 함) · 형식 검사 · 오류 문구 · 토큰 만료 → 다시 로그인 · 닉네임 변경 · 아이디/비밀번호 규칙이 서버와 같다
+//   9. 5초 가입 · 첫 판 가이드 · 초대 링크 · 서버 깨우기: invite.js · wake.js · guide.js · signUp(닉네임 생략) · 화면 연결(index.html · multiplayer.js · app.js)
 //   8. 소리 출력 지점 감사: Web Audio 는 soundEngine.js 한 곳뿐 · <audio> · new Audio · 음성 합성 · 시스템 벨(\x07) 없음 · 앱의 소리 호출 가드(포커스 · 인게임 화면)
 //   7. 인게임 [항복] / [나가기]: app.js 가 쓰는 요소가 index.html 에 모두 있다 · 확인 모달 · AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 · 온라인 항복은 서버 요청뿐
 //   5. 모드별 정산(PlayerProfile): AI 딜러 = 연습 기록만 · 랭킹전 = 서버 기록으로 MMR · 전적 · 연승 · 친선전 = 탄피만 · 예전 저장값 옮기기
@@ -16,6 +17,9 @@ import { signUp, logIn, changeNickname, serverBase } from '../src/ui/accountApi.
 import { cleanUsername as serverUsername, cleanPassword as serverPassword } from '../server/auth.js';
 import { cleanNickname as serverNickname } from '../server/userStore.js';
 import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
+import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, captureInvite, INVITE_KEY, INVITE_TTL_MS } from '../src/ui/invite.js';
+import { retryUntil } from '../src/ui/wake.js';
+import { GuideState, GUIDE_KEY, GUIDED_TURN_MS, RULE_LINES, COACH_STEPS } from '../src/ui/guide.js';
 import { MMR_RULE as SERVER_MMR } from '../server/userStore.js';
 
 const T0 = performance.now();
@@ -332,6 +336,127 @@ function memoryStorage(initial = {}) {
   // 게임 전용 소리 호출은 가드(gameSfx · onGameScreen · gameSoundOk) 안에서만 — 직접 호출 줄 수를 고정해 새 호출이 가드 없이 늘어나는 것을 잡는다
   const direct = app.split('\n').filter((l) => /sound\.(playGunshot|playDamage|playHeartbeat)\(/.test(l) && !/gameSfx\(/.test(l)).length;
   eq(direct, 2, '8 가드 없이 직접 부르는 게임 전용 소리는 총성 · 피격 두 줄뿐 (둘 다 onGameScreen + 포커스 블록 안)');
+}
+
+// ───────── 9. 5초 가입 · 첫 판 가이드 · 초대 링크 · 서버 깨우기 ─────────
+{
+  const store = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), map: m }; };
+
+  // 초대 링크 (invite.js)
+  eq([parseInviteCode('?room=a7k9'), parseInviteCode('?x=1&room=Q2WE'), parseInviteCode('?room=A7K0'), parseInviteCode('?room=ABC'), parseInviteCode('?room=<script>'), parseInviteCode(undefined), parseInviteCode('')],
+    ['A7K9', 'Q2WE', null, null, null, null, null], '9 ?room= 코드: 소문자는 대문자로 · 모양이 틀리면(0 · 짧음 · 태그) 무시');
+  eq([buildInviteLink('a7k9', 'https://last-chamber-aaz9.onrender.com'), buildInviteLink('A7K9', 'https://x.example/'), buildInviteLink('zzzz0', 'https://x.example'), buildInviteLink(undefined, 'https://x.example')],
+    ['https://last-chamber-aaz9.onrender.com/?room=A7K9', 'https://x.example/?room=A7K9', '', ''], '9 초대 링크 = <서버 주소>/?room=코드 (끝의 / 중복 없음 · 잘못된 코드는 빈 값)');
+  {
+    const st = store();
+    eq([rememberInvite('A7K9', st, 1000), peekInvite(st, 1000 + 60_000), peekInvite(st, 1000 + INVITE_TTL_MS - 1)], [true, 'A7K9', 'A7K9'], '9 보관한 초대 코드는 15분 안에는 그대로');
+    eq([peekInvite(st, 1000 + INVITE_TTL_MS), st.getItem(INVITE_KEY)], [null, null], '9 15분이 지나면 버린다 (방도 10분이면 닫힌다)');
+    rememberInvite('Q2WE', st, 5);
+    clearInvite(st);
+    eq([peekInvite(st, 6), rememberInvite('bad', st, 1)], [null, false], '9 쓴 뒤에는 지운다 · 잘못된 코드는 보관하지 않는다');
+    st.setItem(INVITE_KEY, '{깨진 값');
+    eq(peekInvite(st, 1), null, '9 깨진 저장값은 무시');
+    const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); }, removeItem: () => { throw new Error('blocked'); } };
+    eq([rememberInvite('A7K9', broken), peekInvite(broken)], [false, null], '9 저장소를 못 쓰는 환경에서도 던지지 않는다');
+  }
+  {
+    const st = store();
+    const replaced = [];
+    const win = { location: { search: '?room=q2we&ref=kakao', href: 'https://h.example/play?room=q2we&ref=kakao#top' }, history: { state: null, replaceState: (...a) => replaced.push(a[2]) } };
+    eq([captureInvite({ win, storage: st, now: 10 }), replaced], ['Q2WE', ['/play?ref=kakao#top']], '9 링크로 들어오면 코드를 보관하고 주소창에서 room 만 지운다 (새로고침해도 다시 입장하지 않게)');
+    eq(captureInvite({ win: { location: { search: '', href: 'https://h.example/' }, history: {} }, storage: st, now: 20 }), 'Q2WE', '9 주소에 코드가 없어도 보관 중인 코드는 가입이 끝날 때까지 남는다');
+  }
+
+  // 서버 깨우기 재시도 (wake.js)
+  {
+    let t = 0;
+    const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+    const slows = [];
+    let tries = 0;
+    const got = await retryUntil(async (i) => { tries += 1; if (i < 3) throw new Error('CONNECT_FAILED'); return 'connected'; }, { ...clock, deadlineMs: 100_000, gapMs: 2000, slowMs: 4000, onSlow: () => slows.push(t) });
+    eq([got, tries, slows], ['connected', 4, [4000]], '9 서버가 깨어날 때까지 다시 시도하고, 4초가 지나면 "깨우는 중" 안내를 한 번만');
+    t = 0;
+    tries = 0;
+    let last = null;
+    try {
+      await retryUntil(async () => { tries += 1; throw new Error('CONNECT_FAILED'); }, { ...clock, deadlineMs: 10_000, gapMs: 2000 });
+    } catch (err) { last = err.message; }
+    eq([last, tries], ['CONNECT_FAILED', 5], '9 마감(10초)이 지나면 마지막 오류로 포기 — 마감을 넘겨 시도하지 않는다');
+    tries = 0;
+    let cancelled = null;
+    try {
+      await retryUntil(async () => { tries += 1; throw new Error('CANCELLED'); }, { ...clock });
+    } catch (err) { cancelled = err.message; }
+    eq([cancelled, tries], ['CANCELLED', 1], '9 취소(로비를 닫음)는 다시 시도하지 않는다');
+    tries = 0;
+    let stopped = false;
+    try {
+      await retryUntil(async () => { tries += 1; throw new Error('CONNECT_FAILED'); }, { ...clock, shouldStop: () => tries >= 2 });
+    } catch { stopped = true; }
+    eq([stopped, tries], [true, 2], '9 shouldStop 이 참이 되면 바로 멈춘다');
+    const live = [];
+    const late = await retryUntil(() => new Promise((resolve) => { setTimeout(() => resolve('late'), 80); }), { slowMs: 20, onSlow: () => live.push('slow') });
+    eq([late, live], ['late', ['slow']], '9 시도 하나가 오래 걸려도(30초씩 걸리는 콜드스타트) 실패를 기다리지 않고 안내가 바로 뜬다');
+  }
+
+  // 첫 판 가이드 (guide.js)
+  {
+    const st = store();
+    const g = new GuideState({ storage: st });
+    eq([g.shouldShowRuleCard, g.shouldCoach({ online: false }), g.shouldCoach({ online: true })], [true, true, false], '9 처음: 3줄 룰 카드 · 코치마크 대상 (온라인 판은 코치마크 없음)');
+    g.markRuleCard();
+    const g2 = new GuideState({ storage: st });
+    eq([g2.shouldShowRuleCard, g2.shouldCoach()], [false, true], '9 룰 카드는 한 번 보여 주면 기록 (코치마크는 아직)');
+    g2.markCoachDone();
+    const g3 = new GuideState({ storage: st });
+    eq([g3.shouldShowRuleCard, g3.shouldCoach(), JSON.parse(st.getItem(GUIDE_KEY))], [false, false, { ruleCard: true, coach: true }], '9 코치마크를 마치면 2번째 판부터 모두 생략');
+    const veteran = new GuideState({ storage: store(), hadPlayed: true });
+    eq([veteran.shouldShowRuleCard, veteran.shouldCoach()], [false, false], '9 이미 게임을 해 본 유저에게는 뜨지 않는다');
+    const bad = store();
+    bad.setItem(GUIDE_KEY, '{"ruleCard":"예"}');
+    eq(new GuideState({ storage: bad }).shouldCoach(), true, '9 깨진 기록은 처음부터');
+    const blocked = { getItem: () => { throw new Error('x'); }, setItem: () => { throw new Error('x'); } };
+    const gb = new GuideState({ storage: blocked });
+    gb.markRuleCard();
+    gb.markCoachDone();
+    eq(gb.shouldCoach(), false, '9 저장소가 막혀도 던지지 않는다 (이번 접속 안에서는 기억)');
+    eq([GUIDED_TURN_MS > 20_000, RULE_LINES.length, COACH_STEPS.map((s) => s.target)], [true, 3, ['shells', 'trigger-panel', 'player-items', 'player-hp']], '9 첫 판 턴 제한은 보통(20초)보다 길다 · 3줄 룰 · 코치마크 4단계(잔탄 · 격발 · 아이템 · 체력)');
+  }
+
+  // 닉네임 없는 가입 (accountApi.signUp)
+  {
+    const sent = [];
+    const fetchImpl = async (url, init) => { sent.push({ url, body: JSON.parse(init.body) }); return { ok: true, status: 200, json: async () => ({ ok: true, token: `t1.00000000-0000-4000-8000-000000000000.1800000000.${'c'.repeat(43)}`, user_id: '00000000-0000-4000-8000-000000000000', username: 'quick5', nickname: '붉은총잡이', me: null }) }; };
+    const session = new UserSession({ storage: store() });
+    const res = await signUp({ username: 'quick5', password: 'secret12' }, { session, base: 'http://srv', fetchImpl });
+    eq([res.ok, sent[0].body, res.user?.nickname, session.isLoggedIn], [true, { username: 'quick5', password: 'secret12' }, '붉은총잡이', true], '9 아이디 · 비밀번호만 보낸다 (닉네임은 서버가 붙여 주고, 가입 즉시 로그인 상태)');
+    const explicit = await signUp({ username: 'quick6', password: 'secret12', nickname: '직접정함' }, { session: new UserSession({ storage: store() }), base: 'http://srv', fetchImpl });
+    eq([explicit.ok, sent[1].body.nickname], [true, '직접정함'], '9 닉네임을 주면 그대로 보낸다 (기존 호출 호환)');
+    const before = sent.length;
+    const bad = await signUp({ username: 'quick7', password: 'secret12', nickname: 'a' }, { session: new UserSession({ storage: store() }), base: 'http://srv', fetchImpl });
+    eq([bad.ok, bad.error, sent.length], [false, 'INVALID_NICKNAME', before], '9 잘못된 닉네임을 직접 주면 요청 전에 거절');
+  }
+
+  // 화면 연결 (정적 점검)
+  {
+    const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const gateHtml = html.slice(html.indexOf('id="login-modal"'), html.indexOf('id="account-modal"'));
+    ok(/id="tab-signup"[^>]*aria-selected="true"/.test(gateHtml) && /id="tab-login"[^>]*aria-selected="false"/.test(gateHtml) && /id="login-form"[^>]*data-mode="signup"/.test(gateHtml), '9 처음 열리는 탭은 회원가입');
+    ok(!/id="login-pass2"|id="login-nick"|login-signup-fields/.test(gateHtml), '9 가입 입력칸은 아이디 · 비밀번호 두 칸뿐 (확인 · 닉네임 칸 없음)');
+    ok(/id="login-eye"[^>]*aria-pressed="false"/.test(gateHtml) && /id="login-eye-icon"/.test(gateHtml) && /id="i-eye"/.test(html) && /id="i-eye-off"/.test(html), '9 비밀번호 보기 / 숨기기 눈 아이콘 토글');
+    ok(/id="login-guest"[^>]*>[^<]*AI 맛보기/.test(gateHtml), '9 하단 버튼은 "로그인 없이 AI 맛보기"');
+    ok(/id="trigger-panel"/.test(html) && /id="first-rules"/.test(html) && /<dialog[^>]*id="coach"/.test(html), '9 3줄 룰 카드 · 코치마크 요소와 짚을 대상(#trigger-panel)이 있다');
+    for (const step of COACH_STEPS) ok(html.includes(`id="${step.target}"`), `9 코치마크 대상 #${step.target} 가 index.html 에 있다`);
+    const lobby = readFileSync(new URL('../src/ui/multiplayer.js', import.meta.url), 'utf8');
+    ok(/CONNECT_TIMEOUT_MS = 30_000/.test(lobby) && /retryUntil\(/.test(lobby) && /서버를 깨우는 중입니다/.test(lobby), '9 소켓 연결 제한 30초 · 재시도 · "서버를 깨우는 중입니다" 안내');
+    ok(/case 'copy-invite'/.test(lobby) && /buildInviteLink\(/.test(lobby) && /data-act="copy-invite"/.test(lobby), '9 친선방에 [초대 링크 복사]');
+    ok(/lastchamber:signed-in/.test(lobby) && /function joinInvite\(\)[\s\S]*?joinFriendlyRoom\(code\)/.test(lobby) && /captureInvite\(\);\s*\n?if \(peekInvite\(\) && loggedIn\(\)\)/.test(lobby), '9 가입 직후(또는 이미 로그인한 접속)에 보관한 코드로 비밀방에 자동 입장');
+    const gate = readFileSync(new URL('../src/ui/loginGate.js', import.meta.url), 'utf8');
+    ok(/lastchamber:signed-in/.test(gate) && !/nickname: gate\.nick/.test(gate) && /signUp\(\{ username: gate\.user\.value, password: gate\.pass\.value \}\)/.test(gate), '9 가입은 아이디 · 비밀번호만 보내고, 성공하면 signed-in 이벤트를 낸다');
+    const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
+    ok(/const turnLimit = \(\) => \(online \? TURN_MS : guidedGame \? GUIDED_TURN_MS : TURN_MS\)/.test(app) && /el\.coach\.open/.test(app), '9 첫 AI 판만 턴 제한이 길고, 코치마크가 열려 있는 동안 시간이 멈춘다 (온라인은 서버의 20초 그대로)');
+    ok(/guide\.shouldCoach\(\{ online \}\) && !coaching/.test(app) && /guide\.markCoachDone\(\)/.test(app) && /guide\.markRuleCard\(\)/.test(app), '9 코치마크는 첫 AI 판 내 첫 턴에 한 번 · 끝(건너뛰기 포함)이면 기록');
+  }
 }
 
 const ms = Math.round(performance.now() - T0);

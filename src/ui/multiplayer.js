@@ -23,6 +23,12 @@
  * ── 서버 주소 ──  window.LAST_CHAMBER_SERVER → 없으면 페이지를 서빙한 서버(location.origin) → file:// 같은 비 http 에서는 Render 서버(DEFAULT_SERVER).
  *   Socket.io 클라이언트는 서버가 주는 /socket.io/socket.io.js 를 처음 필요할 때 불러온다 → 서버가 꺼져 있어도 AI 딜러 대전은 영향이 없다.
  *
+ * ── 잠든 서버 깨우기 ──  무료 호스팅은 한동안 접속이 없으면 서버가 잠들고 첫 연결에 30~60초가 걸린다. 연결 시도 하나는 30초까지 기다리고,
+ *   실패하면 정해진 시간(WAKE_DEADLINE_MS) 안에서 다시 시도한다 (src/ui/wake.js). 그동안 '서버를 깨우는 중입니다…' 안내가 뜬다 — 바로 에러로 접지 않는다.
+ *
+ * ── 초대 링크 (src/ui/invite.js) ──  친선 방을 만들면 [초대 링크 복사] → '<서버 주소>/?room=코드'. 링크로 들어온 사람은 가입(또는 로그인)을 마치는 즉시
+ *   그 비밀방에 자동 입장한다 (이미 로그인한 사람은 접속하자마자). 코드는 가입하는 동안 저장소에 보관되고, 방이 없으면 일반 오류 문구가 뜬다.
+ *
  * ── 로그인 (src/ui/session.js) ──
  *   소켓을 열 때 handshake auth 로 { token } (로그인 토큰)을 보낸다 → 서버가 확인해 이 소켓을 그 계정으로 기록한다
  *   (auth 는 함수라서 pvpSession 의 자동 재연결 때도 다시 간다). 연결 직후 register_player { token } → 내 전적 + TOP 10.
@@ -32,11 +38,17 @@
 import { PlayerProfile, getTitle, MMR as RANKED_MMR } from './storeData.js';
 import { userSession } from './session.js';
 import { requireLogin } from './accountApi.js';
+import { retryUntil } from './wake.js';
+import { captureInvite, peekInvite, clearInvite, buildInviteLink } from './invite.js';
 
 const START_BUTTON_ID = 'btn-start';
 // 예비 주소 — 보통은 serverConfig.js 가 먼저 window.LAST_CHAMBER_SERVER 를 정한다 (웹 = 지금 도메인 · 앱 = 같은 Render 주소). localhost 로 고정하지 않는다
 const DEFAULT_SERVER = 'https://last-chamber-aaz9.onrender.com';
-const CONNECT_TIMEOUT_MS = 6000;
+const CONNECT_TIMEOUT_MS = 30_000; // 연결 시도 하나가 기다리는 시간 — 잠든 서버가 깨어나는 동안 (예전 6초는 콜드스타트보다 짧아 에러로 끝났다)
+const WAKE_DEADLINE_MS = 100_000; // 이 안에서는 실패해도 다시 시도한다
+const WAKE_RETRY_GAP_MS = 2000;
+const WAKE_SLOW_MS = 4000; // 이만큼 지나도 연결이 안 되면 '서버를 깨우는 중입니다…' 안내
+const WAKE_TEXT = '서버를 깨우는 중입니다… (잠들어 있었다면 최대 1분쯤 걸려요)';
 const ACK_TIMEOUT_MS = 8000;
 const CODE_LENGTH = 4;
 const COPY_RESET_MS = 1800;
@@ -200,10 +212,13 @@ dialog.innerHTML = `
     <div class="mp-view mp-wait" data-ui="room" hidden>
       <p class="mp-wait-label">친구에게 이 코드를 알려 주세요</p>
       <p class="mp-room-code" data-ui="room-code">----</p>
+      <button class="mp-btn mp-btn--copy" type="button" data-act="copy-invite" data-ui="copy-invite">
+        <span class="mp-btn-main" data-ui="copy-invite-label">초대 링크 복사</span>
+      </button>
       <button class="mp-btn mp-btn--copy" type="button" data-act="copy" data-ui="copy">
         <span class="mp-btn-main" data-ui="copy-label">코드 복사</span>
       </button>
-      <p class="mp-wait-note"><span class="mp-pulse" aria-hidden="true"></span>친구가 코드로 입장하면 바로 친선전이 시작됩니다 (랭킹 MMR 미반영)</p>
+      <p class="mp-wait-note"><span class="mp-pulse" aria-hidden="true"></span>친구가 링크를 열거나 코드로 입장하면 바로 친선전이 시작됩니다 (랭킹 MMR 미반영)</p>
       <button class="mp-btn mp-btn--ghost" type="button" data-act="cancel"><span class="mp-btn-main">방 닫기</span></button>
     </div>
 
@@ -248,6 +263,8 @@ const ui = {
   roomCode: q('room-code'),
   copyBtn: q('copy'),
   copyLabel: q('copy-label'),
+  inviteBtn: q('copy-invite'),
+  inviteLabel: q('copy-invite-label'),
   queueName: q('queue-name'),
   queueMeta: q('queue-meta'),
   elapsed: q('elapsed'),
@@ -424,6 +441,8 @@ function resetUi() {
   ui.codeInput.value = '';
   ui.copyLabel.textContent = '코드 복사';
   ui.copyBtn.classList.remove('is-done');
+  ui.inviteLabel.textContent = '초대 링크 복사';
+  ui.inviteBtn.classList.remove('is-done');
   lastRooms = [];
   paintMe();
   paintAccess();
@@ -547,14 +566,30 @@ function ensureSocket() {
 }
 
 async function connectSocket(mine) {
-  let io;
-  try {
-    io = await loadSocketIoClient(serverUrl());
-  } catch {
-    throw new Error('CONNECT_FAILED');
-  }
-  if (mine !== session) throw new Error('CANCELLED');
-  const s = await openSocket(io, mine);
+  let woke = false;
+  const s = await retryUntil(async () => { // 소켓 클라이언트 스크립트도 서버가 내려 주므로 잠든 서버에서는 이것부터 실패할 수 있다 — 둘을 한 시도로 묶어 다시 시도
+    let io;
+    try {
+      io = await loadSocketIoClient(serverUrl());
+    } catch {
+      throw new Error('CONNECT_FAILED');
+    }
+    if (mine !== session) throw new Error('CANCELLED');
+    return openSocket(io, mine);
+  }, {
+    deadlineMs: WAKE_DEADLINE_MS,
+    gapMs: WAKE_RETRY_GAP_MS,
+    slowMs: WAKE_SLOW_MS,
+    shouldStop: () => mine !== session, // 로비를 닫았으면 더 시도하지 않는다
+    onSlow: () => {
+      if (mine !== session) return;
+      woke = true;
+      say(WAKE_TEXT);
+      ui.roomsNote.textContent = WAKE_TEXT;
+      ui.boardNote.textContent = WAKE_TEXT;
+    },
+  });
+  if (woke && mine === session) say(''); // 깨어났다 — 안내를 거둔다 (이어지는 동작이 자기 문구를 쓴다)
   sock = s;
   s.on('match_found', onMatchFound);
   s.on('room_closed', onRoomClosed);
@@ -642,6 +677,31 @@ function onDisconnect(reason) {
 
 // ───────── 동작 ─────────
 
+/** 로비를 연다 (이미 열려 있으면 그대로) — PLAY 가로채기 · 가입 직후 · 초대 입장이 같이 쓴다 */
+function openLobby() {
+  if (dialog.open) return;
+  resetUi();
+  dialog.showModal();
+  refreshLobby();
+}
+
+/** 보관해 둔 초대 코드가 있으면 곧바로 그 친선 비밀방에 입장한다 (로그인한 상태에서만 — 코드는 한 번만 쓴다) */
+function joinInvite() {
+  const code = peekInvite();
+  if (!code || !loggedIn()) return false;
+  clearInvite();
+  openLobby();
+  if (phase === 'menu') joinFriendlyRoom(code);
+  return true;
+}
+
+/** 가입 · 로그인 직후 (loginGate.js): 초대 링크가 있으면 그 방으로, 새로 가입했다면 로비로 */
+window.addEventListener('lastchamber:signed-in', (e) => {
+  if (!loggedIn()) return;
+  if (joinInvite()) return;
+  if (e?.detail?.created) openLobby();
+});
+
 /** 온라인 대전은 로그인한 계정만 — 손님이면 로그인 화면을 부르고 false */
 function needLogin() {
   if (loggedIn()) return false;
@@ -725,9 +785,11 @@ function createFriendlyRoom() {
     ui.roomCode.textContent = res.code;
     ui.copyLabel.textContent = '코드 복사';
     ui.copyBtn.classList.remove('is-done');
+    ui.inviteLabel.textContent = '초대 링크 복사';
+    ui.inviteBtn.classList.remove('is-done');
     setPhase('room');
     say('');
-    ui.copyBtn.focus();
+    ui.inviteBtn.focus(); // 친구에게 보내는 가장 쉬운 방법이 링크 — 먼저 눌리게
   });
 }
 
@@ -804,6 +866,18 @@ async function copyText(text) {
   return ok;
 }
 
+async function onCopyInvite() {
+  const link = buildInviteLink(ui.roomCode.textContent.trim(), serverUrl());
+  const ok = link !== '' && (await copyText(link));
+  ui.inviteLabel.textContent = ok ? '초대 링크 복사됨 ✓' : '복사 실패 · 코드를 직접 알려 주세요';
+  ui.inviteBtn.classList.toggle('is-done', ok);
+  clearTimeout(copyTimer);
+  copyTimer = setTimeout(() => {
+    ui.inviteLabel.textContent = '초대 링크 복사';
+    ui.inviteBtn.classList.remove('is-done');
+  }, COPY_RESET_MS);
+}
+
 async function onCopy() {
   const ok = await copyText(ui.roomCode.textContent.trim());
   ui.copyLabel.textContent = ok ? '복사됨 ✓' : '복사 실패 · 코드를 직접 알려 주세요';
@@ -829,6 +903,7 @@ dialog.addEventListener('click', (e) => {
     case 'join-public': joinPublicRoom(el.dataset.code); break;
     case 'create': createFriendlyRoom(); break;
     case 'copy': onCopy(); break;
+    case 'copy-invite': onCopyInvite(); break;
     case 'cancel': cancelWait(); break;
     case 'table': {
       const table = TABLES.find((t) => t.tier === el.dataset.tier);
@@ -882,10 +957,7 @@ document.addEventListener('click', (e) => {
     window.dispatchEvent(new CustomEvent('lastchamber:need-login'));
     return;
   }
-  if (dialog.open) return;
-  resetUi();
-  dialog.showModal();
-  refreshLobby();
+  openLobby();
 }, true);
 
 // 로그인 · 닉네임 변경 · 로그아웃: 로비의 내 이름 · 잠금을 바로 고치고, 연결 중이면 새 토큰으로 다시 확인한다. 로그아웃이면 로비를 닫는다(소켓도 정리)
@@ -900,3 +972,7 @@ userSession.subscribe((user) => {
   paintMe();
   paintAccess();
 });
+
+// 초대 링크로 접속했다: 주소의 ?room=코드 를 보관하고 주소창에서 지운다. 이미 로그인한 사람이면 곧바로 입장 (아니면 가입 · 로그인 직후 위의 signed-in 이벤트가 입장시킨다)
+captureInvite();
+if (peekInvite() && loggedIn()) setTimeout(joinInvite, 0);

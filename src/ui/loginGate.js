@@ -1,7 +1,10 @@
 /**
  * LAST CHAMBER - 시작 화면(로그인 · 회원가입 · 둘러보기) · 계정 창 — src/ui/session.js · src/ui/accountApi.js 의 화면
  *
- *   · 로그인 기록이 없으면 #login-modal 이 뜬다: [로그인] 아이디 · 비밀번호 / [회원가입] 아이디 · 비밀번호(확인) · 닉네임.
+ *   · 로그인 기록이 없으면 #login-modal 이 뜬다 — 처음 온 사람에게는 [회원가입]이 기본 탭: 아이디 · 비밀번호(눈 아이콘으로 보기) 딱 두 칸, 닉네임은 서버가 느와르 닉네임을 붙인다
+ *     (로비 · 계정 창에서 언제든 변경). 이 기기에서 로그인한 적 있는 사람(마지막 아이디가 남아 있음)에게는 [로그인]이 기본 탭.
+ *     가입에 성공하면 곧바로 로그인 상태가 되어 로비로 들어간다 (window 'lastchamber:signed-in' → multiplayer.js).
+ *     초대 링크(?room=코드)로 들어왔다면 가입 · 로그인 직후 그 친선 비밀방에 자동 입장한다 (src/ui/invite.js).
  *     성공하면 서버가 준 로그인 토큰을 session.js 가 localStorage 에 저장 → 다시 접속하면 이 화면 없이 바로 타이틀(자동 로그인).
  *     [로그인 없이 둘러보기] = 손님: AI 딜러 연습만 (로비의 온라인 대전은 잠겨 있고, 누르면 이 화면이 다시 뜬다).
  *     로그인 전에는 타이틀을 누를 수 없다 (모달 + html.needs-login 이 타이틀을 숨긴다).
@@ -14,11 +17,11 @@
  */
 
 import {
-  userSession, validateNickname, validateUsername, validatePassword, nicknameErrorText, attachNicknameFilter,
-  NICK_RULE, NICK_HINT, USERNAME_HINT, PASSWORD_HINT, SESSION_KEY,
+  userSession, validateUsername, validatePassword, nicknameErrorText, attachNicknameFilter,
+  NICK_RULE, NICK_HINT, SESSION_KEY,
 } from './session.js';
 import { logIn, signUp, changeNickname } from './accountApi.js';
-import { PlayerProfile, NICKNAME } from './storeData.js';
+import { captureInvite } from './invite.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -28,9 +31,9 @@ const gate = {
   tabs: [$('tab-login'), $('tab-signup')].filter(Boolean),
   user: $('login-user'),
   pass: $('login-pass'),
-  pass2: $('login-pass2'),
-  nick: $('login-nick'),
-  count: $('login-count'),
+  eye: $('login-eye'),
+  eyeIcon: $('login-eye-icon'),
+  invite: $('login-invite'),
   msg: $('login-msg'),
   submit: $('login-submit'),
   submitMain: $('login-submit-main'),
@@ -50,10 +53,9 @@ const acct = {
   logout: $('acct-logout'),
   confirm: $('acct-confirm'),
 };
-const legacy = new PlayerProfile(); // 이 업데이트 전부터 쓰던 프로필 닉네임 → 가입 화면 닉네임 칸의 기본값 (읽기만)
 const MODE = {
   login: { main: '로그인', sub: 'LOG IN', hint: '아이디와 비밀번호로 로그인하세요', pass: 'current-password' },
-  signup: { main: '회원가입', sub: 'SIGN UP', hint: `아이디: ${USERNAME_HINT} · 비밀번호: ${PASSWORD_HINT} · 닉네임: ${NICK_HINT}`, pass: 'new-password' },
+  signup: { main: '회원가입', sub: 'SIGN UP', hint: '아이디와 비밀번호만 정하면 바로 입장해요. 닉네임은 자동으로 만들어 드려요', pass: 'new-password' },
 };
 const SLOW_HINT_MS = 4000; // 서버가 잠들어 있으면 깨어나는 데 시간이 걸린다 → 이만큼 지나면 안내를 바꾼다
 
@@ -102,9 +104,9 @@ const recordText = (me) => (me && me.wins + me.losses > 0 ? ` — 랭킹전 ${me
 
 // ───────── 시작 화면: 로그인 · 회원가입 · 둘러보기 ─────────
 
-let mode = 'login';
+let mode = 'signup'; // 처음 온 사람은 회원가입이 기본
 function setMode(next, { focus = true } = {}) {
-  mode = next === 'signup' ? 'signup' : 'login';
+  mode = next === 'login' ? 'login' : 'signup';
   gate.form.dataset.mode = mode;
   for (const tab of gate.tabs) {
     const on = tab.dataset.mode === mode;
@@ -115,19 +117,24 @@ function setMode(next, { focus = true } = {}) {
   if (gate.submitMain) gate.submitMain.textContent = m.main;
   if (gate.submitSub) gate.submitSub.textContent = m.sub;
   gate.pass.autocomplete = m.pass;
-  gate.pass2.required = mode === 'signup';
-  gate.nick.required = mode === 'signup';
   note(gate.msg, m.hint);
   if (focus) (gate.user.value ? gate.pass : gate.user).focus();
 }
 
-/** 가입 화면 닉네임 기본값: 마지막 닉네임 → 예전 프로필 닉네임(기본 '방랑자'가 아니고 규칙에 맞을 때만) */
-function nicknameDefault() {
-  const last = userSession.lastNickname;
-  if (last) return last;
-  legacy.reload();
-  const old = legacy.nickname;
-  return old !== NICKNAME.default && validateNickname(old).ok ? old : '';
+/** 비밀번호 보기 / 숨기기 (눈 아이콘) */
+function setPasswordShown(on) {
+  gate.pass.type = on ? 'text' : 'password';
+  gate.eye?.setAttribute('aria-pressed', String(on));
+  gate.eye?.setAttribute('aria-label', on ? '비밀번호 숨기기' : '비밀번호 보기');
+  gate.eyeIcon?.setAttribute('href', on ? '#i-eye-off' : '#i-eye');
+}
+
+/** 초대 링크로 들어왔다면 안내 띠를 보인다 — 가입 · 로그인을 마치면 그 방에 바로 들어간다 */
+function paintInvite() {
+  if (!gate.invite) return;
+  const code = captureInvite();
+  gate.invite.hidden = !code;
+  if (code) gate.invite.textContent = `친구가 비밀방(${code})에 초대했어요 — 가입하면 바로 그 방에 입장해요`;
 }
 
 function openGate(message = '') {
@@ -136,11 +143,10 @@ function openGate(message = '') {
   if (!gate.modal.open) {
     gate.user.value = userSession.lastUsername ?? '';
     gate.pass.value = '';
-    gate.pass2.value = '';
-    gate.nick.value = nicknameDefault();
-    paintCount(gate.count, gate.nick.value);
-    setMode(userSession.lastUsername ? 'login' : mode, { focus: false });
+    setPasswordShown(false);
+    setMode(userSession.lastUsername ? 'login' : 'signup', { focus: false }); // 이 기기에서 쓰던 아이디가 있으면 로그인, 처음이면 회원가입
   }
+  paintInvite();
   if (message) note(gate.msg, message, 'bad');
   setNeedsLogin(true);
   openModal(gate.modal);
@@ -170,13 +176,10 @@ function precheck() {
   if (mode === 'login') return gate.pass.value ? null : { node: gate.pass, message: '비밀번호를 입력해 주세요' };
   const p = validatePassword(gate.pass.value);
   if (!p.ok) return { node: gate.pass, message: nicknameErrorText(p.reason) };
-  if (gate.pass2.value !== gate.pass.value) return { node: gate.pass2, message: '비밀번호 확인이 맞지 않아요' };
-  const n = validateNickname(gate.nick.value);
-  if (!n.ok) return { node: gate.nick, message: nicknameErrorText(n.reason) };
   return null;
 }
 
-const FOCUS_ON_ERROR = { USERNAME_TAKEN: 'user', INVALID_USERNAME: 'user', NICKNAME_TAKEN: 'nick', INVALID_NICKNAME: 'nick', BAD_CREDENTIALS: 'pass', INVALID_PASSWORD: 'pass' };
+const FOCUS_ON_ERROR = { USERNAME_TAKEN: 'user', INVALID_USERNAME: 'user', BAD_CREDENTIALS: 'pass', INVALID_PASSWORD: 'pass' };
 
 let gateBusy = false;
 async function onGateSubmit(ev) {
@@ -195,7 +198,7 @@ async function onGateSubmit(ev) {
   const signing = mode;
   const res = signing === 'login'
     ? await logIn({ username: gate.user.value, password: gate.pass.value })
-    : await signUp({ username: gate.user.value, password: gate.pass.value, nickname: gate.nick.value });
+    : await signUp({ username: gate.user.value, password: gate.pass.value }); // 닉네임은 보내지 않는다 — 서버가 느와르 닉네임을 붙인다
   clearTimeout(slow);
   gateBusy = false;
   setGateBusy(false);
@@ -208,15 +211,17 @@ async function onGateSubmit(ev) {
   }
   // 성공 → session.signIn 이 구독자(onSession)에게 알려 로그인 화면이 닫힌다
   gate.pass.value = '';
-  gate.pass2.value = '';
+  setPasswordShown(false);
   toast(signing === 'login'
     ? `${res.user.nickname}, 다시 오셨군요${recordText(res.me)}`
-    : `${res.user.nickname} 계정을 만들었어요 — 다른 기기에서도 같은 아이디로 이어서 플레이`);
+    : `${res.user.nickname} 닉네임으로 가입했어요 — 로비에서 언제든 바꿀 수 있어요`);
+  // 로그인 상태가 됐다 (화면은 이미 session 구독으로 닫혔다). 가입 직후 → 로비 · 초대 링크가 있으면 그 방으로 (multiplayer.js 가 이 이벤트를 듣는다)
+  window.dispatchEvent(new CustomEvent('lastchamber:signed-in', { detail: { created: signing === 'signup' } }));
 }
 
 function onGuest() {
   userSession.continueAsGuest(); // → onSession(null) · isGuest → 로그인 화면이 닫힌다
-  toast('둘러보기 — AI 딜러 연습만 할 수 있어요. 온라인 대전은 로그인 후에');
+  toast('AI 맛보기 — 연습만 할 수 있어요. 온라인 대전은 가입 후에');
 }
 
 // ───────── 계정 창 (닉네임 변경 · 로그아웃) ─────────
@@ -341,14 +346,15 @@ if (gate.modal && gate.form && gate.user && gate.pass) {
     if (lower !== gate.user.value) gate.user.value = lower; // 아이디는 소문자 · 공백 없이
     if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
   });
-  attachNicknameFilter(gate.nick, (value) => {
-    paintCount(gate.count, value);
-    if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
+  gate.pass.addEventListener('input', () => { if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint); });
+  gate.eye?.addEventListener('click', () => {
+    setPasswordShown(gate.pass.type === 'password');
+    gate.pass.focus();
   });
   gate.form.addEventListener('submit', onGateSubmit);
   gate.modal.addEventListener('cancel', (ev) => ev.preventDefault()); // Esc 로 건너뛸 수 없다 (둘러보기 버튼으로만)
   gate.guest?.addEventListener('click', onGuest);
-  setMode('login', { focus: false });
+  setMode(userSession.lastUsername ? 'login' : 'signup', { focus: false });
 }
 if (acct.modal && acct.form && acct.input) {
   attachNicknameFilter(acct.input, (value) => {

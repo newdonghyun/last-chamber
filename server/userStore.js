@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { hashPassword, verifyPassword, isPasswordHash, readToken, verifyToken, cleanUsername } from './auth.js';
+import { noirNickname } from './nicknames.js';
 
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
 const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
@@ -85,6 +86,7 @@ export const ACCOUNT_SQL = [
   'drop index if exists public.players_nickname_pin_key;',
   'alter table public.players drop column if exists pin_hash;',
 ].join('\n');
+const AUTO_NICK_TRIES = 4; // 자동 닉네임이 unique 인덱스에서 겹쳤을 때 다시 뽑는 최대 횟수
 const BOARD_CACHE_MS = 3000; // get_leaderboard 연타가 그대로 DB 로 가지 않게
 const ACCOUNT_RECHECK_MS = 30_000; // 계정 컬럼이 없을 때 가입 · 로그인 시도에서 다시 확인하는 최소 간격
 
@@ -395,34 +397,51 @@ export function createUserStore({
    * 회원가입 (아이디 · 비밀번호 · 닉네임은 이미 검사한 값) → { ok: true, user } | { ok: false, error }
    *   USERNAME_TAKEN · NICKNAME_TAKEN · ACCOUNT_SETUP_REQUIRED(DB 계정 컬럼 없음) · SERVER_BUSY(가득 참)
    */
-  async function signup({ username, password, nickname }) {
+  async function signup({ username, password, nickname = null }) {
     if (!(await ensureAccounts())) return { ok: false, error: 'ACCOUNT_SETUP_REQUIRED' };
+    const auto = nickname === null; // 닉네임을 비웠다 → 서버가 느와르 닉네임을 붙인다 (로비 · 계정 창에서 언제든 바꿀 수 있다)
     return serial(async () => {
       if (await usernameTaken(username)) return { ok: false, error: 'USERNAME_TAKEN' };
-      if (await nicknameTaken(nickname, null)) return { ok: false, error: 'NICKNAME_TAKEN' };
+      if (!auto && (await nicknameTaken(nickname, null))) return { ok: false, error: 'NICKNAME_TAKEN' };
       if (users.size >= maxUsers) return { ok: false, error: 'SERVER_BUSY' };
       const t = now();
-      const rec = {
-        id: randomUUID(), username, nickname, passwordHash: await hashPassword(password),
-        wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t,
-      };
-      if (client) {
-        try {
-          check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash }), `회원가입(${username})`);
-          markDb(null);
-        } catch (err) {
-          const dup = duplicateOf(err); // 그새 같은 아이디 · 닉네임이 생겼다 (unique 인덱스)
-          if (dup) return { ok: false, error: dup };
-          throw err;
+      const passwordHash = await hashPassword(password);
+      for (let attempt = 0; attempt < AUTO_NICK_TRIES; attempt += 1) { // 직접 정한 닉네임은 한 번, 자동 닉네임은 겹치면 다시 뽑아 최대 AUTO_NICK_TRIES 번
+        const name = auto ? await freshNickname(attempt) : nickname;
+        if (!name) return { ok: false, error: 'SERVER_BUSY' };
+        const rec = {
+          id: randomUUID(), username, nickname: name, passwordHash,
+          wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t,
+        };
+        if (client) {
+          try {
+            check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash }), `회원가입(${username})`);
+            markDb(null);
+          } catch (err) {
+            const dup = duplicateOf(err); // 그새 같은 아이디 · 닉네임이 생겼다 (unique 인덱스)
+            if (dup === 'NICKNAME_TAKEN' && auto) continue; // 자동 닉네임이 그 사이 다른 가입과 겹쳤다 → 다시 뽑는다
+            if (dup) return { ok: false, error: dup };
+            throw err;
+          }
+          meta.set(rec.id, loadedMeta());
         }
-        meta.set(rec.id, loadedMeta());
+        users.set(rec.id, rec);
+        index(rec);
+        board.at = -Infinity;
+        markDirty();
+        return { ok: true, user: rec };
       }
-      users.set(rec.id, rec);
-      index(rec);
-      board.at = -Infinity;
-      markDirty();
-      return { ok: true, user: rec };
+      return { ok: false, error: 'NICKNAME_TAKEN' };
     });
+  }
+
+  /** 아직 아무도 안 쓰는 느와르 닉네임 하나 (처음에는 숫자 없이, 겹치면 숫자를 붙여) — 못 찾으면 null */
+  async function freshNickname(round) {
+    for (let i = 0; i < 12; i += 1) {
+      const name = noirNickname(Math.random, { number: round > 0 || i >= 6 });
+      if (!(await nicknameTaken(name, null))) return name;
+    }
+    return null;
   }
 
   let dummyHash = null; // 없는 아이디도 같은 시간을 쓰게 (아이디가 있는지 응답 시간으로 알아내지 못하게)

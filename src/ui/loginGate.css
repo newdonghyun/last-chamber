@@ -87,16 +87,46 @@ html.needs-login .title-screen { visibility: hidden; } /* 로그인 전에는 �
 }
 .login-tab[aria-selected="true"] { color: #15110a; background: linear-gradient(180deg, var(--brass-hi), var(--brass)); box-shadow: 0 2px 8px rgba(0, 0, 0, .5); }
 .login-tab:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 2px; }
-.login-signup-only { display: grid; gap: 10px; }
-.login-form[data-mode="login"] .login-signup-only { display: none; }
+/* 비밀번호 칸 + 눈 아이콘 (보기 / 숨기기) */
+.login-pass-wrap { position: relative; }
+.login-pass-wrap .login-input { padding-right: 52px; }
+.login-eye {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--ink-dim);
+  background: transparent;
+}
+.login-eye svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.login-eye[aria-pressed="true"] { color: var(--brass-hi); }
+.login-eye:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 0; }
+/* 초대 링크로 들어왔을 때의 안내 띠 */
+.login-invite {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font: 700 12.5px/1.45 var(--font-ui);
+  color: var(--brass-hi);
+  background: rgba(201, 163, 91, .1);
+  box-shadow: inset 0 0 0 1px rgba(201, 163, 91, .45);
+}
+.login-invite[hidden] { display: none; }
 /* 로그인 없이 둘러보기 (AI 딜러 연습만) */
 .login-guest {
-  min-height: 40px;
-  padding: 0 16px;
+  min-height: 34px;
+  padding: 0 14px;
   border: 0;
   border-radius: 999px;
   cursor: pointer;
-  font: 700 13px/1 var(--font-ui);
+  font: 700 12px/1 var(--font-ui);
   color: var(--ink-dim);
   background: transparent;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16);

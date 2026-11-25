@@ -7,6 +7,7 @@
 //   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
 //   Phase 7 (계정 보안): 비밀번호 오답 잠금 · 비밀번호 미노출 · 토큰 만료 · 위조 · CORS · 동시 가입 · IP 시도 제한
 //   Phase 8 (공개 방): 로비 목록 실시간 · 손님 제한 · 자기 방 · 잘못된 입장 · 클릭 입장 즉시 시작(랭킹전) · 목록에서 빠짐 · 방장 이탈/끊김
+//   Phase 10 (5초 가입): 닉네임을 비우면 서버가 느와르 닉네임을 중복 없이 붙인다 (메모리 · Supabase 흉내 — 흔한 이름이 모두 찼을 때는 숫자) · 직접 정한 닉네임 호환 · 닉네임 생성기 규칙
 //   Phase 9 (항복): 공개 방 · 빠른 매칭 항복 = 항복자 −20 · 상대 +25 를 DB 요청 하나로 정산 · 친선 비밀방은 기록 없음 · 중복 · 동시 항복 · 재접속 · 끊김 유예 중 항복 · 방 격리
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +17,8 @@ import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
 import { roomChannel } from '../server/roomManager.js';
+import { cleanNickname } from '../server/userStore.js';
+import { noirNickname, NOIR_ADJECTIVES, NOIR_NOUNS } from '../server/nicknames.js';
 import { hashPassword, issueToken, TOKEN_TTL_SEC } from '../server/auth.js';
 
 const T0 = performance.now();
@@ -664,6 +667,58 @@ async function phase9() {
   await server.stop();
 }
 
+// ───────── Phase 10: 5초 가입 (닉네임 자동 부여) ─────────
+async function phase10() {
+  // 43. 생성기: 모든 조합이 닉네임 규칙(2~10자 · 한글 · 공백 없음)을 통과한다
+  const bases = NOIR_ADJECTIVES.flatMap((a) => NOIR_NOUNS.map((n) => a + n));
+  ok(bases.length === NOIR_ADJECTIVES.length * NOIR_NOUNS.length && new Set(bases).size === bases.length, '43 형용사 × 명사 조합이 모두 다르다 (겹치는 말 없음)');
+  ok(bases.every((n) => cleanNickname(n) === n), `43 모든 기본 조합(${bases.length}개)이 닉네임 규칙을 통과`);
+  const numbered = Array.from({ length: 2000 }, () => noirNickname(Math.random, { number: true }));
+  ok(numbered.every((n) => cleanNickname(n) === n && [...n].length <= 10 && /\d{2}$/.test(n)), '43 숫자를 붙인 이름도 규칙 안 (최대 10자 · 두 자리 숫자)');
+  eq(noirNickname(() => 0), NOIR_ADJECTIVES[0] + NOIR_NOUNS[0], '43 난수를 고정하면 같은 이름 (결정적)');
+
+  // 44. 메모리 서버: 닉네임 없이 가입 → 서버가 붙인다
+  const server = createGameServer({ quiet: true, onError });
+  const port = await server.start(0, '127.0.0.1');
+  const api = apiOf(port);
+  const made = [];
+  for (let i = 0; i < 6; i += 1) made.push(await api('signup', { username: nextName(), password: PASSWORD }));
+  ok(made.every((r) => r.ok && r.token && r.user_id), '44 닉네임 없이 가입 → 성공 · 토큰 · user_id');
+  ok(made.every((r) => cleanNickname(r.nickname) === r.nickname), '44 서버가 붙인 닉네임은 규칙에 맞는다');
+  eq(new Set(made.map((r) => r.nickname)).size, made.length, '44 서로 겹치지 않는다');
+  const blank = await api('signup', { username: nextName(), password: PASSWORD, nickname: '' });
+  const nul = await api('signup', { username: nextName(), password: PASSWORD, nickname: null });
+  ok(blank.ok && nul.ok && blank.nickname && nul.nickname, '44 닉네임이 빈 문자열 · null 이어도 자동 부여');
+  const picked = await api('signup', { username: nextName(), password: PASSWORD, nickname: 'Dealer7' });
+  eq([picked.ok, picked.nickname], [true, 'Dealer7'], '44 직접 정한 닉네임은 그대로 (기존 호출 호환)');
+  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: 'Dealer7' })).error, 'NICKNAME_TAKEN', '44 직접 정한 닉네임이 겹치면 NICKNAME_TAKEN');
+  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: 'a' })).error, 'INVALID_NICKNAME', '44 잘못된 닉네임을 직접 주면 INVALID_NICKNAME (자동으로 넘어가지 않는다)');
+  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: { x: 1 } })).error, 'INVALID_NICKNAME', '44 문자열이 아닌 닉네임도 거절');
+
+  // 45. 자동 닉네임 계정도 평범한 계정: 로그인 · 닉네임 변경 · 소켓 접속 (프로필 이름 = 서버 닉네임)
+  const who = made[0];
+  const renamed = await api('rename', { token: who.token, nickname: '바꾼이름' });
+  eq([renamed.ok, renamed.nickname], [true, '바꾼이름'], '45 자동 닉네임은 나중에 마음대로 바꿀 수 있다');
+  const c = await client(port, { token: made[1].token });
+  const reg = await c.call('register_player', { token: made[1].token });
+  eq([reg.ok, reg.user?.nickname], [true, made[1].nickname], '45 소켓 로그인에서도 서버가 붙인 닉네임');
+  await server.stop();
+
+  // 46. Supabase 흉내: 흔한 이름(기본 조합 400개)이 모두 이미 있어도 → 숫자를 붙여 겹치지 않게
+  const rows = bases.map((nickname, i) => ({ user_id: randomUUID(), username: `pre${i}`, password_hash: 'p1$x$y', nickname, wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }));
+  const db = fakeSupabase(rows);
+  const dbServer = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const dbPort = await dbServer.start(0, '127.0.0.1');
+  const dbApi = apiOf(dbPort);
+  const crowded = await dbApi('signup', { username: nextName(), password: PASSWORD });
+  ok(crowded.ok && /\d{2}$/.test(crowded.nickname) && cleanNickname(crowded.nickname) === crowded.nickname, `46 흔한 이름이 모두 찼으면 숫자를 붙인다 (${crowded.nickname})`);
+  const row = [...db.table.values()].find((r) => r.user_id === crowded.user_id);
+  eq([row?.nickname, row?.username === undefined], [crowded.nickname, false], '46 DB 행에도 그 닉네임으로 저장');
+  const twice = await dbApi('signup', { username: nextName(), password: PASSWORD });
+  ok(twice.ok && twice.nickname !== crowded.nickname, '46 연달아 가입해도 겹치지 않는다');
+  await dbServer.stop();
+}
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
@@ -930,6 +985,7 @@ try {
   await phase7();
   await phase8();
   await phase9();
+  await phase10();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

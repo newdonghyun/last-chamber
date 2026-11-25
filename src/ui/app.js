@@ -36,6 +36,7 @@ import { GameEngine, ITEM, SHELL } from '../engine/gameEngine.js';
 import { AIDealer } from '../engine/aiDealer.js';
 import { SoundEngine } from './soundEngine.js';
 import { watchLifecycle } from './lifecycle.js';
+import { GuideState, RULE_LINES, COACH_STEPS, GUIDED_TURN_MS } from './guide.js'; // 첫 판 3줄 룰 카드 · 4단계 코치마크 · 넉넉한 턴 제한
 import { platformBridge as platform } from '../platform/platformBridge.js';
 import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
@@ -214,6 +215,16 @@ const el = {
   leaveTitle: $('leave-title'),
   leaveText: $('leave-text'),
   leaveConfirm: $('leave-confirm'),
+  ruleCard: $('first-rules'),
+  ruleCardList: $('first-rules-list'),
+  coach: $('coach'),
+  coachSpot: $('coach-spot'),
+  coachBubble: $('coach-bubble'),
+  coachStep: $('coach-step'),
+  coachTitle: $('coach-title'),
+  coachText: $('coach-text'),
+  coachNext: $('coach-next'),
+  coachSkip: $('coach-skip'),
   btnTaunt: $('btn-taunt'),
   tauntIcon: $('taunt-icon'),
   tauntFx: $('taunt-fx'),
@@ -295,6 +306,14 @@ let leaving = false; // 항복 요청을 서버에 보내고 답을 기다리는
 let audioUnlockArmed = false; // PvP 시작 때 붙이는 '첫 터치에 오디오 깨우기' 리스너가 이미 대기 중인가 (판마다 쌓이지 않게)
 
 const profile = new PlayerProfile(); // 탄피 · 해금/장착 · 체험 · 연승 (localStorage에 영구 저장)
+// 첫 판 가이드: 이미 게임을 해 본 프로필이면 처음부터 '봤음'. 3줄 룰 카드는 첫 게임(어느 모드든), 코치마크 · 넉넉한 턴 제한은 첫 AI 판에서만 (온라인은 서버 시계라 멈출 수 없다)
+const guide = new GuideState({ hadPlayed: profile.games + profile.practice.games > 0 });
+const RULE_CARD_MS = 9000; // 카드가 떠 있는 시간 (탭하면 바로 닫힘)
+const RULE_CARD_MIN_MS = 5000; // 코치마크가 카드를 밀어내기 전에 최소한 보여 주는 시간
+let guidedGame = false; // 이번 판이 첫 AI 판인가 → 턴 제한 GUIDED_TURN_MS
+let coaching = false; // 코치마크 진행 중 (advance 가 다시 불려도 한 번만)
+let ruleCardTimer = 0;
+let ruleCardAt = 0;
 let adBusy = false; // 광고·결제 화면이 떠 있는 동안 중복 요청과 단축키를 막는다
 let lastOutcome = null; // 이번 경기 결과 { won, base, bonus, total, streak, prevStreak, canProtect, doubled, protectedStreak }
 let recordedGame = 0; // 결과를 기록한 gameId — 한 판에 한 번만 지급
@@ -334,7 +353,7 @@ const onGameScreen = (token = gameId) => token === gameId && Boolean(engine) && 
 const documentFocused = () => typeof document.hasFocus !== 'function' || document.hasFocus();
 const gameSoundOk = (token = gameId) => onGameScreen(token) && documentFocused();
 const gameSfx = (play, token = gameId) => { if (gameSoundOk(token)) play(); };
-const isPaused = () => !online && (el.rules.open || el.leave.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
+const isPaused = () => !online && (el.rules.open || el.leave.open || el.coach.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
 
 function guard(promise) {
   promise.catch((err) => {
@@ -1575,6 +1594,8 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   say(pick(LINES.start));
   render();
   setInMatch(true); // [항복] / [나가기] 버튼
+  guidedGame = guide.shouldCoach({ online }); // 첫 AI 판: 턴 제한을 넉넉하게 + 내 첫 턴에 코치마크
+  if (guide.shouldShowRuleCard) showRuleCard(); // 첫 게임: 장전 연출과 함께 핵심 3줄 룰
 
   guard((async () => {
     await present(token); // ROUND_START → LOAD(장전 연출) → DEAL → TURN
@@ -1594,7 +1615,13 @@ function advance(token) {
   const s = engine.getPublicState(PLAYER);
   render();
   if (s.winner) guard(endGame(s, token));
-  else if (s.turn.isMine) startTimer(token);
+  else if (s.turn.isMine) {
+    if (guide.shouldCoach({ online }) && !coaching) { // 첫 AI 판의 내 첫 턴: 코치마크가 끝난 뒤에 타이머를 시작한다
+      guard(runCoach(token));
+      return;
+    }
+    startTimer(token);
+  }
   else if (online) { // 상대 차례: 서버가 진행한다 — 다음 state_update 를 기다린다
     idleTimer();
     thinking(true);
@@ -1621,6 +1648,7 @@ async function endGame(s, token) {
   const surrendered = online && pvpOver()?.reason === 'surrender'; // 서버가 항복으로 끝낸 판 (won = 상대가 항복) — 문구만 다르고 정산은 같은 경로
   setInMatch(false); // 결과가 나왔다 — 항복 버튼과 확인 모달은 치운다
   closeLeave();
+  hideRuleCard();
   stopTimer();
   idleTimer();
   busy = true;
@@ -1653,6 +1681,99 @@ async function endGame(s, token) {
   el.titleInner.scrollTop = 0; // 첫 포커스(광고 버튼)가 화면을 밀어 제목이 잘리지 않게
   syncWallet({ animate: true }); // 획득한 탄피가 배지로 굴러 들어간다
   syncPlayerCard(); // 전적·티어가 바뀌었으니 좌상단 미니 카드도
+}
+
+// ───────── 첫 판 가이드: 3줄 룰 카드 · 4단계 코치마크 ─────────
+
+function showRuleCard() {
+  if (!el.ruleCard || !el.ruleCardList) return;
+  el.ruleCardList.replaceChildren(...RULE_LINES.map((line) => h('li', '', line)));
+  el.ruleCard.hidden = false;
+  ruleCardAt = performance.now();
+  guide.markRuleCard(); // 보여 준 순간 기록 — 새로고침해도 두 번째 판부터는 생략
+  clearTimeout(ruleCardTimer);
+  ruleCardTimer = setTimeout(hideRuleCard, RULE_CARD_MS);
+}
+
+function hideRuleCard() {
+  clearTimeout(ruleCardTimer);
+  if (el.ruleCard && !el.ruleCard.hidden) el.ruleCard.hidden = true;
+}
+
+// 코치마크 한 단계: 요소 위치에 구멍을 내고 말풍선을 위/아래 중 자리가 넉넉한 쪽에 놓는다
+function placeCoach(index) {
+  const step = COACH_STEPS[index];
+  setText(el.coachStep, `${index + 1} / ${COACH_STEPS.length}`);
+  setText(el.coachTitle, step.title);
+  setText(el.coachText, step.text);
+  setText(el.coachNext, index === COACH_STEPS.length - 1 ? '시작하기' : '다음');
+  const rect = document.getElementById(step.target)?.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const bubble = el.coachBubble.getBoundingClientRect();
+  const gap = 12;
+  const pad = 6;
+  if (!rect || rect.width === 0) { // 짚을 요소가 없으면 가운데에
+    el.coachSpot.style.cssText = 'top:50%;left:50%;width:0;height:0';
+    el.coachBubble.style.top = `${Math.max(12, (vh - bubble.height) / 2)}px`;
+    el.coachBubble.style.left = `${Math.max(12, (vw - bubble.width) / 2)}px`;
+    return;
+  }
+  el.coachSpot.style.top = `${rect.top - pad}px`;
+  el.coachSpot.style.left = `${rect.left - pad}px`;
+  el.coachSpot.style.width = `${rect.width + pad * 2}px`;
+  el.coachSpot.style.height = `${rect.height + pad * 2}px`;
+  const below = rect.bottom + pad + gap + bubble.height <= vh - 8;
+  const top = below ? rect.bottom + pad + gap : Math.max(8, rect.top - pad - gap - bubble.height);
+  const left = Math.min(Math.max(12, rect.left + rect.width / 2 - bubble.width / 2), Math.max(12, vw - bubble.width - 12));
+  el.coachBubble.style.top = `${top}px`;
+  el.coachBubble.style.left = `${left}px`;
+}
+
+/** 4단계를 차례로 보여 준다 → 끝(또는 건너뛰기)까지 기다린다. 열려 있는 동안 AI 연습의 시간은 멈춘다 (isPaused) */
+function showCoachSteps() {
+  return new Promise((resolve) => {
+    let index = 0;
+    const reposition = () => placeCoach(index);
+    const finish = () => {
+      window.removeEventListener('resize', reposition);
+      el.coachNext.onclick = null;
+      el.coachSkip.onclick = null;
+      el.coach.oncancel = null;
+      if (el.coach.open) el.coach.close();
+      resolve();
+    };
+    el.coachNext.onclick = () => {
+      index += 1;
+      if (index >= COACH_STEPS.length) finish();
+      else placeCoach(index);
+    };
+    el.coachSkip.onclick = finish;
+    el.coach.oncancel = (ev) => { ev.preventDefault(); finish(); }; // Esc = 건너뛰기
+    window.addEventListener('resize', reposition);
+    el.coach.showModal();
+    placeCoach(0);
+    el.coachNext.focus({ preventScroll: true });
+  });
+}
+
+// 첫 AI 판의 내 첫 턴: (3줄 카드를 최소 시간 보여 준 뒤) 코치마크 → 끝나면 완료로 기록하고 이어서 타이머 시작
+async function runCoach(token) {
+  coaching = true;
+  busy = true; // 코치마크가 떠 있는 동안 입력 · 타이머 잠금
+  stopTimer();
+  idleTimer();
+  render();
+  const shown = performance.now() - ruleCardAt;
+  if (!el.ruleCard.hidden && shown < RULE_CARD_MIN_MS) await sleep(RULE_CARD_MIN_MS - shown);
+  hideRuleCard();
+  if (token === gameId) await showCoachSteps();
+  coaching = false;
+  guide.markCoachDone(); // 건너뛰어도 완료 — 2번째 판부터는 생략
+  if (token !== gameId) return;
+  busy = false;
+  render();
+  advance(token); // 이제 guide.shouldCoach 가 false → 타이머 시작
 }
 
 // ───────── 항복 · 나가기 ─────────
@@ -1707,6 +1828,7 @@ async function confirmLeave() {
 
 // AI 연습에서 나가기: 진행 중인 연출 · 타이머 · 딜러 턴을 토큰으로 끊고 타이틀로. 결과를 기록하지 않는다 (recordedGame 은 그대로 → 지급 · 전적 없음)
 function leaveAiGame() {
+  hideRuleCard();
   ++gameId; // 이 판의 비동기 흐름(연출 · 딜러 턴 · 타이머)이 다음 확인에서 모두 멈춘다
   busy = true;
   setInMatch(false);
@@ -2406,8 +2528,10 @@ function svgUse(className, iconId) {
 
 // ───────── 20초 턴 타이머 ─────────
 
+const turnLimit = () => (online ? TURN_MS : guidedGame ? GUIDED_TURN_MS : TURN_MS); // 첫 AI 판만 넉넉하게 (온라인은 서버가 정한 20초)
+
 function resetTimer() {
-  timer.remaining = online ? pvpRemainingMs(TURN_MS) : TURN_MS; // PvP: 서버가 알려 준 deadline 기준
+  timer.remaining = online ? pvpRemainingMs(TURN_MS) : turnLimit(); // PvP: 서버가 알려 준 deadline 기준
   timer.shown = -1;
   drawTimer();
 }
@@ -2448,7 +2572,7 @@ function drawTimer() {
   if (sec === timer.shown) return;
   timer.shown = sec;
   // 게이지는 1초 linear 트랜지션이라 '다음 초' 값을 넣어야 실제 시간과 맞는다
-  el.timer.style.setProperty('--p', String(Math.max(0, sec - 1) / (TURN_MS / 1000)));
+  el.timer.style.setProperty('--p', String(Math.max(0, sec - 1) / (turnLimit() / 1000)));
   el.timer.classList.toggle('is-urgent', sec <= URGENT_MS / 1000);
   setAttr(el.timer, 'aria-valuenow', String(sec));
   setText(el.timerText, String(sec));
@@ -2619,6 +2743,7 @@ document.addEventListener(TAUNT_IN, (ev) => { // Step B: 상대가 보낸 도발
 });
 
 el.btnLeave.addEventListener('click', openLeave);
+el.ruleCard?.addEventListener('click', hideRuleCard); // 3줄 룰 카드는 탭하면 닫힌다
 el.leave.addEventListener('click', (ev) => {
   if (ev.target === el.leave) { closeLeave(); return; } // 바깥 어두운 곳 = 취소
   const act = ev.target.closest('button[data-leave]')?.dataset.leave;

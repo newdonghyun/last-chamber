@@ -81,15 +81,22 @@ function keep(res, session) {
   return { ok: true, user: signed.user, me: res.me ?? null };
 }
 
-/** 회원가입 → { ok: true, user, me } | { ok: false, error, message } (성공하면 바로 로그인 상태) */
-export async function signUp({ username, password, nickname }, { session = userSession, ...opts } = {}) {
+/**
+ * 회원가입 → { ok: true, user, me } | { ok: false, error, message } (성공하면 바로 로그인 상태)
+ * nickname 은 선택 — 비우면 서버가 느와르 닉네임('붉은총잡이' 등)을 중복 없이 붙여 준다 (user.nickname 으로 돌아온다). 로비 · 계정 창에서 언제든 바꿀 수 있다.
+ */
+export async function signUp({ username, password, nickname = '' }, { session = userSession, ...opts } = {}) {
   const u = validateUsername(username);
   if (!u.ok) return failed('INVALID_USERNAME', nicknameErrorText(u.reason));
   const p = validatePassword(password);
   if (!p.ok) return failed('INVALID_PASSWORD', nicknameErrorText(p.reason));
-  const n = validateNickname(nickname);
-  if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
-  return keep(await post('signup', { username: u.username, password: p.password, nickname: n.nickname }, opts), session);
+  const body = { username: u.username, password: p.password };
+  if (typeof nickname === 'string' && nickname !== '') {
+    const n = validateNickname(nickname);
+    if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
+    body.nickname = n.nickname;
+  }
+  return keep(await post('signup', body, opts), session);
 }
 
 /** 로그인 → { ok: true, user, me } | { ok: false, error, message } */
