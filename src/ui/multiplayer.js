@@ -867,6 +867,8 @@ function leavePage() {
 }
 window.addEventListener('pagehide', leavePage);
 window.addEventListener('beforeunload', leavePage);
+// 화면을 떠남(blur · freeze — src/ui/lifecycle.js 의 onHalt 를 app.js 가 알려 준다): 매칭 · 기다리는 방을 그만두고 소켓을 끊는다 (돌아오면 메뉴부터)
+window.addEventListener('lastchamber:halt', leavePage);
 
 // PLAY 가로채기: document 캡처 단계라 app.js 의 클릭 핸들러(타깃/버블 단계)보다 항상 먼저 돌고, 로드 순서에도 영향받지 않는다
 // 손님도 로비는 연다 (AI 딜러 연습 · 방 목록 · TOP 10 보기) — 온라인 대전 버튼만 로그인 화면으로

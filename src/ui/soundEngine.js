@@ -16,6 +16,8 @@
  * - 배경 앰비언트(startAmbient)는 음악이 아니라 저음 드론·실내 소음·전등 험·드문 먼 소리를 합성해 까는 소리 바닥이다.
  *   setTension(0~1)으로 긴장도에 따라 서서히 커지고, duckAmbient()는 총성 때 잠깐 낮춘다.
  *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절한다.
+ * - 마스터 GainNode(#master)는 하나뿐이다 — 모든 효과음(총성 체인 포함)이 지나가는 문. document.hidden === true 이면 생명주기 훅이 늦거나 빠져도
+ *   gain 을 0 으로 강제하고(visibilitychange 로 즉시 · 새 소리 요청도 차단), 보이게 돼도 suspend() 중이거나 음소거면 0 을 유지한다.
  * - 생명주기 (src/ui/lifecycle.js 가 부른다):
  *   suspend()  화면을 떠남 → 즉시 무음 · 울리던 효과음 끊기 · 배경음 예약 타이머 정지 · 컨텍스트 정지. resume() 전까지는
  *              효과음 요청을 버리고(돌아왔을 때 몰아서 터지지 않게) 무엇도 컨텍스트를 다시 깨우지 못한다 (unlock() · iOS 'interrupted' 복구 포함).
@@ -39,6 +41,7 @@ const SILENT = 0.0001; // 지수 램프는 0으로 갈 수 없어 -80dB를 무�
 const BAR_MODES = [1, 2.756]; // 금속 막대 고유 진동 비율(비정수배) → 황동/쇠 질감. 더 높은 배음은 유리잔 '띠딩'처럼 들려 두지 않는다
 const curveOf = (fn, n = 1024) => Float32Array.from({ length: n }, (_, i) => fn((i / (n - 1)) * 2 - 1)); // 입력 −1~1 → 출력 (WaveShaper 곡선)
 const softClipCurve = () => curveOf((x) => Math.tanh(GUN_CLIP_DRIVE * x) / Math.tanh(GUN_CLIP_DRIVE));
+const pageHidden = () => globalThis.document?.hidden === true; // 탭이 가려졌다 (화면 잠금 · 탭 내림 · 다른 앱) — 브라우저가 알려 주는 값
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
 const vary = (value, spread = 0.04) => value * (1 + (Math.random() * 2 - 1) * spread); // 매번 미세하게 다른 소리
 
@@ -74,6 +77,7 @@ export class SoundEngine {
   #ambientWanted = false; // 판이 진행 중이라 배경음이 깔려 있어야 하는가 (컨텍스트를 새로 만들면 이어서 켠다)
   #voices = new Set(); // 지금 울리고 있는 효과음 소스 — 화면을 떠나면 한꺼번에 끊는다
   #held = false; // 화면 밖(백그라운드 · 페이지 이탈): 소리를 만들지도, 컨텍스트를 깨우지도 않는다
+  #visBound = false; // visibilitychange 리스너를 이 엔진이 한 번만 달았는가
   #unlockedOnce = false; // 사용자가 한 번이라도 오디오를 켰는가 (close() 뒤 돌아오면 새 컨텍스트를 만들어도 되는가)
   #tension = 0;
 
@@ -444,7 +448,7 @@ export class SoundEngine {
       param.setValueAtTime(param.value, t);
       param.linearRampToValueAtTime(value, t + 0.03);
     };
-    const off = this.#muted || this.#held; // 화면 밖에서 음량을 바꿔도 무음은 그대로 (돌아올 때 resume()이 올린다)
+    const off = this.#muted || this.#held || pageHidden(); // 화면 밖에서 음량을 바꿔도 무음은 그대로 (돌아올 때 resume()이 올린다)
     ramp(this.#master.gain, off ? 0 : this.#volume);
     ramp(this.#ambientBus.gain, off ? 0 : this.#ambientVolume);
   }
@@ -592,9 +596,9 @@ export class SoundEngine {
   #setup(ctx) {
     this.#ctx = ctx;
     this.#master = ctx.createGain(); // 효과음 버스
-    this.#master.gain.value = this.#muted ? 0 : this.#volume;
+    this.#master.gain.value = this.#muted || pageHidden() ? 0 : this.#volume;
     this.#ambientBus = ctx.createGain(); // 배경음 버스
-    this.#ambientBus.gain.value = this.#muted ? 0 : this.#ambientVolume;
+    this.#ambientBus.gain.value = this.#muted || pageHidden() ? 0 : this.#ambientVolume;
     this.#ambientBus.connect(ctx.destination);
     this.#duck = ctx.createGain();
     this.#duck.connect(this.#ambientBus);
@@ -609,6 +613,10 @@ export class SoundEngine {
     this.#gunBus = ctx.createGain();
     this.#gunBus.gain.value = GUN_BOOST;
     this.#gunBus.connect(this.#gunComp);
+    if (!this.#visBound && typeof globalThis.document?.addEventListener === 'function') { // 가려지는 순간 곧바로 마스터를 0 으로 (보이면 원래 음량으로 — suspend 중이면 0 유지)
+      this.#visBound = true;
+      globalThis.document.addEventListener('visibilitychange', () => (pageHidden() ? this.#silence() : this.#applyVolumes()));
+    }
     const length = Math.floor(ctx.sampleRate * NOISE_SECONDS);
     this.#noise = ctx.createBuffer(1, length, ctx.sampleRate);
     const data = this.#noise.getChannelData(0);
@@ -625,7 +633,7 @@ export class SoundEngine {
   // 화면 밖에서는 iOS 'interrupted' 복구도 하지 않는다 — 백그라운드에서 들어온 효과음 요청이 컨텍스트를 깨워 소리가 새던 원인
   #ready() {
     const ctx = this.#ctx;
-    if (this.#held || !ctx || ctx.state === 'closed') return null;
+    if (this.#held || pageHidden() || !ctx || ctx.state === 'closed') return null; // 가려진 탭에서는 효과음을 만들지도 않는다
     if (ctx.state === 'interrupted') {
       ctx.resume().catch(() => {});
       return null;

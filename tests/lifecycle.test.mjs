@@ -5,6 +5,7 @@
 //   4. close(): 모든 소스 정지 · 타이머 해제 · 컨텍스트 close() → 돌아오면 새 컨텍스트 + 배경음 이어서 · iOS 는 다음 터치에서
 //   5. watchLifecycle: visibilitychange · blur/focus · pagehide · beforeunload · pageshow 순서와 1회 호출
 //   6. 둘을 이어 붙인 흐름 (app.js 와 같은 연결)
+//   7. blur · freeze → 즉시 오디오 close + 소켓 disconnect (onHalt) · 돌아오면 다시 (onRestore) · document.hidden 이면 마스터 게인 0 강제
 import { SoundEngine } from '../src/ui/soundEngine.js';
 import { watchLifecycle } from '../src/ui/lifecycle.js';
 
@@ -273,6 +274,107 @@ const fakePage = ({ hidden = false } = {}) => {
   fire(win, 'pagehide');
   await settle();
   eq([ctx.state, intervals.size, socketsClosed], ['closed', 0, 1], '6 창 닫기 → 컨텍스트 close · 타이머 해제 · 소켓 정리');
+}
+
+// ───────── 7. blur · freeze → 즉시 끊기 / 마스터 게인 강제 음소거 ─────────
+{
+  const { win, doc, setHidden, fire } = fakePage();
+  const log = [];
+  watchLifecycle({
+    onAway: () => log.push('away'),
+    onBack: () => log.push('back'),
+    onHalt: (i) => log.push(`halt:${i.reason}`),
+    onRestore: () => log.push('restore'),
+    onLeave: (i) => log.push(`leave:${i.reason}`),
+    onReturn: () => log.push('return'),
+  }, { win, doc });
+  const step = (fn) => { log.length = 0; fn(); return [...log]; };
+  eq(log, ['back'], '7 시작: 끊은 적이 없으니 restore 없이 back 만');
+  eq(step(() => fire(win, 'blur')), ['away', 'halt:blur'], '7 blur → 즉시 무음(away) 다음 끊기(halt)');
+  eq(step(() => fire(win, 'blur')), [], '7 blur 가 또 와도 한 번만');
+  eq(step(() => { setHidden(true); fire(doc, 'visibilitychange'); }), [], '7 이어 숨김이 와도 중복 없음');
+  eq(step(() => fire(doc, 'freeze')), [], '7 blur 뒤 freeze: 이미 끊었으니 다시 끊지 않는다');
+  eq(step(() => { setHidden(false); fire(doc, 'visibilitychange'); fire(doc, 'resume'); }), [], '7 보이고 풀려도 포커스가 없으면 아직 끊긴 채');
+  eq(step(() => fire(win, 'focus')), ['back', 'restore'], '7 포커스까지 돌아오면 back → restore (다시 잇기)');
+
+  eq(step(() => { setHidden(true); fire(doc, 'visibilitychange'); }), ['away'], '7 숨김만 오면 away 까지 — 끊지는 않는다');
+  eq(step(() => fire(doc, 'freeze')), ['halt:freeze'], '7 freeze → 즉시 halt (얼기 전에 정리)');
+  eq(step(() => { fire(doc, 'resume'); setHidden(false); fire(doc, 'visibilitychange'); }), ['back', 'restore'], '7 resume + 보임 → back · restore');
+  eq(step(() => { setHidden(true); fire(doc, 'visibilitychange'); setHidden(false); fire(doc, 'visibilitychange'); }), ['away', 'back'], '7 숨겼다 보이기만 하면 restore 없음 (끊은 적이 없다)');
+  eq(step(() => fire(doc, 'freeze')), ['away', 'halt:freeze'], '7 보이는 상태의 freeze → away 후 halt');
+  eq(step(() => fire(win, 'pagehide', { persisted: true })), ['leave:pagehide'], '7 끊은 뒤 페이지를 떠나면 leave (away 는 이미 알림)');
+  eq(step(() => { fire(doc, 'resume'); fire(win, 'pageshow', { persisted: true }); }), ['back', 'restore', 'return'], '7 bfcache 복귀 → back · restore · return');
+  eq(step(() => fire(win, 'blur')), ['away', 'halt:blur'], '7 복귀 뒤 blur 는 다시 한 번 끊는다');
+}
+
+// app.js 와 같은 연결: blur · freeze 에서 오디오 컨텍스트 close + 소켓 disconnect, 돌아오면 새 컨텍스트 + 재연결
+{
+  const { win, doc, fire } = fakePage();
+  const sound = new SoundEngine();
+  const pvp = { paused: 0, resumed: 0 };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  watchLifecycle({
+    onAway: () => sound.suspend(),
+    onBack: () => sound.resume(),
+    onHalt: () => { sound.close(); pvp.paused += 1; },
+    onRestore: () => { pvp.resumed += 1; },
+    onLeave: () => sound.close(),
+  }, { win, doc });
+  await sound.unlock();
+  const ctx = FakeAudioContext.made.at(-1);
+  sound.startAmbient();
+  fire(win, 'blur');
+  await settle();
+  eq([ctx.state, ctx.calls.includes('close'), intervals.size, pvp.paused, sound.playGunshot()], ['closed', true, 0, 1, 0], '7 blur → 컨텍스트 close · 배경음 타이머 해제 · 소켓 disconnect · 소리 없음');
+  fire(win, 'focus');
+  await settle();
+  const ctx2 = FakeAudioContext.made.at(-1);
+  eq([ctx2 !== ctx, ctx2.state, intervals.size, pvp.resumed], [true, 'running', 1, 1], '7 돌아옴 → 새 컨텍스트 · 배경음 이어서 · 소켓 재연결');
+  fire(doc, 'freeze');
+  await settle();
+  eq([ctx2.state, intervals.size, pvp.paused, sound.playClick()], ['closed', 0, 2, 0], '7 freeze → 얼기 전에 컨텍스트 close · 타이머 해제 · 소켓 disconnect');
+  fire(doc, 'resume');
+  fire(win, 'focus');
+  await settle();
+  eq([FakeAudioContext.made.at(-1).state, pvp.resumed], ['running', 2], '7 freeze 풀림 → 다시 소리 · 재연결');
+  await sound.close();
+}
+
+// 마스터 GainNode 하나 — document.hidden 이면 생명주기 훅 없이도 즉시 0
+{
+  const doc = new EventTarget();
+  doc.hidden = false;
+  globalThis.document = doc;
+  const tick = (hidden) => { doc.hidden = hidden; doc.dispatchEvent(new Event('visibilitychange')); };
+  const sound = new SoundEngine({ volume: 0.8, ambientVolume: 0.6 });
+  await sound.unlock();
+  const ctx = FakeAudioContext.made.at(-1);
+  const master = ctx.nodes[0];
+  const ambient = ctx.nodes[1];
+  eq([master.gain.value, ambient.gain.value], [0.8, 0.6], '7 보이는 탭: 마스터 0.8 · 배경 0.6');
+  tick(true);
+  eq([master.gain.value, ambient.gain.value], [0, 0], '7 document.hidden → 마스터 게인 즉시 0 (생명주기 훅 없이도)');
+  const nodes = ctx.nodes.length;
+  eq([sound.playGunshot(), sound.playClick(), ctx.nodes.length], [0, 0, nodes], '7 가려진 탭에서는 효과음을 만들지도 않는다');
+  tick(false);
+  eq([master.gain.value, ambient.gain.value], [0.8, 0.6], '7 다시 보이면 원래 음량');
+  await sound.suspend();
+  tick(true);
+  tick(false);
+  eq(master.gain.value, 0, '7 suspend 중이면 보여도 0 유지 (포커스가 돌아와 resume 할 때까지)');
+  await sound.resume();
+  eq(master.gain.value, 0.8, '7 resume → 원래 음량');
+  sound.setMuted(true);
+  tick(true);
+  tick(false);
+  eq(master.gain.value, 0, '7 음소거면 보여도 0');
+  sound.setMuted(false);
+  tick(true);
+  await sound.close();
+  await sound.unlock(); // 가려진 채로 새 컨텍스트가 만들어져도 마스터는 0 에서 시작
+  eq(FakeAudioContext.made.at(-1).nodes[0].gain.value, 0, '7 가려진 탭에서 새로 만든 컨텍스트도 마스터 0');
+  await sound.close();
+  delete globalThis.document;
 }
 
 for (const id of intervals) realClearInterval(id);

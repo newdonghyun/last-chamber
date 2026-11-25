@@ -41,7 +41,7 @@ import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
   CHEST, CHEST_ITEMS, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
-import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
+import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpPause, pvpResume, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
 import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
 import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절)
 
@@ -2518,6 +2518,14 @@ let pvpLeftBehind = false; // 페이지 이탈로 진행 중이던 PvP 연결을
 watchLifecycle({
   onAway: () => guardUi(sound.suspend()),
   onBack: () => guardUi(sound.resume()),
+  // blur · freeze (화면 잠금 · 탭 내림 · 앱 전환): 곧바로 오디오 컨텍스트를 닫고 소켓을 끊는다 — 소리가 새지 않고, 얼어붙기 전에 연결을 정리한다.
+  // PvP 판은 세션을 유지한 채 끊고(pvpPause), 돌아오면 15초 유예 안에 같은 자리로 다시 붙는다(pvpResume). 로비는 매칭 · 기다리는 방을 접는다 (multiplayer.js 가 이 이벤트를 듣는다)
+  onHalt: ({ reason }) => {
+    guardUi(sound.close());
+    pvpPause();
+    window.dispatchEvent(new CustomEvent('lastchamber:halt', { detail: { reason } }));
+  },
+  onRestore: () => pvpResume(),
   onLeave: () => {
     guardUi(sound.close());
     if (online) pvpLeftBehind = true;

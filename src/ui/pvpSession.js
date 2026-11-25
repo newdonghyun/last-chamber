@@ -60,6 +60,7 @@ function onPvpStart(e) {
     started: false,
     closed: false,
     updates: 0,
+    paused: false, // 화면을 떠나(blur · freeze) 일부러 소켓을 끊어 둔 동안 — 판은 그대로, 돌아오면 같은 소켓으로 다시 이어 자리를 되찾는다
     waiters: new Set(),
     off: [],
     turnMs: null, // 마지막 state_update 시점의 남은 턴 시간 (deadline − now)
@@ -105,7 +106,7 @@ function bind(s) {
     s.off.push(() => s.socket.off(event, guarded));
   };
   onSocket('disconnect', (reason) => {
-    if (s.over || s.closed) return;
+    if (s.over || s.closed || s.paused) return; // 일부러 끊은 것(pvpPause)이면 '끊어졌습니다' 알림도 재연결 시도도 하지 않는다
     hooks.onNotice?.('서버와 연결이 끊어졌습니다 — 다시 연결하는 중…', 'danger');
     if (reason === 'io server disconnect') s.socket.connect(); // 서버가 끊은 경우는 자동 재연결이 없다
   });
@@ -200,6 +201,30 @@ function onTauntOut(e) {
   const s = S;
   if (!s || s.closed || s.over || !s.started || !s.socket.connected || !e.detail) return;
   s.socket.emit('send_emote', e.detail); // 서버가 모양을 다시 검사해서 상대에게 그대로 중계한다
+}
+
+/**
+ * 화면을 떠났다(blur · freeze): 소켓을 즉시 끊는다. 세션(판)은 닫지 않는다 — 서버는 15초 유예를 주고, 돌아와 pvpResume() 하면 같은 소켓이 다시 붙어
+ * connect 핸들러가 rejoin_room 으로 자리를 되찾는다 (유예가 지났으면 서버가 이미 부전패로 끝냈고, 다시 붙을 때 그 결과(game_over)를 받는다).
+ * 끝난 판 · 닫힌 세션 · 이미 끊어 둔 상태에서는 아무것도 하지 않는다.
+ */
+export function pvpPause() {
+  const s = S;
+  if (!s || s.closed || s.over || s.paused) return;
+  s.paused = true; // disconnect 이벤트가 동기로 오므로 먼저 표시
+  try {
+    s.socket.disconnect();
+  } catch {
+    /* 이미 끊김 */
+  }
+}
+
+/** pvpPause() 로 끊어 둔 소켓을 다시 잇는다 (여러 번 불러도 안전) */
+export function pvpResume() {
+  const s = S;
+  if (!s || s.closed || !s.paused) return;
+  s.paused = false;
+  if (!s.over && !s.socket.connected) s.socket.connect(); // 'connect' 핸들러가 rejoin_room 을 보낸다
 }
 
 function wake(s) {
