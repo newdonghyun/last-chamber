@@ -10,6 +10,9 @@
  *     game_over 에 그 좌석의 record(현재 서버 전적) · ranked · mmrDelta(랭킹전에서 바뀐 MMR)로 알려 준다
  *   소켓 이벤트 이름 · 페이로드 규약은 server/index.js 맨 위 주석, 등급별 대기열은 server/matchmaker.js.
  *
+ *   전송 격리: 전체 방송(io.emit · socket.broadcast)은 쓰지 않는다. 인게임 이벤트는 좌석마다 따로(자기 시점 상태 — 투시경 같은 비공개 정보가 섞이지 않게),
+ *             그 좌석의 소켓이 지금 이 방에 앉아 있을 때만 보내고(emitTo), 모든 이벤트에 방 코드(code)를 싣는다 → 클라이언트는 자기 방 코드가 아니면 버린다.
+ *             방에 앉으면 Socket.io 방 채널(room:<code>)에 join, 판이 끝나거나 나가거나 방이 닫히면 leave.
  *   socket.data 약속:  where = null | { kind: 'queue', tier }(matchmaker 가 씀) | { kind: 'room', code }(여기서 씀) · lastEmote = 마지막 이모트 시각(ms)
  *                      user = null | { id, nickname } (server/index.js identifyUser 가 씀 — 로그인한 소켓)
  */
@@ -38,6 +41,7 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_PATTERN = new RegExp(`^[${CODE_ALPHABET}]{4}$`);
 
 const rand = () => randomInt(2 ** 32) / 2 ** 32; // [0, 1)
+export const roomChannel = (code) => `room:${code}`; // Socket.io 방 채널 이름 (방에 앉은 소켓만 들어 있다)
 export const RANKED_MODE = 'queue'; // 랭킹전 = 무작위 매칭으로 맺어진 방만 ('private' 친구 방은 친선전)
 const isRanked = (room) => room.mode === RANKED_MODE;
 const makeCode = () => Array.from({ length: 4 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
@@ -125,14 +129,24 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
 
   // ── 좌석 · 소켓 ──
   const socketOf = (seat) => (seat.socketId ? io.sockets.sockets.get(seat.socketId) : undefined);
-  const emitTo = (seat, event, payload) => { socketOf(seat)?.emit(event, payload); };
+  const seatedIn = (socket, room) => socket?.data.where?.kind === 'room' && socket.data.where.code === room.code;
+  // 이 방 좌석의 소켓에게만 — 그 소켓이 이미 이 방을 떠났으면(판 종료 · 나가기 · 다른 방) 아무것도 보내지 않는다
+  const emitTo = (room, seat, event, payload) => {
+    const socket = socketOf(seat);
+    if (seatedIn(socket, room)) socket.emit(event, payload);
+  };
   const otherSeat = (room, seat) => room.seats.find((s) => s !== seat);
   // userId: 앉을 때 로그인한 유저 (재접속으로 소켓이 바뀌어도 좌석의 주인은 그대로 — 판 결과는 이 유저에게 기록된다)
   const makeSeat = (id, socket, profile) => ({ id, token: makeToken(), socketId: socket.id, userId: socket.data.user?.id ?? null, profile, connected: true, graceTimer: null, graceUntil: 0 });
-  const attach = (socket, room) => { socket.data.where = { kind: 'room', code: room.code }; };
-  const release = (socket, code) => { // 이 방에 묶여 있을 때만 풀어 준다
+  const attach = (socket, room) => {
+    socket.data.where = { kind: 'room', code: room.code };
+    socket.join(roomChannel(room.code));
+  };
+  const release = (socket, code) => { // 이 방에 묶여 있을 때만 풀어 준다 (방 채널에서도 나간다 → 이전 방 이벤트를 더는 받지 않는다)
     const where = socket?.data.where;
-    if (where?.kind === 'room' && (code === undefined || where.code === code)) socket.data.where = null;
+    if (where?.kind !== 'room' || (code !== undefined && where.code !== code)) return;
+    socket.data.where = null;
+    socket.leave(roomChannel(where.code));
   };
   const seatOfSocket = (socket) => {
     const where = socket.data.where;
@@ -190,7 +204,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     for (const seat of room.seats) {
       const events = room.engine.getLog(seat.id, since);
       end = since + events.length;
-      emitTo(seat, 'state_update', snapshot(room, seat, reason, since, events, extra));
+      emitTo(room, seat, 'state_update', snapshot(room, seat, reason, since, events, extra));
     }
     room.sent = end;
   }
@@ -262,8 +276,9 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     room.result = { winner: winner.id, reason };
     recordResults(room); // game_over 보다 먼저 — 알림에 갱신된 전적이 실린다
     for (const seat of room.seats) {
-      emitTo(seat, 'game_over', overPayload(room, seat));
-      release(socketOf(seat), room.code); // 다시 대기열 · 방에 들어갈 수 있다
+      emitTo(room, seat, 'game_over', overPayload(room, seat));
+      release(socketOf(seat), room.code); // 방 채널에서 나가고 다시 대기열 · 방에 들어갈 수 있다
+      seat.socketId = null; // 끝난 판은 어떤 소켓과도 이어 두지 않는다 (늦게 돌아온 사람은 rejoin_room 으로 결과만 다시 받는다)
     }
     log('판 종료', room.code, room.tier, reason);
     room.ttlTimer = setTimeout(() => rooms.delete(room.code), cfg.resultTtlMs); // 늦게 돌아온 사람에게 결과를 다시 알려 줄 시간
@@ -275,7 +290,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     room.engine = new GameEngine({ players: [first.id, second.id], rng: rand });
     room.status = 'playing';
     clearTimeout(room.ttlTimer);
-    for (const seat of room.seats) emitTo(seat, 'match_found', matchPayload(room, seat, false));
+    for (const seat of room.seats) emitTo(room, seat, 'match_found', matchPayload(room, seat, false));
     armTurn(room);
     broadcast(room, 'start');
     log('판 시작', room.code, room.mode, room.tier);
@@ -301,7 +316,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
 
   function expireRoom(room) {
     if (room.status !== 'waiting') return;
-    emitTo(room.seats[0], 'room_closed', { reason: 'EXPIRED' });
+    emitTo(room, room.seats[0], 'room_closed', { code: room.code, reason: 'EXPIRED' });
     closeRoom(room);
   }
 
@@ -335,9 +350,9 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
 
   function leaveRoom(socket) { // 방 나가기 (대기열에서 나가기는 matchmaker.leaveQueue — server/index.js 가 소켓의 위치를 보고 고른다)
     const seated = seatOfSocket(socket);
-    release(socket);
     if (seated?.room.status === 'waiting') closeRoom(seated.room);
-    else if (seated?.room.status === 'playing') forfeit(seated.room, seated.seat);
+    else if (seated?.room.status === 'playing') forfeit(seated.room, seated.seat); // 나간 사람에게도 결과(game_over)를 준 뒤 finishGame 이 방 채널에서 내보낸다
+    release(socket); // 어떤 경우든 방 채널에서 나간다
     return { ok: true };
   }
 
@@ -362,7 +377,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     const now = Date.now();
     if (now - socket.data.lastEmote < cfg.emoteGapMs) return fail('RATE_LIMITED');
     socket.data.lastEmote = now;
-    emitTo(otherSeat(seated.room, seated.seat), 'receive_emote', payload);
+    emitTo(seated.room, otherSeat(seated.room, seated.seat), 'receive_emote', { ...payload, code: seated.room.code });
     return { ok: true };
   }
 
@@ -384,14 +399,14 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     seat.graceTimer = null;
     if (old && old !== socket) {
       release(old);
-      old.emit('session_replaced');
+      old.emit('session_replaced', { code: room.code });
       old.disconnect(true);
     }
     attach(socket, room);
-    emitTo(seat, 'match_found', matchPayload(room, seat, true));
-    emitTo(seat, 'state_update', snapshot(room, seat, 'rejoin', 0, room.engine.getLog(seat.id, 0))); // 전체 로그부터 — logFrom 0
+    emitTo(room, seat, 'match_found', matchPayload(room, seat, true));
+    emitTo(room, seat, 'state_update', snapshot(room, seat, 'rejoin', 0, room.engine.getLog(seat.id, 0))); // 전체 로그부터 — logFrom 0
     const opp = otherSeat(room, seat);
-    emitTo(opp, 'opponent_status', { connected: true });
+    emitTo(room, opp, 'opponent_status', { code: room.code, connected: true });
     return { ok: true };
   }
 
@@ -408,7 +423,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null }) 
     seat.socketId = null;
     seat.graceUntil = Date.now() + cfg.graceMs;
     seat.graceTimer = setTimeout(() => guard(() => forfeit(room, seat)), cfg.graceMs);
-    emitTo(otherSeat(room, seat), 'opponent_status', { connected: false, graceMs: cfg.graceMs, until: seat.graceUntil });
+    emitTo(room, otherSeat(room, seat), 'opponent_status', { code: room.code, connected: false, graceMs: cfg.graceMs, until: seat.graceUntil });
   }
 
   // ── 현황 · 종료 ──

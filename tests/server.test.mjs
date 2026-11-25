@@ -1,6 +1,7 @@
 // 멀티플레이 서버 검증 (브라우저 없음): node tests/server.test.mjs   — socket.io-client 로 서버를 실제로 때려 본다. 5초 안에 끝난다.
 //   Phase 1 (기본 서버, 클라이언트 2개): 방 생성 → 입장 → 격발 1회 · 치트 시도 거절 · 이모트 중계 · 항복 · 무작위 매칭(pro) · 정적 파일
 //   Phase 2 (타이머를 줄인 서버): 20초 턴 타임아웃 강제 격발 · 연결 끊김 부전승 · 재접속 · 새 연결의 자리 인수
+//   Phase 6 (방 격리): 동시에 도는 방 3개 — 한 방의 이벤트가 다른 방 · 로비 소켓에 가지 않는다 · 모든 인게임 이벤트에 자기 방 코드 · 판이 끝나면 방 채널에서 나간다
 //   Phase 3 (유저 기록 파일을 쓰는 서버): 로그인(handshake auth · hello) · 닉네임 규칙 · 서버가 확인한 닉네임으로 상대에게 표시 · 서버 전적 기록 · 파일 저장/복원
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
+import { roomChannel } from '../server/roomManager.js';
 
 const T0 = performance.now();
 let pass = 0;
@@ -128,7 +130,7 @@ async function phase1() {
   const emote = { type: 'TAUNT', id: 'knock' };
   const relayed = A.waitFor('receive_emote');
   eq(await B.call('send_emote', emote), { ok: true }, '6 이모트 ack');
-  eq(await relayed, emote, '6 상대에게 그대로 중계');
+  eq(await relayed, { ...emote, code: created.code }, '6 상대에게 그대로 중계 (+ 방 코드 — 다른 방 이벤트를 걸러 내는 표식)');
   eq((await B.call('send_emote', emote)).error, 'RATE_LIMITED', '6 0.5초 안의 연타는 거절');
   eq((await B.call('send_emote', { type: 'TAUNT', id: { evil: true } })).error, 'BAD_REQUEST', '6 중첩 객체는 거절');
   eq((await B.call('send_emote', 'knock')).error, 'BAD_REQUEST', '6 객체가 아니면 거절');
@@ -450,6 +452,74 @@ async function phase4() {
 
 // 실제 supabase-js + 가짜 PostgREST, 전역 WebSocket 이 없는 Node 18/20 을 흉내낸다
 // (예전에는 createClient 가 'native WebSocket not found' 예외를 던져 서버가 메모리로 떨어지고 players 에 아무것도 안 들어갔다)
+// ───────── Phase 6: 방 격리 ─────────
+const IN_GAME_EVENTS = ['match_found', 'state_update', 'game_over', 'opponent_status', 'receive_emote', 'room_closed', 'session_replaced'];
+
+async function phase6() {
+  const server = createGameServer({ quiet: true, onError });
+  const port = await server.start(0, '127.0.0.1');
+  const channelSize = (code) => server.io.sockets.adapter.rooms.get(roomChannel(code))?.size ?? 0;
+  const [A, B, C, D, E, F, G] = await Promise.all(Array.from({ length: 7 }, () => client(port)));
+
+  // 방 1 · 방 2 = 무작위 매칭(일반 테이블) 두 판이 동시에, 방 3 = 친구 방 코드
+  await A.call('join_queue', { tier: 'free', profile: {} });
+  await B.call('join_queue', { tier: 'free', profile: {} });
+  const m1 = await A.waitFor('match_found');
+  await C.call('join_queue', { tier: 'free', profile: {} });
+  await D.call('join_queue', { tier: 'free', profile: {} });
+  const m2 = await C.waitFor('match_found');
+  const made = await E.call('create_private_room', { profile: {} });
+  await F.call('join_private_room', made.code);
+  const m3 = await E.waitFor('match_found');
+  const rooms = new Map([[A, m1.code], [B, m1.code], [C, m2.code], [D, m2.code], [E, m3.code], [F, m3.code]]);
+  eq(new Set([m1.code, m2.code, m3.code]).size, 3, '26 서로 다른 방 3개가 동시에 진행');
+  eq([channelSize(m1.code), channelSize(m2.code), channelSize(m3.code)], [2, 2, 2], '26 방 채널마다 그 방 두 사람만 join');
+
+  // 방 1 에서만 격발 · 아이템 · 이모트를 잔뜩 — 차례인 사람이 상대에게 쏜다
+  const seatOf = new Map();
+  for (const X of [A, B]) seatOf.set((await X.waitFor('match_found', (p) => p.code === m1.code)).you, X);
+  const lastState = () => [...A.inbox].reverse().find((m) => m.event === 'state_update' && m.payload.code === m1.code)?.payload.state;
+  for (let shot = 0; shot < 6; shot += 1) {
+    const turn = lastState()?.turn?.player; // A 시점의 좌석 id
+    const actor = seatOf.get(turn);
+    if (!actor || lastState()?.winner) break;
+    await actor.call('game_action', { type: 'use_item', index: 0 }); // 아이템이 없거나 못 쓰면 거절될 뿐
+    await actor.call('send_emote', { type: 'TAUNT', id: 'knock' }).catch(() => null);
+    await actor.call('game_action', { type: 'shoot', target: 'opponent' });
+    await sleep(30);
+  }
+  await A.call('leave_room'); // 방 1 끝 (A 항복)
+  await Promise.all([A.waitFor('game_over', (p) => p.code === m1.code), B.waitFor('game_over', (p) => p.code === m1.code)]);
+  await sleep(80); // 늦게 새는 이벤트가 있다면 도착할 시간
+
+  const leaks = [];
+  for (const [X, code] of rooms) {
+    for (const { event, payload } of X.inbox) {
+      if (IN_GAME_EVENTS.includes(event) && payload?.code !== code) leaks.push(`${code} 좌석이 ${event}(${payload?.code ?? '코드 없음'}) 수신`);
+    }
+  }
+  eq(leaks, [], '26 모든 인게임 이벤트는 자기 방 코드 — 다른 방 이벤트는 한 건도 오지 않는다');
+  eq(G.inbox.filter((m) => IN_GAME_EVENTS.includes(m.event)).map((m) => m.event), [], '26 로비에만 있는 소켓은 어떤 방의 인게임 이벤트도 받지 않는다');
+  const room1Events = [A, B].flatMap((X) => X.inbox.filter((m) => m.event === 'state_update')).length;
+  ok(room1Events >= 4, `26 방 1 은 실제로 진행됐다 (state_update ${room1Events}건)`);
+  eq([C, D, E, F].map((X) => X.inbox.filter((m) => m.payload?.code === m1.code).length), [0, 0, 0, 0], '26 방 2 · 방 3 좌석은 방 1 이벤트를 0건 받았다');
+
+  // 판이 끝나면 방 채널에서 나간다 → 끝난 방 소켓은 그 뒤 아무것도 받지 않는다
+  eq([channelSize(m1.code), channelSize(m2.code), channelSize(m3.code)], [0, 2, 2], '26 끝난 방 1 은 채널이 비고, 진행 중인 방 2 · 3 은 그대로');
+  const afterOver = [A.inbox.length, B.inbox.length];
+  await C.call('game_action', { type: 'shoot', target: 'opponent' }).catch(() => null); // 방 2 진행
+  await D.call('game_action', { type: 'shoot', target: 'opponent' }).catch(() => null);
+  await E.call('send_emote', { type: 'TAUNT', id: 'flick' }).catch(() => null); // 방 3 진행
+  await sleep(80);
+  eq([A.inbox.length, B.inbox.length], afterOver, '26 판이 끝난 방 1 소켓은 다른 방이 진행돼도 아무것도 받지 않는다');
+
+  // 방 3(친선) 에서 나가기: 나간 사람도 결과는 받고, 그 즉시 채널에서 빠진다
+  await F.call('leave_room');
+  await Promise.all([E.waitFor('game_over', (p) => p.code === m3.code), F.waitFor('game_over', (p) => p.code === m3.code)]);
+  eq(channelSize(m3.code), 0, '26 나가기 → 방 채널에서 바로 나간다');
+  await server.stop();
+}
+
 async function phase5() {
   const rows = new Map();
   const requests = [];
@@ -500,6 +570,7 @@ try {
   await phase3();
   await phase4();
   await phase5();
+  await phase6();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

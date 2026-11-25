@@ -10,6 +10,9 @@
  *     모드별: 랭킹전(무작위 매칭 · match.ranked) → recordRanked(서버 기록으로 랭킹 MMR · 전적 · 연승을 맞춤) / 친선전(방 코드) → recordFriendly(탄피만).
  *   · 이벤트 이름은 server/index.js 규약 그대로: state_update · game_over · opponent_status · receive_emote · room_closed · session_replaced · match_found(재접속 때 다시 옴).
  *
+ * 수신 가드: 모든 인게임 이벤트(state_update · game_over · opponent_status · receive_emote · match_found · room_closed · session_replaced)는
+ *   ① 지금 세션(S)이고 ② 닫히지 않았고 ③ 이벤트의 방 코드(code)가 내가 앉은 방과 같을 때만 처리한다 — 아니면 연출 · 소리 없이 버린다.
+ *
  * 'pvp:start' 핸들러는 소켓 리스너를 '동기로' 먼저 붙인다 (서버가 match_found 직후 첫 state_update 를 보내므로). 첫 state_update 가 도착하면 hooks.onStart() 로 판을 연다.
  */
 
@@ -73,10 +76,14 @@ function onPvpStart(e) {
   }
 }
 
+/** 이 이벤트를 처리해도 되는가: 지금 세션 · 닫히지 않음 · 내 방 코드와 같음 (다른 방 · 지난 판 이벤트는 버린다) */
+const mine = (s, m) => S === s && !s.closed && typeof m?.code === 'string' && m.code === s.code;
+
 function bind(s) {
   const on = (event, fn) => {
-    s.socket.on(event, fn);
-    s.off.push(() => s.socket.off(event, fn));
+    const guarded = (m) => { if (mine(s, m)) fn(m); }; // 가드는 맨 앞에서 — 통과하지 못하면 아무 연출 · 소리도 없다
+    s.socket.on(event, guarded);
+    s.off.push(() => s.socket.off(event, guarded));
   };
   on('state_update', (m) => onState(s, m));
   on('game_over', (m) => finish(s, {
@@ -87,16 +94,21 @@ function bind(s) {
     mmrDelta: Number.isFinite(m?.mmrDelta) ? m.mmrDelta : null, // 랭킹전에서 서버가 실제로 기록한 이번 판 MMR 변동 (친선전 · 기록 실패면 없음)
   }));
   on('opponent_status', (m) => onOpponent(s, m));
-  on('receive_emote', (m) => { if (S === s && !s.closed) document.dispatchEvent(new CustomEvent(TAUNT_IN, { detail: m })); });
+  on('receive_emote', ({ code: _room, ...emote }) => document.dispatchEvent(new CustomEvent(TAUNT_IN, { detail: emote }))); // 방 코드는 떼고 도발 모양만
   on('match_found', (m) => { if (m?.token) s.token = m.token; }); // 재접속 때 다시 오는 match_found
   on('room_closed', () => { if (!s.over) hooks.onNotice?.('방이 닫혔습니다.', 'danger'); });
   on('session_replaced', () => finish(s, { youWon: false, payout: 0, reason: 'replaced' })); // 다른 화면이 이 좌석을 넘겨받았다
-  on('disconnect', (reason) => {
+  const onSocket = (event, fn) => { // 소켓 연결 상태 이벤트 (방 코드 없음) — 세션 · 닫힘만 본다
+    const guarded = (arg) => { if (S === s && !s.closed) fn(arg); };
+    s.socket.on(event, guarded);
+    s.off.push(() => s.socket.off(event, guarded));
+  };
+  onSocket('disconnect', (reason) => {
     if (s.over || s.closed) return;
     hooks.onNotice?.('서버와 연결이 끊어졌습니다 — 다시 연결하는 중…', 'danger');
     if (reason === 'io server disconnect') s.socket.connect(); // 서버가 끊은 경우는 자동 재연결이 없다
   });
-  on('connect', () => { // 자동 재연결 성공 → 15초 유예 안에 자리를 되찾는다 (새 소켓이라 토큰으로 증명)
+  onSocket('connect', () => { // 자동 재연결 성공 → 15초 유예 안에 자리를 되찾는다 (새 소켓이라 토큰으로 증명)
     if (s.over || s.closed) return;
     s.socket.emit('rejoin_room', { code: s.code, token: s.token }, (res) => {
       if (res?.ok) hooks.onNotice?.('다시 연결되었습니다.', 'info');

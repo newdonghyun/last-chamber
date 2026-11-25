@@ -33,6 +33,7 @@
  *   leave_room()                                  방 나가기: 기다리는 방은 닫히고, 진행 중이면 항복(상대 승)
  *
  *   ── 서버 → 클라이언트 ──
+ *   ※ 서버 → 클라이언트 인게임 이벤트는 모두 그 방 좌석의 소켓에게만 간다 (io.emit · socket.broadcast 없음). 모두 방 코드(code)를 싣는다 — 자기 방 코드가 아니면 버릴 것.
  *   match_found   { code, mode: 'private'|'queue', ranked: mode === 'queue', tier, fee, prize, you: 'P1'|'P2', token, opponent: { id, profile }, turnMs, graceMs, resume }
  *   state_update  { code, reason: 'start'|'shoot'|'item'|'timeout'|'rejoin', by?, auto?, state, logFrom, events, deadline, now, opponentConnected }
  *                 state = getPublicState(내 좌석) · events = getLog(내 좌석, logFrom) (rejoin 은 logFrom 0 부터 전체) · deadline = 이 턴이 자동 격발되는 서버 시각(ms) · now = 서버 현재 시각(시계 보정용)

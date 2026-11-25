@@ -317,6 +317,11 @@ const josa = (word, withFinal, withoutFinal) => {
 const say = (line) => { if (!online) setText(el.line, line); }; // PvP 에서는 이 칸에 딜러(AI) 대사를 쓰지 않는다
 const vsFoe = (text) => (online ? text.replaceAll('딜러', '상대') : text); // PvP: 딜러 → 상대 ('상대'도 받침이 없어 이/가 · 을/를 조사가 그대로 맞는다)
 const thinking = (on) => el.speech.classList.toggle('is-thinking', on);
+// 인게임 연출 가드: 지금 판(token)이고 실제 게임 화면일 때만 — 타이틀 · 결과 화면 · 대전 로비가 떠 있으면 인게임 효과음 · 진동 · 서버 로그 연출을 하지 않는다
+// (지난 판의 늦은 연출 · 끝난 PvP 판의 늦은 이벤트가 로비나 결과 화면에서 소리를 내지 않게. 다른 방 이벤트는 pvpSession.js 가 방 코드로 먼저 걸러 낸다)
+const lobbyOpen = () => document.getElementById('mp-lobby')?.open === true;
+const onGameScreen = (token = gameId) => token === gameId && Boolean(engine) && !el.title.open && !lobbyOpen();
+const gameSfx = (play, token = gameId) => { if (onGameScreen(token)) play(); };
 const isPaused = () => !online && (el.rules.open || tabHidden); // 도감을 보거나 다른 탭·창에 가 있는 동안 게임 일시정지 (실시간 PvP 는 서버 시계가 흐르므로 멈추지 않는다)
 
 function guard(promise) {
@@ -1484,7 +1489,7 @@ function applyTurnSkin(id) {
 
 // 서버(PvP)에서 새 상태/결과가 왔다 — 연출 중이면 그 연출이 끝나는 advance 가 아직 못 보여 준 로그를 이어서 처리한다
 function onPvpUpdate() {
-  if (online && !busy && gameId) advance(gameId);
+  if (online && !busy && gameId && onGameScreen()) advance(gameId); // 게임 화면이 아니면(결과 · 로비) 서버 로그를 연출하지 않는다
 }
 
 function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 첫 상태를 받은 뒤 부른다) — 아니면 AI 딜러 대전
@@ -1644,7 +1649,7 @@ async function handleItem(index) {
     if (online) advance(token); // 그새 서버가 보낸 로그가 있으면 이어서 연출
     return;
   }
-  sound.playItem(); // 아이템 사용은 소리만 (진동 없음)
+  gameSfx(() => sound.playItem(), token); // 아이템 사용은 소리만 (진동 없음)
   await present(token);
   if (token !== gameId) return;
   busy = false;
@@ -1704,7 +1709,7 @@ async function runAITurn(token) {
     let result = null;
     if (action.type === 'item') {
       result = engine.useItem(AI, action.slotIndex);
-      if (result.ok) sound.playItem(); // 탄종변환도 사용 사실과 소리는 공개 (진동 없음)
+      if (result.ok) gameSfx(() => sound.playItem(), token); // 탄종변환도 사용 사실과 소리는 공개 (진동 없음)
     }
     if (!result?.ok) { // 격발 (아이템 실패 시에도 상대에게 격발로 진행해 멈추지 않게)
       thinking(false);
@@ -1729,7 +1734,7 @@ async function fireSequence(shooter, target, token, known = null) {
   const atDealer = (shooter === AI) === (target === 'self'); // 총구가 딜러(위)를 향하는가
   el.gun.classList.remove('aim-up', 'aim-down');
   el.gun.classList.add(atDealer ? 'aim-up' : 'aim-down');
-  sound.playHeartbeat();
+  gameSfx(() => sound.playHeartbeat(), token);
   el.table.classList.add('zoom-tension');
   await wait(TENSION_MS);
   el.table.classList.remove('zoom-tension');
@@ -1749,14 +1754,16 @@ async function fireSequence(shooter, target, token, known = null) {
       document.body.classList.add('slowmo');
       el.table.classList.add('zoom-hit');
     }
-    sound.playGunshot();
-    sound.playDamage();
-    platform.triggerHaptic(atDealer ? 'shot' : 'hit'); // 실탄 1회: 상대가 맞으면 실탄 발사(Medium) · 내가 맞으면 피격(Heavy) — 300ms 쿨타임으로 중복 수신도 한 번만
-    sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
+    if (onGameScreen(token)) { // 실제 게임 화면에서만 총성 · 진동
+      sound.playGunshot();
+      sound.playDamage();
+      platform.triggerHaptic(atDealer ? 'shot' : 'hit'); // 실탄 1회: 상대가 맞으면 실탄 발사(Medium) · 내가 맞으면 피격(Heavy) — 300ms 쿨타임으로 중복 수신도 한 번만
+      sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
+    }
     restartClasses([[el.gun, 'fire'], [el.app, 'shake-hard'], [el.flash, 'flash-red']]); // 강제 리플로우 1번으로 세 연출을 함께 시작
     if (slow) await wait(SLOWMO_MS);
   } else {
-    sound.playClick(); // 공포탄: 딸깍 소리만 (진동 없음)
+    gameSfx(() => sound.playClick(), token); // 공포탄: 딸깍 소리만 (진동 없음)
   }
   await wait(AFTERMATH_MS);
   el.gun.classList.remove('fire', 'aim-up', 'aim-down');
@@ -1822,7 +1829,7 @@ async function presentEntry(e, rest) {
       await presentShot(e, rest);
       break;
     case 'ITEM':
-      if (online && e.actor === AI) sound.playItem(); // 상대 턴에서는 사용 직전에 울리던 소리 (내 아이템은 handleItem 이 울린다 · 진동 없음)
+      if (online && e.actor === AI) gameSfx(() => sound.playItem()); // 상대 턴에서는 사용 직전에 울리던 소리 (내 아이템은 handleItem 이 울린다 · 진동 없음)
       await presentItem(e);
       break;
     case 'ROUND_END': {
@@ -1931,7 +1938,7 @@ function effectText(item, e, mine) {
 async function reloadSequence(e) {
   forget();
   render();
-  sound.playReload(); // 장전은 소리 · 연출만 (진동 없음)
+  gameSfx(() => sound.playReload()); // 장전은 소리 · 연출만 (진동 없음)
   restartClass(el.gun, 'barrel-spin');
   el.revealShells.replaceChildren(...Array.from({ length: e.live + e.blank }, (_, i) => {
     const live = i < e.live;
@@ -2486,7 +2493,7 @@ el.btnTaunt.addEventListener('click', onTauntClick);
 document.addEventListener(TAUNT_IN, (ev) => { // Step B: 상대가 보낸 도발 — 알려진 도발 id 만 같은 연출로 재생 (너무 촘촘한 도착은 무시)
   const event = validateTauntEvent(ev.detail);
   const now = performance.now();
-  if (!event || !engine || isPaused() || engine.getPublicState(PLAYER).winner || now - lastTauntInAt < TAUNT_IN_MIN_GAP_MS) return;
+  if (!event || !online || !onGameScreen() || isPaused() || engine.getPublicState(PLAYER).winner || now - lastTauntInAt < TAUNT_IN_MIN_GAP_MS) return; // PvP 판 화면에서만
   lastTauntInAt = now;
   playTaunt(event, { from: 'opponent' });
 });
