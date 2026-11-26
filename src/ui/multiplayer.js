@@ -44,7 +44,6 @@ import { userSession } from './session.js';
 import { requireLogin } from './accountApi.js';
 import { retryUntil } from './wake.js';
 import { sharedWallet, WALLET_CHANGED } from './walletClient.js';
-import { getItem, getFlame } from './storeData.js';
 import { captureInvite, peekInvite, clearInvite, buildInviteLink } from './invite.js';
 
 const START_BUTTON_ID = 'btn-start';
@@ -144,6 +143,7 @@ dialog.innerHTML = `
         <p class="mp-eyebrow" data-ui="eyebrow">SELECT MODE</p>
         <h2 class="mp-title" id="mp-title" data-ui="title">대전 모드 선택</h2>
       </div>
+      <button class="mp-daily-open" type="button" data-act="open-daily" hidden>출석</button>
       <button class="mp-close" type="button" data-act="close" aria-label="닫기">&#10005;</button>
     </header>
     <p class="mp-online" data-ui="online" aria-live="off">접속자 수를 불러오는 중…</p>
@@ -152,12 +152,11 @@ dialog.innerHTML = `
 
     <div class="mp-view" data-ui="menu">
       <!-- 모드: AI 딜러 대전(연습 · 손님도) · 온라인 랭킹전(공개 방 · 빠른 매칭 — MMR) · 친선 비밀방(방 코드 — MMR 미반영) -->
-      <section class="mp-sec mp-daily" data-ui="daily" aria-labelledby="mp-h-daily" hidden>
-        <h3 class="mp-sec-title" id="mp-h-daily">출석 체크 · 7일 보상 <small>DAILY</small></h3>
-        <ol class="mp-days" data-ui="days" aria-label="7일 출석 보상"></ol>
-        <button class="mp-btn" type="button" data-act="checkin" data-ui="checkin"><span class="mp-btn-main" data-ui="checkin-label">출석 체크</span></button>
+      <!-- 평소에는 접혀 있다: 탄피가 모자랄 때의 긴급 보급 · 서버 지갑을 못 불러왔을 때의 안내만 (출석 보상은 팝업 — src/ui/attendance.js) -->
+      <section class="mp-sec mp-daily" data-ui="daily" aria-label="긴급 보급 · 서버 지갑 안내" hidden>
         <button class="mp-btn mp-btn--soft" type="button" data-act="emergency" data-ui="emergency" hidden><span class="mp-btn-main" data-ui="emergency-label">긴급 보급</span></button>
         <p class="mp-hint" data-ui="daily-note"></p>
+        <button class="mp-btn mp-btn--soft" type="button" data-act="wallet-retry" data-ui="wallet-retry" hidden><span class="mp-btn-main">다시 불러오기</span></button>
       </section>
 
       <section class="mp-sec" aria-labelledby="mp-h-solo">
@@ -299,12 +298,10 @@ const ui = {
   slow: q('slow'),
   online: q('online'),
   daily: q('daily'),
-  days: q('days'),
-  checkin: q('checkin'),
-  checkinLabel: q('checkin-label'),
   emergency: q('emergency'),
   emergencyLabel: q('emergency-label'),
   dailyNote: q('daily-note'),
+  walletRetry: q('wallet-retry'),
   elapsed: q('elapsed'),
   publicElapsed: q('public-elapsed'),
   status: q('status'),
@@ -738,38 +735,18 @@ function paintOnline() {
   ui.online.textContent = `온라인 ${fmt(lastStats.online)}명${queued} · 공개 방 ${fmt(lastRooms.length)}개`;
 }
 
-const rewardName = (r) => {
-  const parts = [];
-  if (r.brass) parts.push(`탄피 ${fmt(r.brass)}`);
-  if (r.item) parts.push((r.item.kind === 'flame' ? getFlame(r.item.id) : getItem(r.item.kind, r.item.id))?.name ?? r.item.id);
-  return parts.join(' + ');
-};
-
-/** 출석 7칸 · [출석 체크] · [긴급 보급] — 서버가 알려 준 상태(wallet.state)대로. 손님 · 서버 지갑이 없는 접속에서는 접어 둔다 */
+/** 긴급 보급(탄피가 가장 싼 참가비보다 적을 때) · 서버 지갑 오류 안내. 손님이거나 알릴 것이 없으면 접어 둔다 */
 function paintDaily() {
   const state = wallet.state;
-  ui.daily.hidden = !state || !loggedIn();
-  if (ui.daily.hidden) return;
-  const att = state.attendance;
-  const done = !att.claimedToday && att.days >= att.rewards.length ? 0 : att.days; // 7일을 다 받았고 오늘 아직이면 새 사이클
-  ui.days.replaceChildren(...att.rewards.map((r) => {
-    const li = document.createElement('li');
-    const isDone = r.day <= done;
-    li.className = `mp-day${isDone ? ' is-done' : ''}${r.day === att.todayDay ? ' is-today' : ''}`;
-    const day = document.createElement('b');
-    day.textContent = `${r.day}일`;
-    const what = document.createElement('span');
-    what.textContent = rewardName(r);
-    li.append(day, what);
-    li.setAttribute('aria-label', `${r.day}일차 ${rewardName(r)}${isDone ? ' · 받음' : ''}`);
-    return li;
-  }));
-  ui.checkin.disabled = dailyBusy || att.claimedToday;
-  ui.checkinLabel.textContent = att.claimedToday ? '오늘 출석 완료 ✓' : `출석 체크 — ${att.todayDay}일차 보상 받기`;
-  const em = state.emergency;
+  const failed = loggedIn() && !state ? wallet.lastError : null; // 로그인했는데 서버 지갑을 못 불러왔다 — 말없이 넘어가지 않고 이유를 보인다
   profile.reload();
-  const needs = profile.brass < em.minFee;
+  const em = loggedIn() ? state?.emergency : null;
+  const needs = Boolean(em) && profile.brass < em.minFee;
+  ui.daily.hidden = !needs && !failed;
   ui.emergency.hidden = !needs;
+  ui.walletRetry.hidden = !failed;
+  ui.dailyNote.textContent = failed ? `출석 · 보급 정보를 불러오지 못했어요 (${failed}) — 잠시 뒤에 다시 불러와 주세요` : '';
+  if (!needs) return;
   ui.emergency.disabled = dailyBusy || em.left <= 0;
   ui.emergencyLabel.textContent = em.left > 0 ? `긴급 보급 +${em.amount} 탄피 · 오늘 ${em.left}/${em.perDay}회 남음` : '오늘 긴급 보급을 모두 받았어요';
 }
@@ -783,24 +760,6 @@ function refreshWallet() {
     syncControls();
     paintDaily();
   });
-}
-
-async function onCheckin() {
-  if (dailyBusy || needLogin()) return;
-  dailyBusy = true;
-  paintDaily();
-  const res = await wallet.checkIn();
-  dailyBusy = false;
-  if (res.ok) {
-    say(`출석 ${res.day}일차 — ${rewardName(res.reward)}${res.reward.duplicate ? ' (이미 가진 스킨이라 탄피로 대신 지급)' : ''}`, 'ok');
-  } else if (res.error === 'ALREADY_CHECKED_IN') {
-    say('오늘은 이미 출석했어요 — 한국 시간 자정이 지나면 다시 받을 수 있어요', 'error');
-  } else {
-    say(res.reason === 'offline' || res.reason === 'server' ? '서버에 연결할 수 없어요. 잠시 뒤에 다시 시도해 주세요' : '출석 체크를 할 수 없어요', 'error');
-  }
-  profile.reload();
-  syncControls();
-  paintDaily();
 }
 
 async function onEmergency() {
@@ -1061,7 +1020,8 @@ dialog.addEventListener('click', (e) => {
     case 'create': createFriendlyRoom(); break;
     case 'copy': onCopy(); break;
     case 'copy-invite': onCopyInvite(); break;
-    case 'checkin': onCheckin(); break;
+    case 'open-daily': window.dispatchEvent(new CustomEvent('lastchamber:open-daily')); break; // 출석 팝업 (attendance.js)
+    case 'wallet-retry': refreshWallet(); break;
     case 'emergency': onEmergency(); break;
     case 'queue-ai': // 대기를 그만두고(서버가 참가비를 돌려준다) 바로 AI 연습
       request('leave_queue');

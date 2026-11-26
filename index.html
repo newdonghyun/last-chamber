@@ -22,6 +22,7 @@
   <link rel="stylesheet" href="./style.css" />
   <link rel="stylesheet" href="./src/ui/monetization.css" /> <!-- 유료 상품 2종(VIP 광고 스킵 패스 · 스타터 팩) 전용 스타일 -->
   <link rel="stylesheet" href="./src/ui/multiplayer.css" /> <!-- 대전 모드 선택 & 매칭 로비 모달 전용 스타일 (4-2단계) -->
+  <link rel="stylesheet" href="./src/ui/attendance.css" /> <!-- 일일 출석 보상 팝업 · [출석] 버튼 -->
   <link rel="stylesheet" href="./src/ui/loginGate.css" /> <!-- 시작 화면 로그인 · 회원가입 · 둘러보기 · 계정 창 · 타이틀 우상단 계정 버튼 -->
 </head>
 <body>
@@ -420,6 +421,10 @@
             <span class="wallet-text"><small>BRASS</small><b id="wallet-amount">0</b></span>
             <span class="wallet-streak" id="wallet-streak" hidden></span>
           </div>
+          <button class="daily-btn" id="btn-daily" type="button" aria-haspopup="dialog" aria-controls="daily-modal" aria-label="출석 보상" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4M8.5 15l2.5 2.4 4.6-4.6"/></svg>
+            <span>출석</span>
+          </button>
           <button class="icon-btn account-btn" id="btn-account" type="button" aria-haspopup="dialog" aria-controls="account-modal" aria-label="계정 — 로그인 · 닉네임 변경 · 로그아웃" title="계정">
             <svg aria-hidden="true"><use href="#i-user"></use></svg>
           </button>
@@ -888,5 +893,6 @@
   <script type="module" src="./src/ui/monetization.js"></script>
   <!-- 대전 모드 선택 & 매칭 로비 (4-2단계): PLAY(#btn-start) 클릭을 가로채 모드 선택 모달을 연다 · AI 딜러 선택 시 원래 PLAY 동작을 그대로 실행 · 매칭 성사 시 window 'pvp:start' 만 발생 -->
   <script type="module" src="./src/ui/multiplayer.js"></script>
+  <script type="module" src="./src/ui/attendance.js"></script> <!-- 일일 출석 보상 팝업 (로비 모달을 참조하므로 multiplayer.js 뒤) -->
 </body>
 </html>

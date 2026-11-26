@@ -21,6 +21,8 @@ import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui
 import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, captureInvite, INVITE_KEY, INVITE_TTL_MS } from '../src/ui/invite.js';
 import { retryUntil } from '../src/ui/wake.js';
 import { WalletClient } from '../src/ui/walletClient.js';
+import { autoOpenKey, claimedDays, claimFeedback, rewardName } from '../src/ui/attendanceRules.js';
+import { ART_DEFS, artFor, STAMP } from '../src/ui/attendanceArt.js';
 import { GuideState, GUIDE_KEY, GUIDED_TURN_MS, RULE_LINES, COACH_STEPS } from '../src/ui/guide.js';
 import { MMR_RULE as SERVER_MMR } from '../server/userStore.js';
 
@@ -545,12 +547,32 @@ function memoryStorage(initial = {}) {
     const r = await legacy.buyWithBrass('gun', 'gold');
     eq([r.ok, legacyProfile.owns('gun', 'gold'), legacyProfile.brass, legacy.remote], [true, true, 4500, false], '10 서버에 지갑 컬럼이 아직 없으면(WALLET_SETUP_REQUIRED) 이번 접속은 예전 방식 — 게임이 멈추지 않는다');
 
+    // 서버에 SQL 이 적용되기 전에 로그인한 접속 → 이후 동기화에서 서버 지갑으로 넘어온다 (새로고침 불필요)
+    {
+      let ready = false;
+      const { p: lateProfile } = newProfile({ v: 5, brass: 5000 });
+      const late = new WalletClient({ profile: lateProfile, session: session(true), call: async (a, g) => (ready ? fakeCall(a, g) : { ok: false, error: 'WALLET_SETUP_REQUIRED' }) });
+      const first = await late.sync();
+      eq([first.ok, first.error, late.remote, late.state], [false, 'WALLET_SETUP_REQUIRED', false, null], '10 지갑 컬럼이 없을 때의 동기화는 예전 방식으로 둔다');
+      eq(late.lastError, 'WALLET_SETUP_REQUIRED', '10 실패한 이유(lastError)를 화면이 보일 수 있게 보관');
+      ready = true;
+      const second = await late.sync();
+      eq(late.lastError, null, '10 성공하면 lastError 는 비운다');
+      eq([second.ok, late.remote, late.state?.attendance.days, lateProfile.brass], [true, true, 3, 1234], '10 서버가 준비된 뒤의 동기화는 서버 지갑으로 복귀 — 출석 카드 상태 · 서버 탄피(1,234)로 거울 갱신');
+    }
+
     const { p: guestProfile } = newProfile({ v: 5, brass: 2000 });
     const guestCalls = [];
     const guest = new WalletClient({ profile: guestProfile, session: session(false), call: async (...a) => { guestCalls.push(a); return { ok: true }; } });
     eq([(await guest.buyWithBrass('gun', 'gold')).ok, guestProfile.brass, guestCalls.length, guest.remote, guest.state], [true, 1500, 0, false, null], '10 손님은 서버를 부르지 않고 이 기기에서 (AI 연습만 하는 계정 없는 사용자)');
     eq([(await guest.checkIn()).error, (await guest.emergency()).error, await guest.practice(true)], ['LOGIN_REQUIRED', 'LOGIN_REQUIRED', null], '10 출석 · 긴급 보급은 로그인 필요 · 연습 보상은 기기 처리');
     delete globalThis.document;
+  }
+
+  // 정적 점검: 로그인했는데 서버 지갑을 못 불러오면 카드를 말없이 숨기지 않고 이유를 보인다
+  {
+    const lobby = readFileSync(new URL('../src/ui/multiplayer.js', import.meta.url), 'utf8');
+    ok(lobby.includes('wallet.lastError') && lobby.includes('출석 · 보급 정보를 불러오지 못했어요 (${failed})') && lobby.includes('data-act="wallet-retry"') && lobby.includes("case 'wallet-retry': refreshWallet()"),'10 서버 지갑 실패 시 로비에 이유(코드) + [다시 불러오기] 를 보인다');
   }
 
   // 정적 점검: 로비 · 모바일 터치 · 연결
@@ -562,8 +584,8 @@ function memoryStorage(initial = {}) {
     ok(/QUEUE_PROMPT_S = 15/.test(lobby) && lobby.includes('현재 대기 인원이 적습니다. AI 딜러와 바로 연습하시겠습니까?') && lobby.includes('AI 연습 바로가기') && lobby.includes('계속 대기'), '10 빠른 매칭 15초 넘게 기다리면 "현재 대기 인원이 적습니다…" + [AI 연습 바로가기] / [계속 대기]');
     ok(/case 'queue-ai':[\s\S]*?request\('leave_queue'\);[\s\S]*?startSolo\(\)/.test(lobby) && /case 'queue-wait':[\s\S]*?slowDismissed = true/.test(lobby), '10 [AI 연습 바로가기]는 대기를 접고 AI 연습으로 · [계속 대기]는 이번 대기에서 다시 묻지 않는다');
     ok(lobby.includes("s.on('lobby_stats', onLobbyStats)") && /온라인 \$\{fmt\(lastStats\.online\)\}명/.test(lobby) && /data-ui="online"/.test(lobby), '10 로비 상단에 온라인 접속자 · 매칭 대기 · 공개 방 수');
-    ok(/data-act="checkin"/.test(lobby) && /data-act="emergency"/.test(lobby) && lobby.includes('본 게임 내 탄피는 무상 재화이며 현금 결제·환전 및 유저 간 거래가 불가능합니다'), '10 로비: [출석 체크] · [긴급 보급] · 맨 아래 무상 재화 안내문');
-    ok(/wallet\.checkIn\(\)/.test(lobby) && /wallet\.emergency\(\)/.test(lobby) && !/profile\.grantBrass/.test(lobby), '10 출석 · 긴급 보급은 서버 지갑 호출 (로비가 이 기기에서 탄피를 더하지 않는다)');
+    ok(!lobby.includes('data-act="checkin"') && !lobby.includes('data-ui="days"') && lobby.includes('data-act="emergency"') && lobby.includes('data-act="open-daily"') && lobby.includes('본 게임 내 탄피는 무상 재화이며 현금 결제·환전 및 유저 간 거래가 불가능합니다'), '10 로비: 상시 출석 카드는 없고 [출석] 버튼 · [긴급 보급] · 무상 재화 안내문');
+    ok(/wallet\.emergency\(\)/.test(lobby) && !/profile\.grantBrass/.test(lobby), '10 긴급 보급은 서버 지갑 호출 (로비가 이 기기에서 탄피를 더하지 않는다)');
     ok(/\.trigger-panel \{[^}]*gap: 16px/.test(css), '10 격발 버튼 사이 간격 16px');
     ok(/id="btn-shoot-opponent"[\s\S]*?#i-left[\s\S]*?id="btn-shoot-self"[\s\S]*?#i-right/.test(html), '10 왼쪽 [상대에게 격발] ◀ · 오른쪽 [나에게 격발] ▶ — 좌우 배치에 맞는 화살표');
     ok(/const SHOOT_LOCK_MS = 350/.test(app) && /if \(myTurn && !wasMyTurn\) armShootLock\(token\)/.test(app) && /setDisabled\(el\.btnOpponent, !canAct \|\| shootLocked\(\)\)/.test(app) && /if \(!playerCanAct\(\) \|\| shootLocked\(\)\) return;/.test(app), '10 내 턴이 시작되면 0.35초 동안 격발 버튼 잠금 (버튼 · 단축키 모두)');
@@ -571,6 +593,42 @@ function memoryStorage(initial = {}) {
     ok(/wallet\.practice\(won\)/.test(app) && /await wallet\.buyWithBrass\(kind, id\)/.test(app) && /await wallet\.openChest\(\)/.test(app) && !/profile\.buyWithBrass|profile\.openChest\(\)/.test(app), '10 상점 구매 · 상자 · AI 연습 보상은 서버 지갑을 거친다 (app.js 가 profile 로 직접 사지 않는다)');
     ok(/모든 아이템을 이미 모았어요/.test(app) && /VOID_TEXT/.test(app) && app.includes('조기 종료로 인해 MMR이 변동되지 않았습니다'), '10 결과 화면: 조기 종료 안내 문구');
   }
+}
+
+// ───────── 11. 일일 출석 팝업 ─────────
+{
+  const rewards = [
+    { day: 1, brass: 100 }, { day: 2, item: { kind: 'table', id: 'silver_roulette' } }, { day: 3, brass: 200 }, { day: 4, item: { kind: 'flame', id: 'blue_flame' } },
+    { day: 5, brass: 300 }, { day: 6, item: { kind: 'gun', id: 'blood_gold' } }, { day: 7, brass: 500, item: { kind: 'gun', id: 'phantom_black' } },
+  ];
+  eq(rewards.map(rewardName), ['탄피 100', '실버 룰렛', '탄피 200', '블루 플레임', '탄피 300', '블러드 골드', '탄피 500 + 팬텀 블랙'], '11 7일 보상 이름');
+  eq([claimedDays({ days: 0, claimedToday: false, rewards }), claimedDays({ days: 3, claimedToday: false, rewards }), claimedDays({ days: 7, claimedToday: true, rewards }), claimedDays({ days: 7, claimedToday: false, rewards })], [0, 3, 7, 0], '11 도장 칸 수 — 7일을 다 받은 다음 날은 새 사이클');
+  const unclaimed = { today: '2026-11-26', attendance: { days: 1, claimedToday: false, rewards } };
+  eq([autoOpenKey('u1', unclaimed), autoOpenKey('u1', { ...unclaimed, attendance: { ...unclaimed.attendance, claimedToday: true } }), autoOpenKey('u1', null)], ['u1|2026-11-26', null, null], '11 자동 팝업: 오늘 안 받았을 때만 (받았거나 지갑을 못 불러왔으면 없음)');
+  eq([claimFeedback({ reward: { brass: 100, item: null, duplicate: false } }), claimFeedback({ reward: { brass: 0, item: { kind: 'table', id: 'silver_roulette' }, duplicate: false } }), claimFeedback({ reward: { brass: 150, item: null, duplicate: true } })], ['탄피 100 획득!', '실버 룰렛 획득!', '탄피 150 획득! (이미 가진 스킨은 탄피로 지급)'], '11 수령 안내 문구');
+
+  const pictures = [1, 2, 3, 4, 5, 6, 7].map(artFor);
+  eq([new Set(pictures).size, pictures.every((s) => s.startsWith('<svg viewBox=') && s.endsWith('</svg>'))], [7, true], '11 일차마다 서로 다른 SVG 일러스트 7장');
+  const defined = new Set([...ART_DEFS.matchAll(/id="(att-[a-z-]+)"/g)].map((m) => m[1]));
+  const used = [...new Set([...pictures.join('').matchAll(/url\(#(att-[a-z-]+)\)/g)].map((m) => m[1]))];
+  eq([used.length > 5, used.filter((id) => !defined.has(id))], [true, []], '11 그림이 쓰는 그라디언트는 모두 정의돼 있다');
+  ok(STAMP.includes('수령 완료') && STAMP.includes('CLAIMED') && STAMP.includes('#ff3b47'), '11 수령 완료 칸의 붉은 도장');
+
+  // 계정을 바꾸면 앞 계정의 출석 상태는 보이지 않는다
+  const user = { id: 'A' };
+  const session = { isLoggedIn: true, get user() { return user; } };
+  const p = new PlayerProfile({ storage: memoryStorage() });
+  const w = new WalletClient({ profile: p, session, call: async () => ({ ok: true, result: { ok: true }, state: unclaimed }) });
+  await w.sync();
+  const mine = w.state?.today;
+  user.id = 'B';
+  eq([mine, w.state, w.lastError], ['2026-11-26', null, null], '11 출석 상태는 불러온 계정의 것만 (다른 계정으로 바꾼 직후엔 없음)');
+
+  const popup = readFileSync(new URL('../src/ui/attendance.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  ok(popup.includes('일일 출석 보상') && popup.includes('출석 보상 받기') && popup.includes('closeTimer = setTimeout(close, CLOSE_AFTER_MS)') && popup.includes('await wallet.checkIn()'), '11 [일일 출석 보상] 팝업 · [출석 보상 받기] → 서버 수령 후 자동 닫힘');
+  ok(popup.includes('wallet.lastError') && popup.includes('data-daily="retry"'), '11 팝업도 지갑 실패 코드와 [다시 불러오기] 를 보인다');
+  ok(html.includes('id="btn-daily"') && html.includes('src="./src/ui/attendance.js"') && html.includes('href="./src/ui/attendance.css"'), '11 타이틀 우상단 [출석] 버튼 · 모듈 · 스타일 연결');
 }
 
 const ms = Math.round(performance.now() - T0);

@@ -14,7 +14,7 @@
  *   · 로그인하지 않은 손님은 서버 지갑이 없다 → 모든 동작이 예전처럼 이 기기의 PlayerProfile 에서 처리된다 (AI 연습만 하는 손님).
  *   · 서버가 WALLET_SETUP_REQUIRED(DB 에 지갑 컬럼이 아직 없음)로 답하면 이번 접속에서는 예전 방식(이 기기에 저장)으로 계속한다 — 게임이 멈추지 않게.
  *   · 서버에 닿지 못하면 { ok: false, reason: 'offline' } — 탄피 · 스킨을 바꾸는 동작은 하지 않는다 (화면은 안내 문구를 보인다).
- *   · 값이 바뀔 때마다 document 에 'lastchamber:wallet-changed' 를 낸다 (화면이 지갑 · 상점 · 로비를 다시 그린다).
+ *   · 값이 바뀌거나 동기화가 실패할 때마다 document 에 'lastchamber:wallet-changed' 를 낸다 (화면이 지갑 · 상점 · 로비 · 출석 팝업을 다시 그린다).
  */
 
 import { userSession } from './session.js';
@@ -29,6 +29,8 @@ export class WalletClient {
   #call;
   #legacy = false; // 서버 지갑을 쓸 수 없다고 알려 와서 이번 접속은 예전 방식
   #state = null;
+  #owner = null; // state · error 를 받은 계정 (계정을 바꾸면 앞 계정의 것은 보이지 않는다)
+  #error = null; // 가장 최근 동기화가 실패한 이유 (성공하면 null) — 화면이 '출석 정보를 못 불러왔어요 (코드)' 를 보인다
 
   /** @param {{ profile: import('./storeData.js').PlayerProfile, session?: object, call?: Function }} options call = (action, args) → 서버 응답 (테스트에서 바꾼다) */
   constructor({ profile, session = userSession, call = null }) {
@@ -44,10 +46,17 @@ export class WalletClient {
 
   /** 가장 최근에 서버가 알려 준 출석 · 긴급 보급 · 연습 보상 상태 (손님이거나 아직 못 받았으면 null) */
   get state() {
-    return this.remote ? this.#state : null;
+    return this.remote && this.#owner === this.#session.user?.id ? this.#state : null;
+  }
+
+  /** 가장 최근 동기화 실패 코드 (WALLET_SETUP_REQUIRED · OFFLINE · TIMEOUT · SERVER_ERROR …) | null */
+  get lastError() {
+    return this.#session.isLoggedIn && this.#owner === this.#session.user?.id ? this.#error : null;
   }
 
   #take(res) {
+    this.#error = null;
+    this.#owner = this.#session.user?.id;
     if (res.state) this.#state = res.state;
     const changed = res.wallet ? this.#profile.adoptWallet(res.wallet) : false;
     globalThis.document?.dispatchEvent?.(new CustomEvent(WALLET_CHANGED, { detail: { changed } }));
@@ -70,14 +79,22 @@ export class WalletClient {
     return res.result;
   }
 
-  /** 서버 지갑으로 거울을 맞춘다 → { ok, changed } (손님 · 예전 방식이면 { ok: true, changed: false }) */
+  /**
+   * 서버 지갑으로 거울을 맞춘다 → { ok, changed } (손님이면 { ok: true, changed: false })
+   * 서버가 아직 지갑 컬럼이 없다고 해서 예전 방식이 된 접속도, 동기화(로그인 · 로비를 열 때)마다 다시 물어본다 —
+   * 그 사이 서버에 SQL 이 적용됐다면 새로고침 없이 서버 지갑으로 넘어온다.
+   */
   async sync() {
-    if (!this.remote) return { ok: true, changed: false };
+    if (!this.#session.isLoggedIn) return { ok: true, changed: false };
     const res = await this.#call('get', {});
     if (!res?.ok) {
-      if (res?.error === 'WALLET_SETUP_REQUIRED') this.#legacy = true;
+      if (res?.error === 'WALLET_SETUP_REQUIRED') { this.#legacy = true; this.#state = null; }
+      this.#error = res?.error ?? 'UNKNOWN';
+      this.#owner = this.#session.user?.id;
+      globalThis.document?.dispatchEvent?.(new CustomEvent(WALLET_CHANGED, { detail: { changed: false, error: this.#error } }));
       return { ok: false, error: res?.error };
     }
+    this.#legacy = false;
     return { ok: true, changed: this.#take(res) };
   }
 

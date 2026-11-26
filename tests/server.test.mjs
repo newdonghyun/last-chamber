@@ -114,7 +114,8 @@ async function player(port, nickname) {
  */
 async function finishRound1(X, Y, code) {
   const latest = (P) => P.inbox.filter((m) => m.event === 'state_update' && m.payload.code === code).at(-1)?.payload.state;
-  for (let i = 0; i < 120; i += 1) {
+  const until = Date.now() + 10_000; // 반복 횟수가 아니라 시간으로 끊는다 (상태 갱신이 늦어도 같은 턴에 헛발을 쏘며 횟수를 다 쓰지 않게)
+  while (Date.now() < until) {
     const sx = latest(X);
     const sy = latest(Y);
     if (!sx || !sy) { await sleep(15); continue; }
@@ -122,6 +123,7 @@ async function finishRound1(X, Y, code) {
     const shooter = sx.turn?.isMine ? X : sy.turn?.isMine ? Y : null;
     if (!shooter) { await sleep(15); continue; }
     await shooter.call('game_action', { type: 'shoot', target: 'opponent' });
+    await sleep(12); // 쏜 결과(state_update)가 양쪽에 닿을 시간
   }
   throw new Error('1라운드가 끝나지 않았다');
 }

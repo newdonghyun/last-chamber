@@ -1,0 +1,115 @@
+/* LAST CHAMBER - 일일 출석 보상 팝업 (src/ui/attendance.js) */
+
+.daily-modal {
+  width: min(430px, calc(100vw - 20px));
+  max-width: none;
+  max-height: calc(100vh - 20px);
+  max-height: calc(100dvh - 20px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid rgba(201, 163, 91, .55);
+  border-radius: 18px;
+  overflow: auto;
+  color: var(--ink, #ece3cf);
+  background:
+    radial-gradient(ellipse 90% 55% at 50% 0, rgba(201, 163, 91, .2), transparent 70%),
+    linear-gradient(180deg, #1d1611, #0c0a09 70%);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .8), inset 0 0 0 4px #100c0a, inset 0 0 0 5px rgba(201, 163, 91, .25);
+}
+.daily-modal[open] { animation: daily-in .24s ease-out; }
+.daily-modal::backdrop { background: rgba(4, 2, 2, .78); }
+.daily-modal [hidden] { display: none !important; }
+.daily-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.daily-card { display: grid; gap: 8px; padding: 18px 14px 16px; text-align: center; }
+.daily-x {
+  position: absolute; top: 8px; right: 8px; width: 40px; height: 40px;
+  border: 0; border-radius: 50%; background: transparent; color: var(--ink-dim, #9a9284); font-size: 18px; cursor: pointer;
+}
+.daily-eyebrow { margin: 0; font: 700 10px/1 var(--font-tech, sans-serif); letter-spacing: .38em; color: var(--brass, #c9a35b); }
+.daily-card h2 { margin: 0; font: 800 23px/1.2 var(--font-display, serif); letter-spacing: .06em; color: var(--brass-hi, #f4dda2); }
+.daily-sub { margin: 0 0 4px; font: 500 11.5px/1.4 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); word-break: keep-all; }
+
+.daily-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.daily-slot {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  justify-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 3px 7px;
+  border: 1px solid rgba(201, 163, 91, .28);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(0, 0, 0, .35));
+}
+.daily-slot b { font: 800 10.5px/1 var(--font-tech, sans-serif); letter-spacing: .06em; color: var(--brass, #c9a35b); }
+.daily-art { display: block; width: 100%; max-width: 78px; }
+.daily-art svg { display: block; width: 100%; height: auto; }
+.daily-name { align-self: end; font: 700 10.5px/1.25 var(--font-ui, sans-serif); color: var(--ink, #ece3cf); word-break: keep-all; overflow-wrap: anywhere; }
+.daily-slot.is-special {
+  grid-column: span 2;
+  border-color: rgba(244, 221, 162, .7);
+  background: radial-gradient(ellipse at 50% 30%, rgba(201, 163, 91, .28), transparent 70%), linear-gradient(180deg, #221a10, #0b0908);
+}
+.daily-slot.is-special .daily-art { max-width: 168px; }
+.daily-slot.is-special .daily-name { color: var(--brass-hi, #f4dda2); }
+.daily-slot.is-today {
+  border-color: var(--brass-hi, #f4dda2);
+  box-shadow: 0 0 0 1px var(--brass-hi, #f4dda2), 0 0 16px rgba(244, 221, 162, .45);
+}
+.daily-slot.is-today b::after { content: ' · 오늘'; color: var(--brass-hi, #f4dda2); }
+
+/* 수령 완료: 칸 내용은 반투명 + 붉은 도장 */
+.daily-slot.is-claimed > b, .daily-slot.is-claimed > .daily-art, .daily-slot.is-claimed > .daily-name { opacity: .34; filter: saturate(.55); }
+.daily-stamp { position: absolute; left: 50%; top: 50%; width: min(100%, 78px); transform: translate(-50%, -50%); pointer-events: none; }
+.daily-slot.is-fresh .daily-stamp { animation: daily-stamp .42s cubic-bezier(.2, 1.5, .4, 1) both; }
+
+.daily-feedback { min-height: 1.5em; margin: 2px 0 0; font: 800 14px/1.45 var(--font-ui, sans-serif); color: var(--brass-hi, #f4dda2); word-break: keep-all; }
+.daily-claim, .daily-retry {
+  min-height: 48px; border-radius: 12px; cursor: pointer;
+  font: 800 16px/1.2 var(--font-ui, sans-serif); letter-spacing: .04em;
+}
+.daily-claim {
+  border: 1px solid #f4dda2; color: #231604;
+  background: linear-gradient(180deg, #f7dc93, #c9962f 58%, #8f6418);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55), 0 3px 0 #3d2a08;
+}
+.daily-claim:disabled { cursor: default; color: var(--ink-dim, #9a9284); border-color: rgba(201, 163, 91, .25); background: rgba(255, 255, 255, .05); box-shadow: none; }
+.daily-retry { border: 1px solid rgba(201, 163, 91, .55); color: var(--brass-hi, #f4dda2); background: transparent; }
+.daily-claim:focus-visible, .daily-retry:focus-visible, .daily-x:focus-visible, .daily-btn:focus-visible { outline: 2px solid var(--brass-hi, #f4dda2); outline-offset: 2px; }
+
+/* 타이틀 우상단 [출석] 버튼 — 받을 보상이 있으면 붉은 점, 불러오기 실패면 느낌표 */
+.daily-btn {
+  position: relative; flex: none; display: inline-grid; justify-items: center; align-content: center; gap: 1px;
+  width: 40px; height: 40px; padding: 0; cursor: pointer;
+  border: 1px solid rgba(201, 163, 91, .45); border-radius: 50%;
+  background: rgba(10, 8, 7, .78); color: var(--brass-hi, #f4dda2);
+}
+.daily-btn[hidden] { display: none; }
+.daily-btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.daily-btn span { font: 700 9px/1 var(--font-ui, sans-serif); }
+.daily-btn.has-gift::after, .daily-btn.has-error::after {
+  content: ''; position: absolute; top: 0; right: 0; width: 10px; height: 10px;
+  border-radius: 50%; background: #ff3b47; box-shadow: 0 0 0 2px #0c0a09;
+}
+.daily-btn.has-error::after { content: '!'; width: 13px; height: 13px; font: 900 10px/13px var(--font-ui, sans-serif); color: #fff; }
+
+/* [출석] 버튼 자리만큼 좁아진 프로필 카드: 좁은 화면에서는 승률 칸을 접어 닉네임이 보이게 한다 (승률은 프로필 창에 있다) */
+@media (max-width: 480px) {
+  .title-hud:has(.daily-btn:not([hidden])) .pc-line i,
+  .title-hud:has(.daily-btn:not([hidden])) .pc-line em { display: none; }
+}
+
+@media (max-width: 359px) {
+  .daily-card { padding: 16px 9px 13px; }
+  .daily-grid { gap: 4px; }
+  .daily-name, .daily-slot b { font-size: 9.5px; }
+  .daily-slot.is-today b::after { content: ''; }
+}
+
+@keyframes daily-in { from { opacity: 0; transform: translateY(14px) scale(.96); } }
+@keyframes daily-stamp { from { opacity: 0; transform: translate(-50%, -50%) scale(2.2); } }
+@media (prefers-reduced-motion: reduce) {
+  .daily-modal[open], .daily-slot.is-fresh .daily-stamp { animation: none; }
+}
