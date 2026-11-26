@@ -290,6 +290,7 @@ let lastLogIndex = 0; // getLog('player', lastLogIndex)로 아직 연출하지 �
 let aiLogIndex = 0; // 딜러에게 아직 알려 주지 않은 로그 위치 (딜러 시점)
 let gameId = 0; // 재시작 시 이전 게임의 비동기 흐름을 끊는 토큰
 let busy = true; // 연출 중 입력 잠금 (게임 시작 전에도 잠김)
+let shownLogIndex = 0; // 결과를 화면에 드러낸 로그 수 — 서버(엔진)가 앞서 가도 화면은 여기까지의 상태만 그린다 (screenState)
 let myKnown = null; // 내가 아는 현재 약실 탄 (투시경으로 봄, 탄종변환으로 바뀌면 같이 바뀜)
 let roundResults = []; // 라운드별 'won' | 'lost' → 상단 램프
 let dealBuffer = {}; // 장전 시 양쪽 지급 아이템을 한 줄 자막으로 묶기
@@ -1499,7 +1500,7 @@ function resetTaunt() { // 새 판: 쿨타임 · 진행 중인 연출 초기화
 // 장착한 도발이 있고 판이 진행 중일 때만 도발 버튼을 보인다 (게임 시작 · 종료 · 상점에서 장착을 바꾼 뒤)
 function syncTauntButton() {
   const taunt = getTaunt(profile.equippedTaunt);
-  setHidden(el.btnTaunt, !taunt || !engine || Boolean(engine.getPublicState(PLAYER).winner));
+  setHidden(el.btnTaunt, !taunt || !engine || Boolean(screenState().winner));
   if (!taunt) return;
   setAttr(el.tauntIcon, 'href', `#${taunt.icon}`);
   setAttr(el.btnTaunt, 'aria-label', `도발: ${taunt.name}`);
@@ -1598,6 +1599,7 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   resetTaunt();
   syncTauntButton(); // 장착한 도발이 있으면 이번 판 구석에 도발 버튼
   lastLogIndex = 0;
+  shownLogIndex = 0;
   aiLogIndex = 0;
   busy = true;
   roundResults = [];
@@ -1639,6 +1641,22 @@ function startGame(pvp = false) { // pvp: 실시간 PvP 판 (pvpSession.js 가 �
   })());
 }
 
+/** 아직 화면에 드러내지 않은 사건이 있는가 */
+const hasUnshown = () => engine.getLog(PLAYER, shownLogIndex).length > 0;
+
+/**
+ * 화면에 보여도 되는 상태: 연출을 마친 사건까지만.
+ * 서버(엔진)는 격발 결과 · 다음 턴을 이미 알고 있어도, 총격 연출과 결과 표시가 끝나기 전에는 그 직전 상태를 그린다 —
+ * 화면의 체력 · 남은 탄 · 차례 표시 · 버튼은 모두 이것을 읽는다 (엔진의 지금 상태를 바로 그리지 않는다).
+ */
+function screenState() {
+  if (!hasUnshown()) return engine.getPublicState(PLAYER);
+  return engine.getViewAfter?.(PLAYER, Math.max(0, shownLogIndex - 1)) ?? engine.getPublicState(PLAYER);
+}
+
+/** index 번째 사건의 결과를 이제 화면에 드러낸다 */
+const reveal = (index) => { shownLogIndex = Math.max(shownLogIndex, index + 1); };
+
 // 연출이 끝난 뒤 다음 차례로 넘긴다
 function advance(token) {
   if (token !== gameId) return;
@@ -1675,7 +1693,7 @@ async function catchUp(token) {
   render();
   await present(token);
   if (token !== gameId) return;
-  if (engine.getPublicState(PLAYER).turn?.isMine) resetTimer();
+  if (screenState().turn?.isMine) resetTimer();
   busy = false;
   advance(token);
 }
@@ -1915,7 +1933,7 @@ function leaveAiGame() {
 
 // ───────── 플레이어 입력 ─────────
 
-const playerCanAct = () => Boolean(engine) && !busy && !isPaused() && engine.getPublicState(PLAYER).turn?.isMine === true;
+const playerCanAct = () => Boolean(engine) && !busy && !isPaused() && !hasUnshown() && engine.getPublicState(PLAYER).turn?.isMine === true;
 const shootLocked = () => performance.now() < shootLockUntil;
 /** 내 턴이 막 시작됐다: 0.35초 동안 격발 버튼을 잠갔다가 푼다 (아이템 카드는 잠그지 않는다) */
 function armShootLock(token) {
@@ -1959,7 +1977,7 @@ async function handleShoot(target) {
   }
   await present(token);
   if (token !== gameId) return;
-  if (engine.getPublicState(PLAYER).turn?.isMine) resetTimer(); // 나에게 공포탄 → 같은 턴 새 20초
+  if (screenState().turn?.isMine) resetTimer(); // 나에게 공포탄 → 같은 턴 새 20초
   busy = false;
   advance(token);
 }
@@ -2067,16 +2085,18 @@ async function fireSequence(shooter, target, token, known = null) {
 // ───────── 로그 연출 ─────────
 
 async function present(token) {
-  const entries = engine.getLog(PLAYER, lastLogIndex);
+  const start = lastLogIndex;
+  const entries = engine.getLog(PLAYER, start);
   lastLogIndex += entries.length;
   for (let i = 0; i < entries.length; i++) {
     if (token !== gameId) return;
-    await presentEntry(entries[i], entries.slice(i + 1));
+    await presentEntry(entries[i], entries.slice(i + 1), start + i);
   }
   if (token === gameId) render();
 }
 
-async function presentEntry(e, rest) {
+async function presentEntry(e, rest, index) {
+  if (e.type !== 'SHOT') reveal(index); // 격발만은 총 연출이 끝난 뒤에 드러낸다 (아래 'SHOT')
   switch (e.type) {
     case 'ROUND_START':
       forget();
@@ -2089,7 +2109,7 @@ async function presentEntry(e, rest) {
       await reloadSequence(e);
       break;
     case 'DEAL':
-      markFresh(e);
+      markFresh(e, index);
       dealBuffer[e.player] = e.items;
       render();
       if (e.player === AI) { // 양쪽 지급이 끝나면 한 줄로
@@ -2101,6 +2121,7 @@ async function presentEntry(e, rest) {
       break;
     case 'TURN':
       if (online) applyTurnSkin(e.player); // 이번 차례 사람의 총기 스킨 · 총구 화염으로 전환
+      render(); // 앞선 격발 · 결과 표시가 끝난 지금에야 다음 차례를 보여 준다
       if (e.player === PLAYER) {
         resetTimer();
         subtitle('당신의 차례 — 아이템을 쓰거나 방아쇠를 당겨라', 'info', { filler: true });
@@ -2116,6 +2137,7 @@ async function presentEntry(e, rest) {
       if (online && e.idx > animatedIdx) { // 상대(또는 시간 초과로 서버가 대신 쏜) 격발 — 총 연출부터
         await fireSequence(e.actor, e.actor === e.target ? 'self' : 'opponent', gameId, { ok: true, shell: e.shell, idx: e.idx });
       }
+      reveal(index); // 총이 나간 뒤: 남은 탄 · 체력이 결과대로 (차례는 아직 쏜 사람 것 — 다음 차례는 'TURN' 에서)
       await presentShot(e, rest);
       break;
     case 'ITEM':
@@ -2245,8 +2267,8 @@ async function reloadSequence(e) {
   await wait(250);
 }
 
-function markFresh(e) {
-  const s = engine.getPublicState(PLAYER);
+function markFresh(e, index) {
+  const s = engine.getViewAfter?.(PLAYER, index) ?? engine.getPublicState(PLAYER); // 이 지급 직후의 아이템 수
   const count = (e.player === PLAYER ? s.me : s.opponent).items.length;
   e.items.forEach((_, k) => fresh[e.player].add(count - e.items.length + k)); // 새 아이템은 인벤토리 끝에 붙는다
 }
@@ -2380,10 +2402,10 @@ function restartClasses(pairs) {
 
 function render() {
   if (!engine) return;
-  const s = engine.getPublicState(PLAYER);
+  const s = screenState(); // 연출을 마친 데까지의 상태 — 서버가 아는 다음 턴을 먼저 그리지 않는다
   const t = s.turn;
   const myTurn = Boolean(t?.isMine) && !s.winner;
-  const canAct = myTurn && !busy;
+  const canAct = myTurn && !busy && !hasUnshown();
 
   renderRounds(s.round);
   setText(el.scoreDealer, String(s.opponent.wins));
@@ -2397,7 +2419,7 @@ function render() {
   el.zonePlayer.classList.toggle('is-stunned', t?.stunned === PLAYER);
   el.zoneDealer.classList.toggle('is-active', t?.player === AI && !s.winner);
   el.zonePlayer.classList.toggle('is-active', myTurn);
-  setText(el.turnLabel, s.winner ? 'GAME OVER' : myTurn ? 'YOUR TURN' : online ? 'OPPONENT' : 'DEALER');
+  setText(el.turnLabel, s.winner ? 'GAME OVER' : !t ? '···' : myTurn ? 'YOUR TURN' : online ? 'OPPONENT' : 'DEALER'); // 첫 장전 연출 중에는 누구 차례인지 아직 비워 둔다
   el.turnLabel.classList.toggle('is-dealer', t?.player === AI);
 
   // 탄 랙: 탄종변환으로 가려졌으면 총 발수만 (탄종을 역산할 수 없게)

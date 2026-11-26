@@ -1082,6 +1082,38 @@ async function phase12() {
   await server.stop();
 }
 
+// ───────── Phase 13: 전송 데이터 — 탄창 순서는 어디에도 없고, 시점 상태가 로그와 짝을 이룬다 ─────────
+async function phase13() {
+  const server = createGameServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret' });
+  const port = await server.start(0, '127.0.0.1');
+  const [A, B] = [await player(port, '엿보기A'), await player(port, '엿보기B')];
+  const room = await A.call('create_private_room', {});
+  await B.call('join_private_room', room.code);
+  await Promise.all([A.waitFor('state_update', (p) => p.code === room.code), B.waitFor('state_update', (p) => p.code === room.code)]);
+  const updates = (who) => who.inbox.filter((m) => m.event === 'state_update' && m.payload.code === room.code).map((m) => m.payload);
+  const latest = (who) => updates(who).at(-1).state;
+  for (let i = 0; i < 60 && !latest(A).winner; i += 1) {
+    const actor = latest(A).turn?.isMine ? A : latest(B).turn?.isMine ? B : null;
+    if (actor) {
+      if (latest(actor).me.items.length && i % 3 === 0) await actor.call('game_action', { type: 'use_item', index: 0 });
+      await actor.call('game_action', { type: 'shoot', target: i % 2 ? 'self' : 'opponent' });
+    }
+    await sleep(15);
+  }
+  const all = [...updates(A), ...updates(B)];
+  ok(all.length > 10 && all.every((p) => Array.isArray(p.views) && p.views.length === p.events.length && p.views.every(Boolean)), '79 state_update 마다 사건 수만큼의 시점 상태(views)');
+  ok(all.every((p) => !/chamber|"(LIVE|BLANK)"/.test(JSON.stringify([p.state, p.views]))), '79 상태 · 시점 상태에는 탄창 · 탄종 배열이 없다');
+  const keys = JSON.stringify(['blank', 'live', 'me', 'obscured', 'opponent', 'round', 'total', 'turn', 'winner']);
+  ok(all.every((p) => [p.state, ...p.views].every((v) => JSON.stringify(Object.keys(v).sort()) === keys)), '79 상태에 실리는 것은 정해진 항목뿐 (남은 수 · 차례 · 체력 · 아이템)');
+  const spent = (e) => e.type === 'SHOT' || e.item === 'EJECT' || e.stolen === 'EJECT'; // 이미 나갔거나 빼낸 탄만 공개
+  const leaked = [A, B].flatMap((who) => {
+    const mine = updates(who)[0].state.me.id;
+    return updates(who).flatMap((p) => p.events).filter((e) => 'shell' in e && !spent(e) && e.actor !== mine);
+  });
+  eq(leaked, [], '79 투시경으로 본 탄은 쓴 사람에게만 (상대의 사건에는 탄종이 없다)');
+  await server.stop();
+}
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
@@ -1352,6 +1384,7 @@ try {
   await phase10();
   await phase11();
   await phase12();
+  await phase13();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

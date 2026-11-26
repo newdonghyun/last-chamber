@@ -168,7 +168,10 @@ function onState(s, m) {
   if (S !== s || s.closed || !m || m.code !== s.code) return;
   const from = Number.isInteger(m.logFrom) ? Math.max(0, m.logFrom) : s.log.length;
   s.log.length = Math.min(s.log.length, from); // 재접속은 logFrom 0 부터 전체를 다시 준다
-  for (const ev of m.events ?? []) s.log.push({ ...mapIds(s.ids, ev), idx: s.log.length });
+  for (const [i, ev] of (m.events ?? []).entries()) {
+    const view = m.views?.[i];
+    s.log.push({ ...mapIds(s.ids, ev), view: view ? mapIds(s.ids, view) : null, idx: s.log.length });
+  }
   s.state = mapIds(s.ids, m.state);
   lastState = s.state;
   if (Number.isFinite(m.deadline) && Number.isFinite(m.now)) {
@@ -253,6 +256,7 @@ const remote = {
     return { ...base, winner: s.over.youWon ? ME : FOE }; // 부전승 · 자리 상실: 엔진은 안 끝났지만 승패는 정해졌다
   },
   getLog: (_id, since = 0) => (S ? S.log.slice(since) : []),
+  getViewAfter: (_id, index) => S?.log[index]?.view ?? null, // 그 사건 직후의 상태 (서버가 로그와 함께 보낸다)
   shoot: (_id, target) => act({ type: 'shoot', target }, 'SHOT'),
   useItem: (_id, index) => act({ type: 'use_item', index }, 'ITEM'),
 };

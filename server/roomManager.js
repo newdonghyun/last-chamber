@@ -222,6 +222,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     state: room.engine.getPublicState(seat.id), // 이 좌석의 시점 — 탄 순서는 들어 있지 않다
     logFrom: since,
     events, // 이 좌석이 볼 수 있는 로그만 (투시경 결과는 쓴 사람에게만)
+    views: events.map((e) => room.engine.getViewAfter(seat.id, e.seq)), // 사건마다 그 직후의 공개 상태 — 클라이언트는 연출한 데까지만 그린다 (탄 순서 없음)
     deadline: room.status === 'playing' ? room.deadline : null,
     now: Date.now(),
     opponentConnected: otherSeat(room, seat).connected,

@@ -183,6 +183,41 @@ const NAMES = {
   eq(hits, [], '4 예전 아이템 이름이 남은 줄');
 }
 
+// ───────── 5. 사건 시점 상태(getViewAfter): 화면은 연출한 사건까지만 그린다 — 다음 차례 · 탄 순서를 먼저 알 수 없다 ─────────
+{
+  const bad = { misaligned: [], shotTurn: [], turnView: [], last: [], hidden: [] };
+  let shots = 0;
+  let switched = 0;
+  for (let g = 0; g < 200; g += 1) {
+    const game = new GameEngine({ players: ['A', 'B'], rng: seeded(5000 + g) });
+    const pick = seeded(7000 + g);
+    for (let n = 0; n < 200 && !game.getPublicState('A').winner; n += 1) {
+      const actor = game.getPublicState('A').turn.player;
+      if (pick() < 0.3 && game.getPublicState(actor).me.items.length) game.useItem(actor, 0);
+      if (game.getPublicState('A').turn?.player === actor) game.shoot(actor, pick() < 0.5 ? 'self' : 'opponent');
+    }
+    for (const id of ['A', 'B']) {
+      const log = game.getLog(id, 0);
+      for (const [i, e] of log.entries()) {
+        const view = game.getViewAfter(id, i);
+        if (!view) { bad.misaligned.push(`${g}:${i}`); continue; }
+        if (/"(LIVE|BLANK)"|chamber/.test(JSON.stringify(view))) bad.hidden.push(`${g}:${i}`);
+        if (e.type === 'SHOT') {
+          if (id === 'A') shots += 1;
+          if (view.turn && view.turn.player !== e.actor) bad.shotTurn.push(`${g}:${i}`); // 격발 직후의 상태는 아직 쏜 사람의 차례
+          if (id === 'A' && log.slice(i + 1).find((x) => x.type === 'TURN' || x.type === 'SHOT')?.type === 'TURN') switched += 1;
+        }
+        if (e.type === 'TURN' && view.turn?.player !== e.player) bad.turnView.push(`${g}:${i}`);
+      }
+      if (JSON.stringify(game.getViewAfter(id, log.length - 1)) !== JSON.stringify(game.getPublicState(id))) bad.last.push(`${g}:${id}`);
+    }
+  }
+  ok(shots > 1000 && switched > 300, `5 검사한 격발 ${shots}발 · 그 뒤 차례가 넘어간 경우 ${switched}`);
+  eq([bad.misaligned.length, bad.shotTurn.length, bad.turnView.length], [0, 0, 0], "5 모든 사건에 상태가 있고, 격발 직후는 쏜 사람 차례 · 'TURN' 에서 다음 차례");
+  eq(bad.last.length, 0, '5 마지막 사건의 상태 = 지금 상태');
+  eq(bad.hidden.length, 0, '5 시점 상태에 탄 순서 · 탄종 값이 없다');
+}
+
 const ms = Math.round(performance.now() - T0);
 console.log(fails.length === 0 ? `PASS  ${pass} checks, 0 failed — ${ms} ms` : `FAIL  ${pass} passed, ${fails.length} failed — ${ms} ms`);
 process.exitCode = fails.length === 0 ? 0 : 1;

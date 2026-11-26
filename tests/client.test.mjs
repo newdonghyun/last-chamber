@@ -636,6 +636,17 @@ function memoryStorage(initial = {}) {
   ok(html.includes('id="btn-daily"') && html.includes('src="./src/ui/attendance.js"') && html.includes('href="./src/ui/attendance.css"'), '11 타이틀 우상단 [출석] 버튼 · 모듈 · 스타일 연결');
 }
 
+// ───────── 12. 격발 연출 전에 결과 · 다음 차례를 먼저 그리지 않는다 ─────────
+{
+  const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
+  const renderer = app.slice(app.indexOf('function render() {'), app.indexOf('function renderRounds('));
+  ok(renderer.includes('const s = screenState();') && !renderer.includes('getPublicState') && renderer.includes('!busy && !hasUnshown()'), '12 render 는 연출한 데까지의 상태만 그리고, 남은 연출이 있으면 버튼 잠금');
+  ok(/function screenState\(\) \{\s*if \(!hasUnshown\(\)\) return engine\.getPublicState\(PLAYER\);\s*return engine\.getViewAfter/.test(app), '12 아직 드러내지 않은 사건이 있으면 그 직전 시점의 상태');
+  ok(app.includes("if (e.type !== 'SHOT') reveal(index);") && /await fireSequence\(e\.actor[\s\S]{0,200}?\}\s*reveal\(index\);[^\n]*\n\s*await presentShot/.test(app), '12 격발 결과는 총 연출(fireSequence)이 끝난 뒤에 드러낸다');
+  const pvp = readFileSync(new URL('../src/ui/pvpSession.js', import.meta.url), 'utf8');
+  ok(pvp.includes('getViewAfter: (_id, index) => S?.log[index]?.view ?? null') && pvp.includes('m.views?.[i]'), '12 PvP: 서버가 보낸 시점 상태를 로그에 붙인다');
+}
+
 const ms = Math.round(performance.now() - T0);
 console.log(fails.length === 0 ? `PASS  ${pass} checks, 0 failed — ${ms} ms` : `FAIL  ${pass} passed, ${fails.length} failed — ${ms} ms`);
 process.exitCode = fails.length === 0 ? 0 : 1;

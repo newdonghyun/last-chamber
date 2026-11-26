@@ -61,6 +61,7 @@ export class GameEngine {
   #lastShooter = null;
   #winner = null;
   #log = [];
+  #views = []; // 로그 항목마다 '그 사건 직후'의 공개 상태 [좌석 0 시점, 좌석 1 시점] — 화면이 연출한 데까지만 보여 줄 수 있게 (탄 순서는 없다)
 
   constructor({ players = ['P1', 'P2'], rng = Math.random } = {}) {
     if (!Array.isArray(players) || players.length !== 2 || players[0] === players[1]) {
@@ -137,6 +138,12 @@ export class GameEngine {
       },
       winner: this.#winner?.id ?? null,
     };
+  }
+
+  /** 로그 index 번째 사건 직후의 playerId 시점 공개 상태 (getPublicState 와 같은 모양) | null */
+  getViewAfter(playerId, index) {
+    const p = this.#mustFind(playerId);
+    return this.#views[index]?.[this.#players.indexOf(p)] ?? null;
   }
 
   getLog(playerId, since = 0) {
@@ -296,6 +303,7 @@ export class GameEngine {
 
   #emit(entry) {
     this.#log.push(Object.freeze({ seq: this.#log.length, round: this.#round, ...entry }));
+    this.#views.push(this.#players.map((p) => this.getPublicState(p.id)));
   }
 
   // 시점별 로그: 투시경으로 본 탄종(secret)은 사용자에게만
