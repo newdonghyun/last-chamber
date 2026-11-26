@@ -1006,6 +1006,56 @@ async function phase11() {
   await s2.stop();
 }
 
+// ───────── Phase 12: 친선 비밀방 초대 — 방장이 링크를 보내러 자리를 비워도 방이 남는다 ─────────
+async function phase12() {
+  const server = createGameServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret', hostAwayMs: 700 });
+  const port = await server.start(0, '127.0.0.1');
+  const again = async (who) => { const c = await client(port, { token: who.account.token }); c.account = who.account; return c; };
+  const join = async (who, code) => who.call('join_private_room', code);
+
+  const [host, friend, other] = [await player(port, '초대방장'), await player(port, '초대친구'), await player(port, '다른사람')];
+  const made = await host.call('create_private_room', {});
+  host.socket.disconnect(); // 링크를 보내러 다른 앱으로 — 연결이 끊김
+  await sleep(60);
+  eq([server.stats().waiting, (await join(friend, made.code)).error], [1, 'HOST_AWAY'], '75 방장이 끊겨도 친선 대기 방은 남고, 그동안 친구에게는 HOST_AWAY');
+  eq((await other.call('resume_room', { code: made.code })).error, 'ROOM_NOT_FOUND', '75 다른 계정은 방을 가져갈 수 없다');
+  const host2 = await again(host);
+  eq((await join(host2, made.code)).error, 'OWN_ROOM', '75 방장 본인이 코드로 들어오려 하면 OWN_ROOM');
+  eq(await host2.call('resume_room', { code: made.code }), { ok: true, code: made.code, mode: 'private' }, '75 돌아온 방장(같은 계정)은 방을 다시 받는다');
+  eq((await join(friend, made.code)).ok, true, '75 그 뒤 친구가 입장하면 판이 시작된다');
+  const [m1, m2] = await Promise.all([host2.waitFor('match_found', (p) => p.code === made.code), friend.waitFor('match_found', (p) => p.code === made.code)]);
+  eq([m1.mode, m2.mode, server.stats().playing], ['private', 'private', 1], '75 새 연결의 방장도 match_found 를 받는다');
+
+  // 76. 화면만 가려진 경우 (연결은 살아 있음)
+  const [h3, f3] = [await player(port, '가림방장'), await player(port, '가림친구')];
+  const r3 = await h3.call('create_private_room', {});
+  eq((await h3.call('room_presence', { away: true })).ok, true, '76 방장 화면 가려짐 알림');
+  eq((await join(f3, r3.code)).error, 'HOST_AWAY', '76 가려진 동안에는 판을 시작하지 않는다');
+  eq((await f3.call('room_presence', { away: false })).error, 'ROOM_NOT_FOUND', '76 방장이 아니면 상태를 바꿀 수 없다');
+  await h3.call('room_presence', { away: false });
+  await sleep(800); // 돌아왔으면 비움 타이머는 멈춘다
+  eq((await join(f3, r3.code)).ok, true, '76 방장이 돌아오면 (비움 시간이 지난 뒤에도) 입장');
+
+  // 77. 오래 비우면 닫힌다 · 직접 닫으면 바로 · 새 방을 만들면 이전 빈 방은 닫는다
+  const [h4, f4] = [await player(port, '만료방장'), await player(port, '만료친구')];
+  const r4 = await h4.call('create_private_room', {});
+  h4.socket.disconnect();
+  await sleep(900);
+  eq((await join(f4, r4.code)).error, 'ROOM_NOT_FOUND', '77 비움 시간이 지나면 방이 닫힌다');
+  const h5 = await player(port, '닫는방장');
+  const r5 = await h5.call('create_private_room', {});
+  await h5.call('leave_room');
+  eq((await join(f4, r5.code)).error, 'ROOM_NOT_FOUND', '77 방장이 [방 닫기]를 누르면 바로 닫힌다');
+  const h6 = await player(port, '새방방장');
+  const r6 = await h6.call('create_private_room', {});
+  h6.socket.disconnect();
+  await sleep(60);
+  const h6b = await again(h6);
+  const r7 = await h6b.call('create_private_room', {});
+  eq([(await join(f4, r6.code)).error, r7.ok, server.stats().waiting], ['ROOM_NOT_FOUND', true, 1], '77 같은 계정이 새 방을 만들면 이전 빈 방은 닫는다');
+  await server.stop();
+}
+
 async function phase1() {
   const server = createGameServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
@@ -1275,6 +1325,7 @@ try {
   await phase9();
   await phase10();
   await phase11();
+  await phase12();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

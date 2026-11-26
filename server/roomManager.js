@@ -45,6 +45,7 @@ export const ROOM_DEFAULTS = Object.freeze({
   resultTtlMs: RESULT_TTL_MS,
   maxRooms: 5000,
   emoteGapMs: 500, // 이모트 최소 간격
+  hostAwayMs: 5 * 60_000, // 친선 비밀방의 방장이 자리를 비워도(초대 링크를 보내러 다른 앱으로 · 연결 끊김) 방을 남겨 두는 시간
   pairDailyLimit: 3, // 같은 두 계정의 랭킹 정산(MMR · 보상)이 하루(한국 시간)에 반영되는 최대 판 수
   clock: () => Date.now(), // 한국 시간 날짜 계산용 시계 (테스트에서 바꾼다)
 });
@@ -196,6 +197,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
   function clearRoomTimers(room) {
     clearTimeout(room.turnTimer);
     clearTimeout(room.ttlTimer);
+    clearTimeout(room.awayTimer);
     for (const seat of room.seats) clearTimeout(seat.graceTimer);
   }
 
@@ -410,6 +412,8 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
   /** 상대를 기다리는 방을 만든다 (mode: 'private' 친선 비밀방 | 'public' 공개 방) */
   function openRoom(socket, payload, mode) {
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
+    const userId = socket.data.user?.id;
+    for (const old of [...rooms.values()]) if (userId && old.status === 'waiting' && old.hostAway && old.seats[0].userId === userId) closeRoom(old);
     if (rooms.size >= cfg.maxRooms) return fail('SERVER_BUSY');
     const room = newRoom(mode, 'free');
     if (!room) return fail('SERVER_BUSY');
@@ -432,6 +436,43 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     if (room.status !== 'waiting') return;
     emitTo(room, room.seats[0], 'room_closed', { code: room.code, reason: 'EXPIRED' });
     closeRoom(room);
+  }
+
+  // ── 친선 비밀방: 방장이 자리를 비운 동안 ──
+  // 방장이 초대 링크를 보내려고 다른 앱으로 가면 연결이 멈추거나 끊긴다 → 방은 hostAwayMs 동안 남겨 두고, 그동안 들어오려는 친구에게는
+  // HOST_AWAY 를 답한다 (자리를 비운 방장과 판을 시작하지 않는다). 방장이 돌아오면 room_presence · resume_room 으로 다시 받는다.
+  function setHostAway(room, away) {
+    clearTimeout(room.awayTimer);
+    room.hostAway = away;
+    if (!away) return;
+    room.awayTimer = setTimeout(() => guard(() => expireRoom(room)), cfg.hostAwayMs);
+    room.awayTimer.unref?.();
+  }
+
+  const waitingPrivateHost = (room, test) => Boolean(room) && room.mode === 'private' && room.status === 'waiting' && test(room.seats[0]);
+
+  /** room_presence({ away }): 방장의 화면이 가려졌다 · 돌아왔다 (연결은 살아 있다) */
+  function roomPresence(socket, payload) {
+    const seated = seatOfSocket(socket);
+    if (!seated || !waitingPrivateHost(seated.room, (host) => host === seated.seat)) return fail('ROOM_NOT_FOUND');
+    setHostAway(seated.room, payload?.away === true);
+    return { ok: true, code: seated.room.code };
+  }
+
+  /** resume_room({ code }): 끊겼던 방장이 돌아와 자기 대기 방을 다시 받는다 (같은 계정만) */
+  function resumeRoom(socket, payload) {
+    const room = rooms.get(cleanCode(typeof payload === 'string' ? payload : payload?.code));
+    if (!waitingPrivateHost(room, (host) => host.userId && host.userId === socket.data.user?.id)) return fail('ROOM_NOT_FOUND');
+    const where = socket.data.where;
+    if (where && !(where.kind === 'room' && where.code === room.code)) return fail('ALREADY_IN_ROOM');
+    const host = room.seats[0];
+    const old = socketOf(host);
+    if (old && old !== socket) release(old, room.code); // 끊긴 줄 모르는 옛 연결
+    host.socketId = socket.id;
+    host.connected = true;
+    attach(socket, room);
+    setHostAway(room, false);
+    return { ok: true, code: room.code, mode: room.mode };
   }
 
   function joinPrivateRoom(socket, payload) {
@@ -459,6 +500,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     if (room.status !== 'waiting' || room.seats.length >= 2) return fail('ROOM_FULL');
     const host = room.seats[0];
     if (host.userId && host.userId === socket.data.user?.id) return fail('OWN_ROOM'); // 같은 계정끼리(창 두 개)는 못 붙는다
+    if (room.hostAway) return fail('HOST_AWAY'); // 방장이 잠시 자리를 비웠다 — 잠시 뒤 다시 시도하면 들어올 수 있다
     room.seats.push(makeSeat('P2', socket, profileOf(socket, profile)));
     attach(socket, room);
     startGame(room);
@@ -558,7 +600,13 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     if (!seated) return;
     const { room, seat } = seated;
     if (room.status === 'waiting') {
-      closeRoom(room); // 친구를 기다리던 방은 만든 사람이 끊기면 바로 닫는다
+      if (room.mode !== 'private') {
+        closeRoom(room); // 공개 방은 만든 사람이 끊기면 바로 닫는다 (목록에 빈 방이 남지 않게)
+        return;
+      }
+      seat.connected = false; // 친선 비밀방: 초대 링크를 보내러 간 방장을 잠시 기다린다
+      seat.socketId = null;
+      setHostAway(room, true);
       return;
     }
     if (room.status !== 'playing') return;
@@ -584,5 +632,5 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     rooms.clear();
   }
 
-  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, gameAction, sendEmote, onDisconnect, stats, shutdown };
+  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, resumeRoom, roomPresence, gameAction, sendEmote, onDisconnect, stats, shutdown };
 }

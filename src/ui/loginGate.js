@@ -134,7 +134,7 @@ function paintInvite() {
   if (!gate.invite) return;
   const code = captureInvite();
   gate.invite.hidden = !code;
-  if (code) gate.invite.textContent = `친구가 비밀방(${code})에 초대했어요 — 가입하면 바로 그 방에 입장해요`;
+  if (code) gate.invite.textContent = `친구가 비밀방(${code})에 초대했어요 — 로그인하거나 가입하면 바로 그 방에 입장해요`;
 }
 
 function openGate(message = '') {

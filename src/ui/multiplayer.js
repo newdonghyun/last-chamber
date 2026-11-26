@@ -30,8 +30,10 @@
  * ── 잠든 서버 깨우기 ──  무료 호스팅은 한동안 접속이 없으면 서버가 잠들고 첫 연결에 30~60초가 걸린다. 연결 시도 하나는 30초까지 기다리고,
  *   실패하면 정해진 시간(WAKE_DEADLINE_MS) 안에서 다시 시도한다 (src/ui/wake.js). 그동안 '서버를 깨우는 중입니다…' 안내가 뜬다 — 바로 에러로 접지 않는다.
  *
- * ── 초대 링크 (src/ui/invite.js) ──  친선 방을 만들면 [초대 링크 복사] → '<서버 주소>/?room=코드'. 링크로 들어온 사람은 가입(또는 로그인)을 마치는 즉시
- *   그 비밀방에 자동 입장한다 (이미 로그인한 사람은 접속하자마자). 코드는 가입하는 동안 저장소에 보관되고, 방이 없으면 일반 오류 문구가 뜬다.
+ * ── 초대 링크 (src/ui/invite.js) ──  친선 방을 만들면 [초대 링크 복사] → '<서버 주소>/?room=코드'. 링크로 들어온 사람은 로그인(자동 · 가입 · 수동)과
+ *   소켓 연결이 모두 된 순간 그 비밀방에 입장한다 ('초대 방(코드)에 입장하는 중' 화면). 손님은 로그인 화면부터. 방이 없거나 가득 차면 안내창.
+ *   방장은 링크를 보내러 다른 앱에 다녀온다 → 친선 대기 방은 화면을 떠나도 접지 않고, 서버가 5분 남겨 둔다 (room_presence · resume_room).
+ *   그동안 들어오려는 친구는 HOST_AWAY 를 받고 방장이 돌아올 때까지 기다린다.
  *
  * ── 로그인 (src/ui/session.js) ──
  *   소켓을 열 때 handshake auth 로 { token } (로그인 토큰)을 보낸다 → 서버가 확인해 이 소켓을 그 계정으로 기록한다
@@ -44,7 +46,7 @@ import { userSession } from './session.js';
 import { requireLogin } from './accountApi.js';
 import { retryUntil } from './wake.js';
 import { sharedWallet, WALLET_CHANGED } from './walletClient.js';
-import { captureInvite, peekInvite, clearInvite, buildInviteLink } from './invite.js';
+import { captureInvite, peekInvite, clearInvite, cleanInviteUrl, buildInviteLink } from './invite.js';
 
 const START_BUTTON_ID = 'btn-start';
 // 예비 주소 — 보통은 serverConfig.js 가 먼저 window.LAST_CHAMBER_SERVER 를 정한다 (웹 = 지금 도메인 · 앱 = 같은 Render 주소). localhost 로 고정하지 않는다
@@ -70,6 +72,7 @@ const HEADINGS = Object.freeze({
   menu: ['SELECT MODE', '대전 모드 선택'],
   public: ['PUBLIC ROOM', '공개 방 — 상대를 기다리는 중'],
   room: ['FRIENDLY ROOM', '친선 비밀방 (랭킹 MMR 미반영)'],
+  invite: ['INVITATION', '초대받은 비밀방'],
   queue: ['RANKED MATCH', '빠른 매칭 — 상대를 찾는 중'],
 });
 
@@ -84,6 +87,7 @@ const ERROR_TEXT = Object.freeze({
   ROOM_NOT_FOUND: '방을 찾을 수 없어요 — 이미 시작됐거나 닫혔을 수 있어요.',
   ROOM_FULL: '이미 가득 찬 방이에요.',
   OWN_ROOM: '내가 만든 방이에요.',
+  HOST_AWAY: '방장이 잠시 자리를 비웠어요 — 잠시 후 다시 입장해 주세요.',
   INVALID_TIER: '알 수 없는 테이블입니다.',
   SERVER_BUSY: '서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.',
   SERVER_ERROR: '서버 오류가 발생했습니다.',
@@ -103,6 +107,11 @@ const wallet = sharedWallet();
 let lastStats = null; // { online, queued } — 서버가 알려 준 접속자 수 · 매칭 대기 인원
 let slowDismissed = false; // 이번 매칭 대기에서 [계속 대기]를 눌렀다
 let dailyBusy = false;
+const INVITE_RETRY_MS = 2000; // 방장이 자리를 비운 초대 방: 이 간격으로 다시 두드린다
+const INVITE_WAIT_MS = 5 * 60_000; // 이만큼 기다려도 방장이 안 오면 그만둔다 (서버가 방을 남겨 두는 시간과 같다)
+let inviteTimer = 0;
+let inviteUntil = 0;
+let hostedCode = null; // 내가 만들고 기다리는 친선 방 코드
 let phase = 'menu'; // 'menu' | 'public'(공개 방 대기) | 'room'(비밀방 대기) | 'queue'(빠른 매칭 대기)
 let busy = false; // 요청이 오가는 동안 버튼 잠금
 let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보내는 동안만 true
@@ -240,7 +249,17 @@ dialog.innerHTML = `
         <span class="mp-btn-main" data-ui="copy-label">코드 복사</span>
       </button>
       <p class="mp-wait-note"><span class="mp-pulse" aria-hidden="true"></span>친구가 링크를 열거나 코드로 입장하면 바로 친선전이 시작됩니다 (랭킹 MMR 미반영)</p>
+      <p class="mp-hint">링크를 보내러 다른 앱에 다녀와도 방은 5분 동안 유지돼요 · 이 화면으로 돌아와야 친구가 들어올 수 있어요</p>
       <button class="mp-btn mp-btn--ghost" type="button" data-act="cancel"><span class="mp-btn-main">방 닫기</span></button>
+    </div>
+
+    <!-- 초대 링크(?room=코드)로 들어온 친구: 로그인 + 서버 연결이 되면 저절로 입장한다 -->
+    <div class="mp-view mp-wait" data-ui="invite" hidden>
+      <div class="mp-radar" aria-hidden="true"><i></i><i></i><i></i></div>
+      <p class="mp-wait-label mp-invite-text" data-ui="invite-text" role="status" aria-live="polite"></p>
+      <p class="mp-hint" data-ui="invite-note"></p>
+      <button class="mp-btn" type="button" data-act="invite-retry" data-ui="invite-retry" hidden><span class="mp-btn-main">다시 시도</span></button>
+      <button class="mp-btn mp-btn--ghost" type="button" data-act="invite-cancel"><span class="mp-btn-main">초대 취소</span></button>
     </div>
 
     <div class="mp-view mp-wait" data-ui="queue" hidden>
@@ -261,6 +280,19 @@ dialog.innerHTML = `
     <p class="mp-status" data-ui="status" role="status" aria-live="polite"></p>
   </div>`;
 document.body.append(dialog);
+
+// 초대 방이 사라졌거나 가득 찼을 때의 안내창
+const inviteFail = document.createElement('dialog');
+inviteFail.id = 'invite-fail';
+inviteFail.className = 'mp-alert';
+inviteFail.setAttribute('role', 'alertdialog');
+inviteFail.setAttribute('aria-labelledby', 'invite-fail-text');
+inviteFail.innerHTML = `
+  <p class="mp-alert-text" id="invite-fail-text"></p>
+  <p class="mp-alert-sub">친구에게 새 초대 링크를 보내 달라고 해 주세요</p>
+  <button class="mp-btn" type="button"><span class="mp-btn-main">확인</span></button>`;
+inviteFail.querySelector('button').addEventListener('click', () => inviteFail.close());
+document.body.append(inviteFail);
 
 const q = (name) => dialog.querySelector(`[data-ui="${name}"]`);
 const ui = {
@@ -296,6 +328,10 @@ const ui = {
   queueName: q('queue-name'),
   queueMeta: q('queue-meta'),
   slow: q('slow'),
+  invite: q('invite'),
+  inviteText: q('invite-text'),
+  inviteNote: q('invite-note'),
+  inviteRetry: q('invite-retry'),
   online: q('online'),
   daily: q('daily'),
   emergency: q('emergency'),
@@ -459,6 +495,9 @@ function setPhase(next) {
   ui.public.hidden = next !== 'public';
   ui.room.hidden = next !== 'room';
   ui.queue.hidden = next !== 'queue';
+  ui.invite.hidden = next !== 'invite';
+  if (next !== 'invite') clearTimeout(inviteTimer);
+  if (next !== 'room') hostedCode = null;
   [ui.eyebrow.textContent, ui.title.textContent] = HEADINGS[next];
   if (next === 'queue') { slowDismissed = false; ui.slow.hidden = true; } // 새 대기: 안내를 처음부터
   if (next !== 'queue' && next !== 'public') stopTicker();
@@ -656,6 +695,7 @@ function disposeSocket() {
   sock = null;
   if (!s) return;
   detach(s);
+  if (phase === 'room' && s.connected) s.emit('leave_room'); // 연결만 끊으면 서버는 방장이 잠깐 비운 줄 알고 방을 남겨 둔다
   s.disconnect();
 }
 
@@ -695,6 +735,8 @@ function onMatchFound(match) {
   const s = sock;
   if (!s || !match || typeof match !== 'object') return;
   // 화면이 어느 단계였든 서버가 매칭을 확정했으면 따른다 (취소를 누른 바로 그 순간에 성사된 경우 포함)
+  if (match.code === peekInvite()) finishInvite(); // 초대 방에 들어갔다 (ack 보다 match_found 가 먼저 온다)
+  if (inviteFail.open) inviteFail.close();
   detach(s);
   sock = null;
   session += 1;
@@ -714,6 +756,13 @@ function onRoomClosed(info) {
 
 function onDisconnect(reason) {
   if (reason === 'io client disconnect') return; // 우리가 끊은 것
+  if (phase === 'room' && hostedCode && sock) { // 친선 대기 방의 방장: 서버가 방을 잠시 남겨 둔다 → 다시 연결해 받는다
+    const s = sock;
+    say('연결이 잠시 끊겼어요 — 방을 다시 잇는 중…');
+    s.once('connect', () => { if (s === sock) resumeHostRoom(); });
+    if (reason === 'io server disconnect') s.connect(); // 서버가 끊은 경우는 저절로 다시 붙지 않는다
+    return;
+  }
   disposeSocket(); // 끊긴 사이 서버가 대기열 · 방을 이미 정리했다 → 처음부터
   toMenu('서버와 연결이 끊어졌습니다. 다시 시도해 주세요.', 'error');
 }
@@ -801,14 +850,118 @@ function openLobby() {
   refreshWallet();
 }
 
-/** 보관해 둔 초대 코드가 있으면 곧바로 그 친선 비밀방에 입장한다 (로그인한 상태에서만 — 코드는 한 번만 쓴다) */
+// ───────── 초대 링크로 입장 ─────────
+// 조건 두 가지가 모두 갖춰진 순간에만 입장한다: ① 로그인 완료(자동 로그인 · 가입 · 로그인) ② 소켓 연결(socket.connected).
+// 보관한 코드(sessionStorage 'pending_invite_room')는 입장에 성공했거나 · 방이 없다고 확인됐거나 · 사용자가 그만뒀을 때에만 지운다.
+
+/** 지금이 초대 입장을 시작해도 되는 때인가 (게임 중 · 결과 화면이 아니라 타이틀이나 로비) */
+function inviteScreenReady() {
+  const title = document.getElementById('start-modal');
+  return dialog.open || Boolean(title?.open && !title.classList.contains('is-result'));
+}
+
+/** 보관해 둔 초대 코드가 있으면 그 친선 비밀방 입장을 시작한다 → 맡았으면 true */
 function joinInvite() {
   const code = peekInvite();
-  if (!code || !loggedIn()) return false;
-  clearInvite();
+  if (!code || !loggedIn() || !inviteScreenReady()) return false;
   openLobby();
-  if (phase === 'menu') joinFriendlyRoom(code);
+  if (phase === 'invite') return true; // 이미 시도 중
+  if (phase !== 'menu' || busy) return false;
+  inviteUntil = Date.now() + INVITE_WAIT_MS;
+  setPhase('invite');
+  say('');
+  attemptInvite(code);
   return true;
+}
+
+function paintInviteState(text, note = '', canRetry = false) {
+  ui.inviteText.textContent = text;
+  ui.inviteNote.textContent = note;
+  ui.inviteRetry.hidden = !canRetry;
+}
+
+async function attemptInvite(code) {
+  const mine = session;
+  const alive = () => mine === session && phase === 'invite';
+  clearTimeout(inviteTimer);
+  paintInviteState(`초대 방(코드: ${code})에 입장하는 중...`);
+  try {
+    await ensureSocket(); // 'connect' 가 올 때까지 기다린다 (잠든 서버면 깨우며 다시 시도)
+  } catch {
+    if (alive()) paintInviteState(`초대 방(코드: ${code})에 아직 들어가지 못했어요`, '서버에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.', true);
+    return;
+  }
+  if (!alive()) return;
+  const s = sock;
+  if (!s.connected) { // 그새 끊겼다 → 다시 붙는 즉시
+    s.once('connect', () => { if (s === sock && phase === 'invite') attemptInvite(code); });
+    return;
+  }
+  const res = await request('join_private_room', { code, profile: buildProfile() });
+  if (!alive()) return; // match_found 가 먼저 왔거나 그만뒀다
+  if (res.ok) {
+    finishInvite();
+    paintInviteState('입장했습니다. 친선전을 시작합니다…'); // match_found 가 곧 도착해 로비가 닫힌다
+    return;
+  }
+  if (res.error === 'HOST_AWAY' && Date.now() < inviteUntil) {
+    paintInviteState(`초대 방(코드: ${code})에 입장하는 중...`, '방장이 잠시 자리를 비웠어요 — 돌아오는 대로 저절로 입장해요');
+    inviteTimer = setTimeout(() => { if (alive()) attemptInvite(code); }, INVITE_RETRY_MS);
+    return;
+  }
+  if (['ROOM_NOT_FOUND', 'ROOM_FULL', 'OWN_ROOM', 'HOST_AWAY'].includes(res.error)) {
+    failInvite(res.error);
+    return;
+  }
+  if (res.error === 'AUTH_REQUIRED') { // 토큰이 만료됐다 → 다시 로그인하면 이어서 입장 (코드는 그대로)
+    closeDialog();
+    requireLogin(userSession, '로그인이 만료됐어요. 다시 로그인하면 초대 방에 입장해요.');
+    return;
+  }
+  paintInviteState(`초대 방(코드: ${code})에 아직 들어가지 못했어요`, errorText(res.error), true);
+}
+
+/** 초대를 마쳤다 (입장 · 실패 확인 · 취소): 보관한 코드와 주소창의 ?room= 을 지운다 */
+function finishInvite() {
+  clearTimeout(inviteTimer);
+  clearInvite();
+  cleanInviteUrl();
+}
+
+function failInvite(error) {
+  finishInvite();
+  toMenu();
+  inviteFail.querySelector('.mp-alert-text').textContent = error === 'OWN_ROOM' ? '내가 만든 초대 방이에요 — 이 링크는 친구에게 보내 주세요.' : '이미 종료되었거나 존재하지 않는 초대 방입니다.';
+  inviteFail.querySelector('.mp-alert-sub').hidden = error === 'OWN_ROOM';
+  if (!inviteFail.open) inviteFail.showModal();
+}
+
+function cancelInvite() {
+  finishInvite();
+  toMenu('초대 입장을 취소했어요.');
+}
+
+// ───────── 친선 방 방장이 자리를 비웠다 돌아옴 ─────────
+
+/** 화면이 가려졌는지 서버에 알린다 → 가려진 동안에는 친구가 들어오지 않고 기다린다 (자리를 비운 채 판이 시작되지 않게) */
+async function sendPresence() {
+  if (phase !== 'room' || !sock?.connected) return;
+  const away = document.hidden;
+  const res = await request('room_presence', { away });
+  if (!away && res.error === 'ROOM_NOT_FOUND' && phase === 'room') toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
+}
+
+async function resumeHostRoom() {
+  const code = hostedCode;
+  if (!code || phase !== 'room') return;
+  const res = await request('resume_room', { code });
+  if (phase !== 'room' || hostedCode !== code) return;
+  if (res.ok) {
+    say('');
+    if (document.hidden) sendPresence();
+    return;
+  }
+  toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
 }
 
 /** 가입 · 로그인 직후 (loginGate.js): 초대 링크가 있으면 그 방으로, 새로 가입했다면 로비로 */
@@ -904,7 +1057,9 @@ function createFriendlyRoom() {
     ui.inviteLabel.textContent = '초대 링크 복사';
     ui.inviteBtn.classList.remove('is-done');
     setPhase('room');
+    hostedCode = res.code;
     say('');
+    if (document.hidden) sendPresence(); // 만드는 사이 화면이 가려졌다
     ui.inviteBtn.focus(); // 친구에게 보내는 가장 쉬운 방법이 링크 — 먼저 눌리게
   });
 }
@@ -1011,7 +1166,15 @@ dialog.addEventListener('click', (e) => {
   const el = e.target instanceof Element ? e.target.closest('[data-act]') : null;
   if (!el || el.disabled) return;
   switch (el.dataset.act) {
-    case 'close': closeDialog(); break;
+    case 'close':
+      if (phase === 'invite') finishInvite(); // 스스로 닫았다 → 초대를 그만둔다
+      closeDialog();
+      break;
+    case 'invite-retry':
+      inviteUntil = Date.now() + INVITE_WAIT_MS;
+      attemptInvite(peekInvite());
+      break;
+    case 'invite-cancel': cancelInvite(); break;
     case 'edit-nick': window.dispatchEvent(new CustomEvent('lastchamber:open-account', { detail: { edit: true } })); break; // 닉네임 옆 [변경] → 계정 창의 변경 칸
     case 'login': needLogin(); break;
     case 'solo': startSolo(); break;
@@ -1064,13 +1227,23 @@ dialog.addEventListener('close', () => {
 // 페이지를 떠날 때(창 닫기 · 뒤로 가기 · 새로고침): 로비를 닫아 소켓 리스너를 떼고 연결을 끊는다 (대기 경과 시간 타이머는 resetUi → 메뉴 전환에서 멈춘다)
 function leavePage() {
   clearTimeout(copyTimer);
-  if (dialog.open) dialog.close(); // → close 이벤트에서 disposeSocket + resetUi
-  else disposeSocket(); // 열려 있지 않아도 연결 중이던 소켓(랭킹 조회 등)이 있으면 정리
+  disposeSocket(); // 먼저, 곧바로 — close 이벤트는 나중에 오므로 창을 닫는 중이면 leave_room 이 못 나간다 (연결 중이던 랭킹 조회 소켓도 여기서 정리)
+  if (dialog.open) dialog.close(); // → close 이벤트에서 resetUi
 }
 window.addEventListener('pagehide', leavePage);
 window.addEventListener('beforeunload', leavePage);
-// 화면을 떠남(blur · freeze — src/ui/lifecycle.js 의 onHalt 를 app.js 가 알려 준다): 매칭 · 기다리는 방을 그만두고 소켓을 끊는다 (돌아오면 메뉴부터)
-window.addEventListener('lastchamber:halt', leavePage);
+// 화면을 떠남(blur · freeze — src/ui/lifecycle.js 의 onHalt 를 app.js 가 알려 준다): 매칭 · 공개 방을 그만두고 소켓을 끊는다 (돌아오면 메뉴부터).
+// 친선 대기 방만은 예외: 방장은 초대 링크를 보내려고 다른 앱으로 간다 → 방을 접지 않는다 (소리는 app.js 가 그대로 끊는다)
+window.addEventListener('lastchamber:halt', () => { if (phase !== 'room') leavePage(); });
+document.addEventListener('visibilitychange', () => {
+  sendPresence();
+  if (!document.hidden) resumeInvite();
+});
+window.addEventListener('focus', () => resumeInvite());
+// 화면을 떠나느라 접었던 초대 입장은 돌아오면 이어서
+function resumeInvite() {
+  if (peekInvite() && loggedIn() && phase !== 'invite' && !inviteFail.open && !document.hidden) setTimeout(joinInvite, 0);
+}
 
 // PLAY 가로채기: document 캡처 단계라 app.js 의 클릭 핸들러(타깃/버블 단계)보다 항상 먼저 돌고, 로드 순서에도 영향받지 않는다
 // 손님도 로비는 연다 (AI 딜러 연습 · 방 목록 · TOP 10 보기) — 온라인 대전 버튼만 로그인 화면으로
@@ -1100,8 +1273,13 @@ userSession.subscribe((user) => {
   paintAccess();
   paintDaily();
   if (user) refreshWallet();
+  if (user && peekInvite()) setTimeout(joinInvite, 0); // 어떤 길로 로그인했든 초대가 남아 있으면 이어서
 });
 
-// 초대 링크로 접속했다: 주소의 ?room=코드 를 보관하고 주소창에서 지운다. 이미 로그인한 사람이면 곧바로 입장 (아니면 가입 · 로그인 직후 위의 signed-in 이벤트가 입장시킨다)
+// 초대 링크로 접속했다: 주소의 ?room=코드 를 보관한다. 이미 로그인한 사람이면 곧바로 입장, 아니면 가입 · 로그인 직후 위의 signed-in 이벤트가 입장시킨다.
+// 예전에 [둘러보기]를 고른 손님은 로그인 화면이 저절로 뜨지 않으므로 불러 준다 (온라인 대전은 로그인한 계정만)
 captureInvite();
-if (peekInvite() && loggedIn()) setTimeout(joinInvite, 0);
+if (peekInvite()) {
+  if (loggedIn()) setTimeout(joinInvite, 0);
+  else if (userSession.isGuest) setTimeout(() => window.dispatchEvent(new CustomEvent('lastchamber:need-login')), 0);
+}

@@ -460,3 +460,22 @@
 .mp-slow-row .mp-btn { justify-content: center; text-align: center; min-height: 44px; }
 
 .mp-disclaimer { margin: 6px 0 0; padding: 10px 6px 2px; border-top: 1px solid var(--line, rgba(201, 163, 91, .18)); font: 500 11px/1.55 var(--font-ui, sans-serif); color: var(--ink-faint, #5f594f); text-align: center; }
+
+/* ── 초대 링크 입장 화면 · 실패 안내창 ───────────────────────────── */
+.mp-invite-text { font-size: 16px; color: var(--brass-hi, #f4dda2); word-break: keep-all; text-align: center; }
+.mp-alert {
+  width: min(340px, calc(100vw - 32px));
+  margin: auto;
+  padding: 22px 18px 16px;
+  border: 1px solid rgba(201, 163, 91, .55);
+  border-radius: 16px;
+  color: var(--ink, #ece3cf);
+  background: linear-gradient(180deg, #221914, #0d0a09);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .8);
+  text-align: center;
+}
+.mp-alert::backdrop { background: rgba(4, 2, 2, .78); }
+.mp-alert-text { margin: 0 0 8px; font: 800 16px/1.5 var(--font-ui, sans-serif); word-break: keep-all; }
+.mp-alert-sub { margin: 0 0 14px; font: 500 12px/1.4 var(--font-ui, sans-serif); color: var(--ink-dim, #9a9284); word-break: keep-all; }
+.mp-alert-sub[hidden] { display: none; }
+.mp-alert .mp-btn { width: 100%; justify-content: center; min-height: 46px; margin-top: 6px; }

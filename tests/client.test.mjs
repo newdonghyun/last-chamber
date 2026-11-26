@@ -18,7 +18,7 @@ import { signUp, logIn, changeNickname, serverBase } from '../src/ui/accountApi.
 import { cleanUsername as serverUsername, cleanPassword as serverPassword } from '../server/auth.js';
 import { cleanNickname as serverNickname } from '../server/userStore.js';
 import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
-import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, captureInvite, INVITE_KEY, INVITE_TTL_MS } from '../src/ui/invite.js';
+import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, cleanInviteUrl, captureInvite, INVITE_KEY } from '../src/ui/invite.js';
 import { retryUntil } from '../src/ui/wake.js';
 import { WalletClient } from '../src/ui/walletClient.js';
 import { autoOpenKey, claimedDays, claimFeedback, rewardName } from '../src/ui/attendanceRules.js';
@@ -353,22 +353,24 @@ function memoryStorage(initial = {}) {
     ['https://last-chamber-aaz9.onrender.com/?room=A7K9', 'https://x.example/?room=A7K9', '', ''], '9 초대 링크 = <서버 주소>/?room=코드 (끝의 / 중복 없음 · 잘못된 코드는 빈 값)');
   {
     const st = store();
-    eq([rememberInvite('A7K9', st, 1000), peekInvite(st, 1000 + 60_000), peekInvite(st, 1000 + INVITE_TTL_MS - 1)], [true, 'A7K9', 'A7K9'], '9 보관한 초대 코드는 15분 안에는 그대로');
-    eq([peekInvite(st, 1000 + INVITE_TTL_MS), st.getItem(INVITE_KEY)], [null, null], '9 15분이 지나면 버린다 (방도 10분이면 닫힌다)');
-    rememberInvite('Q2WE', st, 5);
+    eq([INVITE_KEY, rememberInvite('A7K9', st), st.getItem(INVITE_KEY), peekInvite(st)], ['pending_invite_room', true, 'A7K9', 'A7K9'], "9 초대 코드는 'pending_invite_room' 에 보관");
     clearInvite(st);
-    eq([peekInvite(st, 6), rememberInvite('bad', st, 1)], [null, false], '9 쓴 뒤에는 지운다 · 잘못된 코드는 보관하지 않는다');
-    st.setItem(INVITE_KEY, '{깨진 값');
-    eq(peekInvite(st, 1), null, '9 깨진 저장값은 무시');
+    eq([peekInvite(st), rememberInvite('bad', st)], [null, false], '9 쓴 뒤에는 지운다 · 잘못된 코드는 보관하지 않는다');
+    st.setItem(INVITE_KEY, '<script>');
+    eq(peekInvite(st), null, '9 깨진 저장값은 무시');
     const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); }, removeItem: () => { throw new Error('blocked'); } };
-    eq([rememberInvite('A7K9', broken), peekInvite(broken)], [false, null], '9 저장소를 못 쓰는 환경에서도 던지지 않는다');
+    eq([rememberInvite('A7K9', broken), peekInvite(broken)], [true, 'A7K9'], '9 저장소를 못 쓰는 환경에서도 이 페이지 안에서는 기억한다');
+    clearInvite(broken);
+    eq(peekInvite(broken), null, '9 지우면 기억에서도 지운다');
   }
   {
     const st = store();
     const replaced = [];
-    const win = { location: { search: '?room=q2we&ref=kakao', href: 'https://h.example/play?room=q2we&ref=kakao#top' }, history: { state: null, replaceState: (...a) => replaced.push(a[2]) } };
-    eq([captureInvite({ win, storage: st, now: 10 }), replaced], ['Q2WE', ['/play?ref=kakao#top']], '9 링크로 들어오면 코드를 보관하고 주소창에서 room 만 지운다 (새로고침해도 다시 입장하지 않게)');
-    eq(captureInvite({ win: { location: { search: '', href: 'https://h.example/' }, history: {} }, storage: st, now: 20 }), 'Q2WE', '9 주소에 코드가 없어도 보관 중인 코드는 가입이 끝날 때까지 남는다');
+    const win = { location: { search: '?room=%20q2we%20&ref=kakao', href: 'https://h.example/play?room=q2we&ref=kakao#top' }, history: { state: null, replaceState: (...args) => replaced.push(args[2]) } };
+    eq([captureInvite({ win, storage: st }), st.getItem(INVITE_KEY), replaced], ['Q2WE', 'Q2WE', []], '9 링크로 들어오면 곧바로 대문자 · 트림해 보관 (주소의 ?room= 은 결과가 정해질 때까지 남긴다)');
+    eq(captureInvite({ win: { location: { search: '', href: 'https://h.example/' }, history: {} }, storage: st }), 'Q2WE', '9 주소에 코드가 없어도 보관 중인 코드는 로그인이 끝날 때까지 남는다');
+    cleanInviteUrl(win);
+    eq(replaced, ['/play?ref=kakao#top'], '9 초대를 마치면 주소창에서 room 만 지운다 (history.replaceState)');
   }
 
   // 서버 깨우기 재시도 (wake.js)
@@ -454,7 +456,9 @@ function memoryStorage(initial = {}) {
     const lobby = readFileSync(new URL('../src/ui/multiplayer.js', import.meta.url), 'utf8');
     ok(/CONNECT_TIMEOUT_MS = 30_000/.test(lobby) && /retryUntil\(/.test(lobby) && /서버를 깨우는 중입니다/.test(lobby), '9 소켓 연결 제한 30초 · 재시도 · "서버를 깨우는 중입니다" 안내');
     ok(/case 'copy-invite'/.test(lobby) && /buildInviteLink\(/.test(lobby) && /data-act="copy-invite"/.test(lobby), '9 친선방에 [초대 링크 복사]');
-    ok(/lastchamber:signed-in/.test(lobby) && /function joinInvite\(\)[\s\S]*?joinFriendlyRoom\(code\)/.test(lobby) && /captureInvite\(\);\s*\n?if \(peekInvite\(\) && loggedIn\(\)\)/.test(lobby), '9 가입 직후(또는 이미 로그인한 접속)에 보관한 코드로 비밀방에 자동 입장');
+    ok(/lastchamber:signed-in/.test(lobby) && /function joinInvite\(\)[\s\S]*?!loggedIn\(\)[\s\S]*?attemptInvite\(code\)/.test(lobby) && /await ensureSocket\(\)[\s\S]*?s\.connected[\s\S]*?s\.once\('connect'[\s\S]*?request\('join_private_room'/.test(lobby), '9 로그인 + 소켓 연결이 모두 된 뒤에 보관한 코드로 비밀방 자동 입장');
+    ok(lobby.includes('초대 방(코드: $' + '{code})에 입장하는 중...') &&lobby.includes('이미 종료되었거나 존재하지 않는 초대 방입니다.') && /function finishInvite\(\)[\s\S]*?clearInvite\(\);\s*cleanInviteUrl\(\)/.test(lobby), '9 입장 중 표시 · 없는 방 안내 · 마치면 코드와 ?room= 정리');
+    ok(/addEventListener\('lastchamber:halt', \(\) => \{ if \(phase !== 'room'\) leavePage\(\); \}\)/.test(lobby) && /request\('resume_room'/.test(lobby) && /request\('room_presence'/.test(lobby) && /userSession\.isGuest\)[\s\S]{0,80}lastchamber:need-login/.test(lobby), '9 방장은 앱을 전환해도 방 유지(다시 잇기 · 자리 비움 알림) · 손님은 로그인 화면으로');
     const gate = readFileSync(new URL('../src/ui/loginGate.js', import.meta.url), 'utf8');
     ok(/lastchamber:signed-in/.test(gate) && !/nickname: gate\.nick/.test(gate) && /signUp\(\{ username: gate\.user\.value, password: gate\.pass\.value \}\)/.test(gate), '9 가입은 아이디 · 비밀번호만 보내고, 성공하면 signed-in 이벤트를 낸다');
     const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');

@@ -38,6 +38,9 @@
  *   join_public_room({ code, profile })           목록에서 누른 공개 방에 입장 → 곧바로 판이 시작된다                                    ⟵ 로그인 필요
  *   create_private_room({ profile })              친선 비밀방 (목록에 안 보임 · 친선전) → { ok, code, mode }   code = 4자리 영문/숫자 (예: A7K9)  ⟵ 로그인 필요
  *   join_private_room(code | { code, profile })   방 코드로 입장 → 곧바로 판이 시작된다                                                  ⟵ 로그인 필요
+ *                                                 방장이 자리를 비운 방은 HOST_AWAY (잠시 뒤 다시 시도)
+ *   room_presence({ away })                       친선 대기 방 방장: 화면이 가려짐(true) · 돌아옴(false) → { ok, code }
+ *   resume_room({ code })                         끊겼던 방장이 자기 친선 대기 방을 다시 받는다 (같은 계정만 · 끊긴 뒤 5분 안)           ⟵ 로그인 필요
  *   join_queue({ tier: 'free'|'pro'|'vip', profile })   빠른 매칭 대기 → { ok, tier, fee, prize }  (+ queue_joined)   같은 등급 2명이 모이면 자동으로 방 생성  ⟵ 로그인 필요
  *   leave_queue()                                 대기열에서 나가기
  *   game_action({ type: 'shoot', target: 'self'|'opponent' } | { type: 'use_item', index })   → { ok: true } | { ok: false, error }  (엔진 오류 코드 그대로)
@@ -60,7 +63,7 @@
  *                 voided = 'EARLY_END'(1라운드가 끝나기 전 항복 · 끊김) | 'PAIR_LIMIT'(같은 두 계정이 하루 3판을 넘김) | null — 무효면 MMR · 전적 · 탄피 보상 없음 (참가비는 환불)
  *                 reward = { brass, refunded } 서버 지갑이 이 판에 지급한 탄피 · 돌려준 참가비,  wallet = 정산 뒤 지갑 (거울을 맞춘다)
  *   opponent_status { code, connected: false, graceMs, until } | { code, connected: true }     receive_emote (보낸 객체 + code)     room_closed { code, reason }     session_replaced { code }
- *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
+ *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · HOST_AWAY · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
  *
  *   ── 시간 규칙 ──
  *   · 턴 20초: 격발이 끝날 때마다(자신에게 쏜 공포탄으로 턴이 이어질 때도) 다시 센다. 아이템 사용은 세지 않는다. 0초가 되면 서버가 대신 방아쇠를 당긴다 — 자신 또는 상대, 무작위. 연출 시간은 기다려 주지 않는다.
@@ -430,6 +433,8 @@ export function createGameServer(options = {}) {
     join_public_room: needUser(rooms.joinPublicRoom),
     create_private_room: needUser(rooms.createPrivateRoom),
     join_private_room: needUser(rooms.joinPrivateRoom),
+    resume_room: needUser(rooms.resumeRoom), // 자리를 비웠던 방장이 자기 친선 방을 다시 받는다
+    room_presence: rooms.roomPresence, // 친선 대기 방 방장의 화면이 가려짐 · 돌아옴
     join_queue: needUser(matchmaker.joinQueue),
     leave_queue: matchmaker.leaveQueue,
     surrender: rooms.surrender,
