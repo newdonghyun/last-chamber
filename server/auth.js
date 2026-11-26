@@ -82,6 +82,29 @@ export function verifyToken(parsed, passwordHash, secret = '', at = nowSec()) {
   return want.length === got.length && timingSafeEqual(want, got);
 }
 
+// ── 횟수 제한 (고정 창 · 메모리 — 서버 1대 전제) ──
+/** key 마다 windowMs 안에 max 번까지. hit(key) = 한 번 세고 허용이면 true · blocked(key) = 세지 않고 이미 다 썼는지만 */
+export function createWindowLimiter({ max, windowMs, now = Date.now, maxKeys = 20_000 }) {
+  const hits = new Map(); // key → { n, start }
+  const live = (e) => Boolean(e) && now() - e.start < windowMs;
+  return {
+    hit(key) {
+      let e = hits.get(key);
+      if (!live(e)) {
+        if (hits.size >= maxKeys) for (const [k, v] of hits) if (!live(v)) hits.delete(k);
+        e = { n: 0, start: now() };
+        hits.set(key, e);
+      }
+      e.n += 1;
+      return e.n <= max;
+    },
+    blocked(key) {
+      const e = hits.get(key);
+      return live(e) && e.n >= max;
+    },
+  };
+}
+
 // ── 로그인 시도 제한 (메모리 — 서버 1대 전제) ──
 export const LOGIN_LIMITS = Object.freeze({ maxFails: 5, lockMs: 15 * 60_000, maxPerIp: 40, windowMs: 10 * 60_000 });
 

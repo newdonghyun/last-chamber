@@ -2258,7 +2258,7 @@ async function reloadSequence(e) {
     icon.style.setProperty('--i', String(i));
     return icon;
   }));
-  setHtml(el.revealCount, `<b class="t-live">실탄 ${e.live}</b> · <b class="t-blank">공포탄 ${e.blank}</b>`); // 숫자만 들어가는 고정 마크업 — 같은 구성이면 건너뛴다
+  setHtml(el.revealCount, `<b class="t-live">실탄 ${Number(e.live)}</b> · <b class="t-blank">공포탄 ${Number(e.blank)}</b>`); // 숫자만 들어가는 고정 마크업 (서버 값도 숫자로 강제) — 같은 구성이면 건너뛴다
   subtitle(`장전 — 실탄 ${e.live}발 · 공포탄 ${e.blank}발, 순서는 비밀`);
   el.reveal.classList.add('is-visible');
   await wait(REVEAL_MS);

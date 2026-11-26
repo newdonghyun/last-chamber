@@ -64,7 +64,7 @@
  *                 voided = 'EARLY_END'(1라운드가 끝나기 전 항복 · 끊김) | 'PAIR_LIMIT'(같은 두 계정이 하루 3판을 넘김) | null — 무효면 MMR · 전적 · 탄피 보상 없음 (참가비는 환불)
  *                 reward = { brass, refunded } 서버 지갑이 이 판에 지급한 탄피 · 돌려준 참가비,  wallet = 정산 뒤 지갑 (거울을 맞춘다)
  *   opponent_status { code, connected: false, graceMs, until } | { code, connected: true }     receive_emote (보낸 객체 + code)     room_closed { code, reason }     session_replaced { code }
- *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · HOST_AWAY · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
+ *   오류 코드: BAD_REQUEST · RATE_LIMITED · AUTH_REQUIRED · ALREADY_IN_ROOM · ROOM_NOT_FOUND · ROOM_FULL · OWN_ROOM · HOST_AWAY · ACCOUNT_BUSY(이 계정이 다른 접속으로 이미 방 · 대기열에 있다) · STALE_ACTION(같은 상태에 대한 중복 입력) · INVALID_TIER · NOT_IN_GAME · INVALID_ACTION · SERVER_BUSY · SERVER_ERROR · (엔진) NOT_YOUR_TURN · INVALID_TARGET · INVALID_ITEM …
  *
  *   ── 시간 규칙 ──
  *   · 턴 20초: 격발이 끝날 때마다(자신에게 쏜 공포탄으로 턴이 이어질 때도) 다시 센다. 아이템 사용은 세지 않는다. 0초가 되면 서버가 대신 방아쇠를 당긴다 — 자신 또는 상대, 무작위. 연출 시간은 기다려 주지 않는다.
@@ -98,7 +98,7 @@ import { Server } from 'socket.io';
 import { createRoomManager, fail, cleanProfile, ROOM_DEFAULTS, TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, LOBBY_CHANNEL } from './roomManager.js';
 import { createMatchmaker, QUEUE_TIERS } from './matchmaker.js';
 import { createUserStore, cleanNickname, supabaseOrigin, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
-import { cleanUsername, cleanPassword, issueToken, createLoginLimiter, LOGIN_LIMITS } from './auth.js';
+import { cleanUsername, cleanPassword, issueToken, createLoginLimiter, createWindowLimiter, LOGIN_LIMITS } from './auth.js';
 import { runStoreAction, checkIn, claimEmergency, claimPractice, walletView, walletStatus, grantBrass, spendBrass } from './wallet.js';
 
 // 테스트 · 이후 단계가 server/index.js 하나만 import 해도 되도록 규칙 상수와 프로필 검사기를 그대로 다시 내보낸다
@@ -123,7 +123,36 @@ const SERVER_DEFAULTS = {
   loginLimits: null, // 로그인 시도 제한 (테스트에서 줄인다) — 기본 LOGIN_LIMITS
   lobbyStatsMs: 10_000, // 로비를 보는 소켓에게 접속자 수 · 대기 인원을 보내는 간격
   walletRatePer10s: 40, // 계정당 지갑 요청 (10초 안에)
+  signupPer10Min: 10, // IP 당 가입 시도 (10분)
+  signupPerDay: 40, // IP 당 가입 시도 (하루)
+  roomsPerMinute: 12, // 계정당 방 만들기 · 매칭 요청 (1분)
+  joinFailsPerMinute: 15, // 계정 · IP 당 '없는 방' 응답 (1분) — 4자리 방 코드 대입 방지
+  maxSocketsPerIp: 60, // IP 당 동시 소켓 (봇 도배 방지 · 같은 공유기를 쓰는 사람들은 넉넉히)
+  // 접속자 IP 를 어디서 읽는가: Render 는 Cloudflare 뒤라 cf-connecting-ip 를 믿는다. 그 밖의 프록시는 TRUST_PROXY_HOPS(앞단 프록시 수).
+  // 둘 다 아니면 소켓 주소 — 클라이언트가 보낸 X-Forwarded-For 를 그대로 믿으면 IP 제한이 위조로 뚫린다
+  trustCloudflare: process.env.RENDER === 'true',
+  proxyHops: Number(process.env.TRUST_PROXY_HOPS) || (process.env.RENDER === 'true' ? 1 : 0),
 };
+
+/** 모든 HTTP 응답에 붙이는 보안 헤더 */
+export const SECURITY_HEADERS = Object.freeze({
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Strict-Transport-Security': 'max-age=15552000',
+});
+
+/** 요청 헤더 + 소켓 주소 → { ip, source } — 믿기로 한 앞단이 붙인 값만 읽는다 */
+export function clientAddress(headers, remote, { trustCloudflare = false, proxyHops = 0 } = {}) {
+  const cf = trustCloudflare ? headers?.['cf-connecting-ip'] : null;
+  if (typeof cf === 'string' && cf) return { ip: cf, source: 'cloudflare' };
+  if (proxyHops > 0) {
+    const chain = String(headers?.['x-forwarded-for'] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (chain.length) return { ip: chain[Math.max(0, chain.length - proxyHops)], source: 'forwarded' }; // 뒤에서부터 — 앞쪽 항목은 클라이언트가 지어낼 수 있다
+  }
+  return { ip: remote ?? '?', source: 'socket' };
+}
 const LEADERBOARD_SIZE = 10;
 
 /**
@@ -151,7 +180,8 @@ function keyRole(key) {
 
 // ───────── 정적 파일: 서버 내부 경로는 숨긴다 ─────────
 
-const PRIVATE_TOP = new Set(['server', 'tests', 'node_modules', 'scripts', 'www', 'android', 'ios', 'package.json', 'package-lock.json', 'capacitor.config.json']);
+// 허용 목록: 여기 없는 것은 모두 404 (서버 소스 · 설정 · 나중에 생길 파일까지) — 게임 화면에 필요한 것만 연다
+const PUBLIC_TOP = new Set(['', 'index.html', 'style.css', 'manifest.webmanifest', 'favicon.ico', 'src', 'assets']);
 
 function topSegment(urlPath) {
   const normalized = path.posix.normalize(`/${urlPath.replace(/\\/g, '/')}`); // . · .. 정리 (/x/../server 로 돌아 들어오는 길 차단)
@@ -166,7 +196,7 @@ function blockServerInternals(req, res, next) {
   } catch {
     return res.status(400).end();
   }
-  if (PRIVATE_TOP.has(top) || top.startsWith('.') || top.includes('~')) return res.status(404).end(); // ~ = 윈도우 8.3 짧은 이름
+  if (!PUBLIC_TOP.has(top) || req.path.includes('~')) return res.status(404).end(); // ~ = 윈도우 8.3 짧은 이름
   return next();
 }
 
@@ -270,7 +300,7 @@ export function createGameServer(options = {}) {
     },
   };
   const MIN_ENTRY_FEE = Math.min(...Object.values(QUEUE_TIERS).map((t) => t.fee).filter((f) => f > 0)); // 가장 싼 유료 테이블의 참가비 — 이 미만이면 긴급 보급 대상
-  const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users, wallets, onRoomsChanged: sendRoomList });
+  const rooms = createRoomManager({ io, cfg, log, guard, tiers: QUEUE_TIERS, users, wallets, onRoomsChanged: sendRoomList, queuedElsewhere: (userId, socketId) => matchmaker.queuedElsewhere(userId, socketId) });
   const matchmaker = createMatchmaker({ io, rooms, tiers: QUEUE_TIERS, wallets });
   const lobbyStats = () => ({ online: io.engine.clientsCount, queued: matchmaker.queued(), rooms: rooms.publicRooms().length });
   const stats = () => {
@@ -279,6 +309,12 @@ export function createGameServer(options = {}) {
     return { ...rooms.stats(), queued: matchmaker.queued(), users: users.size(), ...health, dbKey, node: process.version };
   };
   const limiter = createLoginLimiter({ ...LOGIN_LIMITS, ...cfg.loginLimits }); // 아이디별 비밀번호 오답 잠금 · IP 별 시도 수
+  const signupBurst = createWindowLimiter({ max: cfg.signupPer10Min, windowMs: 10 * 60_000 });
+  const signupDaily = createWindowLimiter({ max: cfg.signupPerDay, windowMs: 24 * 3600_000 });
+  const roomStarts = createWindowLimiter({ max: cfg.roomsPerMinute, windowMs: 60_000 });
+  const joinMisses = createWindowLimiter({ max: cfg.joinFailsPerMinute, windowMs: 60_000 });
+  const addressOf = (headers, remote) => clientAddress(headers, remote, cfg);
+  const ipOfRequest = (req) => addressOf(req.headers, req.socket?.remoteAddress).ip;
 
   // ── 계정: 가입 · 로그인 · 닉네임 변경 (HTTP) ──
   const sessionOf = (rec) => ({
@@ -287,7 +323,8 @@ export function createGameServer(options = {}) {
 
   /** POST /api/signup { username, password, nickname } */
   async function apiSignup(req) {
-    if (!limiter.allowIp(req.ip ?? '?')) return fail('RATE_LIMITED');
+    const ip = ipOfRequest(req);
+    if (!limiter.allowIp(ip)) return fail('RATE_LIMITED');
     const username = cleanUsername(req.body?.username);
     if (!username) return fail('INVALID_USERNAME');
     const password = cleanPassword(req.body?.password);
@@ -296,6 +333,7 @@ export function createGameServer(options = {}) {
     const auto = raw === undefined || raw === null || raw === ''; // 닉네임을 안 보내면 서버가 느와르 닉네임을 붙인다 (5초 가입)
     const nickname = auto ? null : cleanNickname(raw);
     if (!auto && !nickname) return fail('INVALID_NICKNAME');
+    if (!signupBurst.hit(ip) || !signupDaily.hit(ip)) return fail('RATE_LIMITED'); // 계정 도배(봇) 방지
     const res = await users.signup({ username, password, nickname });
     if (!res.ok) return fail(res.error);
     log('회원가입', username);
@@ -304,7 +342,7 @@ export function createGameServer(options = {}) {
 
   /** POST /api/login { username, password } */
   async function apiLogin(req) {
-    if (!limiter.allowIp(req.ip ?? '?')) return fail('RATE_LIMITED');
+    if (!limiter.allowIp(ipOfRequest(req))) return fail('RATE_LIMITED');
     const username = cleanUsername(req.body?.username);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     if (!username || !password) return fail('BAD_CREDENTIALS'); // 형식이 틀려도 같은 답 (아이디가 있는지 알려 주지 않는다)
@@ -321,7 +359,7 @@ export function createGameServer(options = {}) {
 
   /** POST /api/rename { token, nickname } — players 를 바로 UPDATE · 접속 중인 소켓의 닉네임도 바꾼다 */
   async function apiRename(req) {
-    if (!limiter.allowIp(req.ip ?? '?')) return fail('RATE_LIMITED');
+    if (!limiter.allowIp(ipOfRequest(req))) return fail('RATE_LIMITED');
     const rec = await users.authenticate(req.body?.token);
     if (!rec) return fail('AUTH_REQUIRED');
     const nickname = cleanNickname(req.body?.nickname);
@@ -339,6 +377,7 @@ export function createGameServer(options = {}) {
     if (!rec) return fail('AUTH_REQUIRED');
     const t = Date.now();
     const hit = walletHits.get(rec.id);
+    if (walletHits.size > 10_000) for (const [id, w] of walletHits) if (t - w.start >= 10_000) walletHits.delete(id);
     if (!hit || t - hit.start >= 10_000) walletHits.set(rec.id, { start: t, n: 1 });
     else if ((hit.n += 1) > cfg.walletRatePer10s) return fail('RATE_LIMITED');
     const wallet = await users.getWallet(rec.id);
@@ -374,6 +413,7 @@ export function createGameServer(options = {}) {
     const current = socket.data.user;
     if (current && current.id !== rec.id && socket.data.where) return null; // 판 · 대기열 도중에 다른 계정으로 바꿀 수 없다
     await users.getWallet(rec.id).catch(() => null); // 서버 지갑을 미리 불러 둔다 (판 진행 중에는 동기로 쓴다) — 못 불러오면 지갑 없이 (예전 방식)
+    if (socket.data.user && socket.data.user.id !== rec.id && socket.data.where) return null; // 불러오는 사이 앉았다
     socket.data.user = { id: rec.id, nickname: rec.nickname, rec }; // rec = 서버 계정 기록 (상대에게 보이는 이름 · MMR 은 여기서)
     return rec;
   }
@@ -405,15 +445,33 @@ export function createGameServer(options = {}) {
   const needUser = (handler) => async (socket, payload) => {
     await socket.data.authReady;
     if (!socket.data.user) return fail('AUTH_REQUIRED');
+    if (!socket.connected) return fail('NOT_CONNECTED'); // 확인하는 사이 끊겼다 — 끊긴 소켓이 방 · 대기열에 남거나 참가비를 잃지 않게
     return handler(socket, payload);
+  };
+  /** 방 만들기 · 매칭: 계정당 분당 횟수 제한 */
+  const paced = (handler) => (socket, payload) => (roomStarts.hit(socket.data.user.id) ? handler(socket, payload) : fail('RATE_LIMITED'));
+  /** 방 코드로 들어가기: '없는 방' 이 쌓이면 잠시 막는다 (4자리 코드를 대입해 남의 비밀방에 끼어드는 것 방지) */
+  const guarded = (handler) => (socket, payload) => {
+    const keys = [`u:${socket.data.user.id}`, `ip:${socket.data.ip}`];
+    if (keys.some((key) => joinMisses.blocked(key))) return fail('RATE_LIMITED');
+    const result = handler(socket, payload);
+    if (result?.error === 'ROOM_NOT_FOUND') for (const key of keys) joinMisses.hit(key);
+    return result;
   };
 
   // ── HTTP: 상태 확인 + 계정 API + 정적 파일 ──
   app.disable('x-powered-by');
-  app.set('trust proxy', true); // Render 같은 프록시 뒤 → req.ip = 접속한 사람의 IP (IP 별 로그인 시도 제한)
+  app.use((req, res, next) => {
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+    next();
+  });
+  io.engine.on('headers', (headers) => Object.assign(headers, SECURITY_HEADERS)); // Socket.io 의 polling 응답에도
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() })); // 클라우드 호스팅(Render · Railway) 헬스체크
-  app.get('/healthz',(req, res) => res.json({ ok: true, ...stats() }));
-  app.use('/api', apiCors(cfg.corsOrigin), express.json({ limit: '2kb' }));
+  app.get('/healthz', (req, res) => { // 공개 주소다 — 상태만 (DB 주소 · 오류 원문 · 키 종류 · 런타임 버전은 내보내지 않는다: 원인은 서버 로그의 [DB ERROR])
+    const { rooms: roomCount, waiting, playing, queued, storage, dbOk, dbError: lastError, accountReady, walletReady, authSecret: hasSecret } = stats();
+    res.json({ ok: true, rooms: roomCount, waiting, playing, queued, storage, dbOk, dbError: Boolean(lastError), accountReady, walletReady, authSecret: hasSecret, ipSource: addressOf(req.headers, req.socket?.remoteAddress).source });
+  });
+  app.use('/api', apiCors(cfg.corsOrigin), (req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); }, express.json({ limit: '2kb' }));
   app.post('/api/signup', (req, res) => respond(res, apiSignup(req)));
   app.post('/api/login', (req, res) => respond(res, apiLogin(req)));
   app.post('/api/rename', (req, res) => respond(res, apiRename(req)));
@@ -431,16 +489,16 @@ export function createGameServer(options = {}) {
     get_leaderboard: getLeaderboard,
     watch_rooms: (socket) => { socket.join(LOBBY_CHANNEL); const { online, queued } = lobbyStats(); return { ok: true, rooms: rooms.publicRooms(), online, queued }; },
     unwatch_rooms: (socket) => { socket.leave(LOBBY_CHANNEL); return { ok: true }; },
-    create_public_room: needUser(rooms.createPublicRoom),
-    join_public_room: needUser(rooms.joinPublicRoom),
-    create_private_room: needUser(rooms.createPrivateRoom),
-    join_private_room: needUser(rooms.joinPrivateRoom),
-    resume_room: needUser(rooms.resumeRoom), // 자리를 비웠던 방장이 자기 친선 방을 다시 받는다
-    join_queue: needUser(matchmaker.joinQueue),
+    create_public_room: needUser(paced(rooms.createPublicRoom)),
+    join_public_room: needUser(guarded(rooms.joinPublicRoom)),
+    create_private_room: needUser(paced(rooms.createPrivateRoom)),
+    join_private_room: needUser(guarded(rooms.joinPrivateRoom)),
+    resume_room: needUser(guarded(rooms.resumeRoom)), // 자리를 비웠던 방장이 자기 친선 방을 다시 받는다
+    join_queue: needUser(paced(matchmaker.joinQueue)),
     leave_queue: matchmaker.leaveQueue,
     surrender: rooms.surrender,
     leave_room: (socket) => (socket.data.where?.kind === 'queue' ? matchmaker.leaveQueue(socket) : rooms.leaveRoom(socket)), // 대기 중이면 대기열에서, 아니면 방에서
-    rejoin_room: rooms.rejoinRoom,
+    rejoin_room: needUser(guarded(rooms.rejoinRoom)), // 좌석 토큰 + 그 좌석의 계정
     game_action: rooms.gameAction,
     send_emote: rooms.sendEmote,
   };
@@ -453,8 +511,23 @@ export function createGameServer(options = {}) {
     return win.n <= cfg.eventsPerSec;
   };
 
+  const socketsPerIp = new Map(); // IP → 열린 연결 수
+  io.use((socket, next) => {
+    const { ip } = addressOf(socket.handshake.headers, socket.handshake.address);
+    const open = socketsPerIp.get(ip) ?? 0;
+    if (open >= cfg.maxSocketsPerIp) { next(new Error('RATE_LIMITED')); return; }
+    socketsPerIp.set(ip, open + 1);
+    socket.conn.once('close', () => {
+      const left = (socketsPerIp.get(ip) ?? 1) - 1;
+      if (left > 0) socketsPerIp.set(ip, left);
+      else socketsPerIp.delete(ip);
+    });
+    socket.data.ip = ip;
+    next();
+  });
+
   io.on('connection', (socket) => {
-    socket.data = { where: null, win: { start: 0, n: 0 }, lastEmote: 0, user: null, authReady: Promise.resolve() };
+    socket.data = { ip: socket.data.ip, where: null, win: { start: 0, n: 0 }, lastEmote: 0, user: null, authReady: Promise.resolve() };
     const auth = socket.handshake.auth;
     if (auth && typeof auth === 'object' && typeof auth.token === 'string') {
       socket.data.authReady = authSocket(socket, auth.token).catch((err) => { cfg.onError(err); }); // 틀린 토큰이면 손님 소켓 (연결은 끊지 않는다)

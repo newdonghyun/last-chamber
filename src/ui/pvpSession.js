@@ -235,7 +235,8 @@ function act(payload, type) {
   const before = s.updates;
   const from = s.log.length;
   return new Promise((resolve) => {
-    s.socket.timeout(ACK_MS).emit('game_action', payload, async (err, res) => {
+    // seq = 지금까지 받아 본 사건 수: 서버는 상태가 그새 바뀐 입력(더블 클릭 · 다시 보낸 패킷)을 처리하지 않는다 (STALE_ACTION)
+    s.socket.timeout(ACK_MS).emit('game_action', { ...payload, seq: from }, async (err, res) => {
       if (err || !res?.ok) {
         resolve({ ok: false, error: err ? 'TIMEOUT' : (res?.error ?? 'SERVER_ERROR') });
         return;

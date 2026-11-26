@@ -31,7 +31,6 @@ import { WALLET_COLUMNS, walletToRow, walletFromRow, normalizeWallet, defaultWal
 
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
 const SUPABASE_DEFAULT_URL = 'https://ernxkahepygvweszgtch.supabase.co';
-const SUPABASE_DEFAULT_KEY = 'sb_publishable_Kb57Uuv-m8SXWk6CJXtMPA_sXUQjdSI';
 /** 'https://xxx.supabase.co/rest/v1/' 처럼 경로까지 넣어도 프로젝트 주소(origin)만 쓴다 — 경로가 붙으면 supabase-js 가 /rest/v1 을 한 번 더 붙여 PGRST125(Invalid path)로 실패한다 */
 export const supabaseOrigin = (url) => {
   try {
@@ -41,7 +40,7 @@ export const supabaseOrigin = (url) => {
   }
 };
 export const SUPABASE_URL = supabaseOrigin(process.env.SUPABASE_URL || SUPABASE_DEFAULT_URL);
-export const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_DEFAULT_KEY;
+export const SUPABASE_KEY = process.env.SUPABASE_KEY || ''; // 키는 코드에 두지 않는다 — 환경 변수(서버 전용 secret 키)로만
 
 /** node server/index.js 로 실행된 서버인가 (테스트처럼 서버를 import 만 한 경우에는 실제 DB 에 붙지 않는다) */
 function startedAsServer() {
@@ -224,8 +223,8 @@ export function createUserStore({
   }
 
   // ── Supabase (db 가 있을 때만) ──
-  if (!db && startedAsServer()) { // 서버 실행인데 index.js 가 클라이언트를 못 넘겼다(환경 변수 없음) → 기본 접속 정보로
-    log('[DB] SUPABASE_URL · SUPABASE_KEY:', process.env.SUPABASE_URL && process.env.SUPABASE_KEY ? '환경 변수' : '기본값 사용', `(${SUPABASE_URL})`);
+  if (!db && SUPABASE_KEY && startedAsServer()) { // 서버 실행 · 키는 있는데 SUPABASE_URL 환경 변수가 없다 → 기본 프로젝트 주소로
+    log('[DB] SUPABASE_URL 환경 변수 없음 — 기본 주소 사용', `(${SUPABASE_URL})`);
     db = connectSupabase(SUPABASE_URL, SUPABASE_KEY);
   }
   if (db) file = null; // DB 가 원본 — 파일과 둘로 갈라지지 않게
@@ -551,6 +550,7 @@ export function createUserStore({
     return { ok: true, user: rec };
   }
 
+  const unknownIds = new Map(); // 토큰에 적힌 없는 계정 → 다시 DB 에 묻지 않을 때까지 (지어낸 토큰 도배가 DB 조회로 번지지 않게)
   /** 로그인 토큰 → 계정 | null (모양이 틀림 · 서명이 안 맞음 · 만료 · 비밀번호가 바뀜 · 없는 계정) */
   async function authenticate(token) {
     const parsed = readToken(token);
@@ -558,11 +558,16 @@ export function createUserStore({
     await schemaReady;
     let rec = users.get(parsed.id);
     if (!rec?.passwordHash && client) {
+      if ((unknownIds.get(parsed.id) ?? 0) > now()) return null;
       try {
         const res = check(await client.from(TABLE).select(accountSelect()).eq('user_id', parsed.id).maybeSingle(), '토큰 계정 조회');
         markDb(null);
         const row = res.data ? fromDbRow(res.data) : null;
         if (row?.passwordHash && row.username) rec = adopt(row);
+        else {
+          if (unknownIds.size >= 5000) unknownIds.clear();
+          unknownIds.set(parsed.id, now() + 30_000);
+        }
       } catch (err) {
         markDb(err);
         onError(err);

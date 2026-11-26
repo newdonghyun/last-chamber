@@ -87,6 +87,7 @@ const ERROR_TEXT = Object.freeze({
   ROOM_NOT_FOUND: '방을 찾을 수 없어요 — 이미 시작됐거나 닫혔을 수 있어요.',
   ROOM_FULL: '이미 가득 찬 방이에요.',
   OWN_ROOM: '내가 만든 방이에요.',
+  ACCOUNT_BUSY: '이 계정은 다른 창이나 기기에서 이미 방에 참가 중이에요. 그쪽을 먼저 닫아 주세요.',
   HOST_AWAY: '방장이 잠시 자리를 비웠어요 — 잠시 후 다시 입장해 주세요.',
   INVALID_TIER: '알 수 없는 테이블입니다.',
   SERVER_BUSY: '서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.',

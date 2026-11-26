@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
-import { createGameServer, QUEUE_TIERS } from '../server/index.js';
+import { createGameServer, QUEUE_TIERS, clientAddress } from '../server/index.js';
 import { roomChannel, ROOM_DEFAULTS } from '../server/roomManager.js';
 import { cleanNickname } from '../server/userStore.js';
 import { noirNickname, NOIR_ADJECTIVES, NOIR_NOUNS } from '../server/nicknames.js';
@@ -73,6 +73,9 @@ const head = (port, urlPath) => new Promise((resolve, reject) => {
   req.end();
 });
 
+
+/** 테스트 서버: 모두 127.0.0.1 에서 접속하므로 IP · 계정 제한을 넉넉히 둔다 (제한 자체는 Phase 14 에서 좁혀 검사) */
+const testServer = (options = {}) => createGameServer({ signupPer10Min: 10_000, signupPerDay: 10_000, roomsPerMinute: 10_000, joinFailsPerMinute: 10_000, maxSocketsPerIp: 10_000, ...options });
 
 // ───────── 계정 도우미 ─────────
 const PASSWORD = 'secret-pass1';
@@ -141,7 +144,7 @@ async function queueMatch(X, Y) {
 async function phase3() {
   const dir = mkdtempSync(join(tmpdir(), 'lastchamber-users-'));
   const file = join(dir, 'users.json');
-  const server = createGameServer({ quiet: true, onError, userDataFile: file, userSaveDelayMs: 20, authSecret: 'test-secret' });
+  const server = testServer({ quiet: true, onError, userDataFile: file, userSaveDelayMs: 20, authSecret: 'test-secret' });
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
 
@@ -197,10 +200,10 @@ async function phase3() {
   await A.call('leave_room');
   eq([(await fOver).ranked, (await fOver).record?.mmr], [false, 1025], '17 친선 비밀방 결과는 전적 · MMR 미반영');
   const A2 = await client(port, { token: a.token }); // 같은 계정 · 다른 창
-  const [self] = await queueMatch(A, A2);
-  const selfOver = A.waitFor('game_over', (p) => p.code === self.code);
-  await A2.call('leave_room');
-  eq((await selfOver).record?.mmr, 1025, '17 같은 계정끼리(창 두 개) 둔 판은 기록하지 않는다');
+  await A.call('join_queue', { tier: 'free', profile: {} });
+  eq((await A2.call('join_queue', { tier: 'free', profile: {} })).error, 'ACCOUNT_BUSY', '17 같은 계정의 두 번째 창은 대기열에 못 들어간다 (자기 자신과 대전 불가)');
+  eq(server.stats().queued, 1, '17 대기열에는 한 자리만');
+  await A.call('leave_queue');
 
   // 18. 닉네임 변경: 서버에서 바로 · 중복 차단 · 토큰 필요 · 접속 중인 소켓의 이름표도
   const renamed = await api('rename', { token: b.token, nickname: '에이스' });
@@ -222,14 +225,14 @@ async function phase3() {
   const saved = JSON.parse(readFileSync(file, 'utf8'));
   const gun = saved.users.find((u) => u.username === 'gunner01');
   ok(gun && /^p1\$/.test(gun.passwordHash) && !readFileSync(file, 'utf8').includes(PASSWORD), '19 파일에는 비밀번호 해시만 (원문 없음)');
-  const reborn = createGameServer({ quiet: true, onError, userDataFile: file, authSecret: 'test-secret' });
+  const reborn = testServer({ quiet: true, onError, userDataFile: file, authSecret: 'test-secret' });
   const port2 = await reborn.start(0, '127.0.0.1');
   const back = await apiOf(port2)('login', { username: 'gunner01', password: PASSWORD });
   eq([back.user_id, back.me?.mmr, back.me?.wins], [a.user_id, 1050, 2], '19 서버를 다시 켜도 로그인 · 전적 그대로');
   const oldToken = await client(port2, { token: a.token });
   eq((await oldToken.call('register_player', {})).me?.nickname, '총잡이', '19 재시작 전에 받은 토큰으로도 자동 로그인 (서버 메모리에 세션이 없어도)');
   await reborn.stop();
-  const wrongSecret = createGameServer({ quiet: true, onError, userDataFile: file, authSecret: 'other-secret' });
+  const wrongSecret = testServer({ quiet: true, onError, userDataFile: file, authSecret: 'other-secret' });
   const port3 = await wrongSecret.start(0, '127.0.0.1');
   eq((await (await client(port3, { token: a.token })).call('register_player', {})).error, 'AUTH_REQUIRED', '19 AUTH_SECRET 이 다르면 토큰은 무효 (위조 방지)');
   await wrongSecret.stop();
@@ -327,7 +330,7 @@ async function phase4() {
     { user_id: veteran, username: 'veteran', password_hash: await hashPassword(PASSWORD), nickname: '고수', wins: 40, losses: 10, streak: 3, max_streak: 9, mmr: 1600 },
     { user_id: legacy, nickname: '옛행', wins: 9, losses: 0, streak: 9, max_streak: 9, mmr: 2000 }, // 계정이 아닌 예전 행 (전적이 있어도 순위 · 로그인 대상 아님)
   ]);
-  const server = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const server = testServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
   await sleep(30);
@@ -372,7 +375,7 @@ async function phase4() {
   await server.stop();
 
   // 24. 서버를 다시 켜도(캐시 없음) 토큰으로 바로 자동 로그인 — DB 에서 계정을 읽어 확인
-  const again = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const again = testServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
   const port2 = await again.start(0, '127.0.0.1');
   const R2 = await client(port2, { token: r.token });
   eq((await R2.call('register_player', {})).me, { nickname: '중수', wins: 1, losses: 0, games: 1, streak: 1, maxStreak: 1, mmr: 1025 }, '24 재시작 뒤 토큰 → DB 계정 · 전적');
@@ -381,7 +384,7 @@ async function phase4() {
   // 25. 계정 컬럼이 없는 테이블 (ACCOUNT_SQL 실행 전): 서버는 돌고 가입 · 로그인만 안내와 함께 막는다 → SQL 실행 뒤 다시 켜지 않아도 된다
   const errors = [];
   const oldDb = fakeSupabase([], { accountColumns: false });
-  const old = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: oldDb, accountRecheckMs: 0 });
+  const old = testServer({ quiet: true, onError: (err) => errors.push(err), supabaseClient: oldDb, accountRecheckMs: 0 });
   const oldPort = await old.start(0, '127.0.0.1');
   await sleep(30);
   const blocked = await apiOf(oldPort)('signup', { username: 'early1', password: PASSWORD, nickname: '얼리' });
@@ -394,7 +397,7 @@ async function phase4() {
 
   // 26. DB 연결이 실패하면 메모리로 계속 돈다
   const errs = [];
-  const solo = createGameServer({ quiet: true, onError: (err) => errs.push(err), supabaseClient: Promise.reject(new Error('fetch failed')) });
+  const solo = testServer({ quiet: true, onError: (err) => errs.push(err), supabaseClient: Promise.reject(new Error('fetch failed')) });
   const soloPort = await solo.start(0, '127.0.0.1');
   const memo = await apiOf(soloPort)('signup', { username: 'memo1', password: PASSWORD, nickname: '메모' });
   eq([memo.ok, solo.stats().storage, errs.length], [true, 'memory', 1], '26 Supabase 연결 실패 → 메모리로 가입 · 로그인 (오류는 한 번만)');
@@ -441,7 +444,7 @@ async function phase5() {
   const nativeWebSocket = globalThis.WebSocket;
   delete globalThis.WebSocket;
   const errors = [];
-  const server = createGameServer({ quiet: true, onError: (err) => errors.push(err), supabaseUrl: `http://127.0.0.1:${rest.address().port}`, supabaseKey: 'test-service-role', authSecret: 'test-secret' });
+  const server = testServer({ quiet: true, onError: (err) => errors.push(err), supabaseUrl: `http://127.0.0.1:${rest.address().port}`, supabaseKey: 'test-service-role', authSecret: 'test-secret' });
   const port = await server.start(0, '127.0.0.1');
   try {
     const made = await apiOf(port)('signup', { username: 'node20', password: PASSWORD, nickname: '노드20' });
@@ -465,7 +468,7 @@ async function phase5() {
 
 // ───────── Phase 7: 계정 보안 ─────────
 async function phase7() {
-  const server = createGameServer({ quiet: true, onError, authSecret: 'test-secret', loginLimits: { maxFails: 3, lockMs: 60_000, maxPerIp: 500 } });
+  const server = testServer({ quiet: true, onError, authSecret: 'test-secret', loginLimits: { maxFails: 3, lockMs: 60_000, maxPerIp: 500 } });
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
   const acct = await signupVia(port, '보안관', { username: 'sheriff' });
@@ -497,7 +500,7 @@ async function phase7() {
   eq([burst.filter((x) => x.ok).length, burst.filter((x) => x.error === 'USERNAME_TAKEN').length], [1, 4], '31 동시 가입 → 계정 1개');
   await server.stop();
 
-  const strict = createGameServer({ quiet: true, onError, loginLimits: { maxPerIp: 2 } });
+  const strict = testServer({ quiet: true, onError, loginLimits: { maxPerIp: 2 } });
   const strictPort = await strict.start(0, '127.0.0.1');
   const tries = [];
   for (let i = 0; i < 3; i += 1) tries.push((await apiOf(strictPort)('login', { username: 'nobody', password: 'whatever' })).error);
@@ -507,7 +510,7 @@ async function phase7() {
 
 // ───────── Phase 8: 공개 방 (로비 목록 · 클릭 입장 · 랭킹전) ─────────
 async function phase8() {
-  const server = createGameServer({ quiet: true, onError });
+  const server = testServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   const host = await player(port, '방장');
   const guest = await client(port);
@@ -576,7 +579,7 @@ async function phase8() {
 // ───────── Phase 9: 항복 (랭킹전 정산 · 친선전 · 중복 · 동시 · 재접속) ─────────
 async function phase9() {
   const db = fakeSupabase([]); // Supabase 흉내 — 두 계정 정산이 요청 하나(upsert 배열)로 가는지도 본다
-  const server = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const server = testServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
   const port = await server.start(0, '127.0.0.1');
   const mem = (X) => { const r = server.users.get(X.account.user_id); return { w: r.wins, l: r.losses, s: r.streak, m: r.mmr }; }; // 서버 메모리 전적
   const row = (X) => { const r = db.table.get(X.account.user_id); return { w: r.wins, l: r.losses, s: r.streak, m: r.mmr }; }; // DB(players) 행
@@ -710,7 +713,7 @@ async function phase10() {
   eq(noirNickname(() => 0), NOIR_ADJECTIVES[0] + NOIR_NOUNS[0], '43 난수를 고정하면 같은 이름 (결정적)');
 
   // 44. 메모리 서버: 닉네임 없이 가입 → 서버가 붙인다
-  const server = createGameServer({ quiet: true, onError });
+  const server = testServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
   const made = [];
@@ -739,7 +742,7 @@ async function phase10() {
   // 46. Supabase 흉내: 흔한 이름(기본 조합 400개)이 모두 이미 있어도 → 숫자를 붙여 겹치지 않게
   const rows = bases.map((nickname, i) => ({ user_id: randomUUID(), username: `pre${i}`, password_hash: 'p1$x$y', nickname, wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }));
   const db = fakeSupabase(rows);
-  const dbServer = createGameServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
+  const dbServer = testServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
   const dbPort = await dbServer.start(0, '127.0.0.1');
   const dbApi = apiOf(dbPort);
   const crowded = await dbApi('signup', { username: nextName(), password: PASSWORD });
@@ -757,7 +760,7 @@ async function phase11() {
   let clockMs = Date.parse('2026-11-10T03:00:00Z'); // 한국 시간 11월 10일 정오
   const db = fakeSupabase([]);
   const options = { quiet: true, onError, supabaseClient: db, authSecret: 'test-secret', clock: () => clockMs, lobbyStatsMs: 60, graceMs: 250 };
-  const server = createGameServer(options);
+  const server = testServer(options);
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
   const w = (token, action, args = {}) => api('wallet', { token, action, ...args });
@@ -853,7 +856,7 @@ async function phase11() {
 
   // 67. 재시작해도 그대로 (DB 지갑 컬럼에서 다시 읽는다)
   await server.stop();
-  const again = createGameServer(options);
+  const again = testServer(options);
   const port2 = await again.start(0, '127.0.0.1');
   const back = await apiOf(port2)('wallet', { token: D.token, action: 'get' });
   eq([back.wallet.brass, back.wallet.owned.gun, back.state.attendance.days], [afterCycle.wallet.brass + 100 + 150 + 200, ['steel', 'blood_gold', 'phantom_black'], 3], '67 서버를 다시 켜도 탄피 · 스킨 · 출석 그대로 (Supabase 에서)');
@@ -862,7 +865,7 @@ async function phase11() {
   // 68. 지갑 컬럼이 아직 없는 DB: 지갑만 꺼지고(503) 가입 · 로그인 · 대전은 그대로, 참가비는 클라이언트가 (feePaid false)
   const bare = fakeSupabase([], { walletColumns: false });
   const bareErrors = [];
-  const bareServer = createGameServer({ quiet: true, onError: (err) => bareErrors.push(err.message), supabaseClient: bare, authSecret: 'test-secret' });
+  const bareServer = testServer({ quiet: true, onError: (err) => bareErrors.push(err.message), supabaseClient: bare, authSecret: 'test-secret' });
   const barePort = await bareServer.start(0, '127.0.0.1');
   const bareApi = apiOf(barePort);
   const old = await signupVia(barePort, '예전방식');
@@ -877,7 +880,7 @@ async function phase11() {
   await bareServer.stop();
 
   // 69. 참가비 선결제 · 환불 · 상금 (pro 테이블 참가비 200 · 승자 360)
-  const s2 = createGameServer(options);
+  const s2 = testServer(options);
   const p2 = await s2.start(0, '127.0.0.1');
   const api2 = apiOf(p2);
   const W = (acc, action, args = {}) => api2('wallet', { token: acc.token, action, ...args });
@@ -1008,7 +1011,7 @@ async function phase11() {
 
 // ───────── Phase 12: 친선 비밀방 초대 — 방장이 링크를 보내러 자리를 비워도 방이 남는다 ─────────
 async function phase12() {
-  const server = createGameServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret', hostAwayMs: 700 });
+  const server = testServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret', hostAwayMs: 700 });
   const port = await server.start(0, '127.0.0.1');
   const again = async (who) => { const c = await client(port, { token: who.account.token }); c.account = who.account; return c; };
   const join = async (who, code) => who.call('join_private_room', code);
@@ -1084,7 +1087,7 @@ async function phase12() {
 
 // ───────── Phase 13: 전송 데이터 — 탄창 순서는 어디에도 없고, 시점 상태가 로그와 짝을 이룬다 ─────────
 async function phase13() {
-  const server = createGameServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret' });
+  const server = testServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret' });
   const port = await server.start(0, '127.0.0.1');
   const [A, B] = [await player(port, '엿보기A'), await player(port, '엿보기B')];
   const room = await A.call('create_private_room', {});
@@ -1114,8 +1117,106 @@ async function phase13() {
   await server.stop();
 }
 
+// ───────── Phase 14: 외부 공격 · 치트 · 어뷰징 방어 ─────────
+async function phase14() {
+  const server = createGameServer({ // 제한을 좁혀서 검사 (testServer 의 넉넉한 값을 쓰지 않는다)
+    quiet: true, onError, userDataFile: null, authSecret: 'test-secret',
+    signupPer10Min: 4, roomsPerMinute: 4, joinFailsPerMinute: 3, maxSocketsPerIp: 8, loginLimits: { maxPerIp: 30 },
+  });
+  const port = await server.start(0, '127.0.0.1');
+  const base = `http://127.0.0.1:${port}`;
+
+  // 80. 보안 헤더 · 정적 파일 허용 목록 · 상태 주소가 내부 정보를 내보내지 않음
+  const want = { 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'strict-origin-when-cross-origin' };
+  const headersOf = async (path) => (await fetch(`${base}${path}`)).headers;
+  for (const path of ['/', '/style.css', '/healthz', '/nope', '/socket.io/?EIO=4&transport=polling']) {
+    const h = await headersOf(path);
+    eq(Object.keys(want).map((k) => h.get(k)), Object.values(want), `80 보안 헤더: ${path.split('?')[0]}`);
+  }
+  ok(/frame-ancestors 'none'/.test((await headersOf('/')).get('content-security-policy') ?? ''), '80 다른 사이트의 iframe 에 담기지 않는다');
+  const status = async (path) => (await fetch(`${base}${path}`)).status;
+  for (const path of ['/server/index.js', '/server/userStore.js', '/tests/server.test.mjs', '/package.json', '/.env', '/.git/config', '/scripts/build-www.mjs', '/notes.txt', '/backup.sql', '/capacitor.config.json', '/node_modules/express/package.json']) {
+    eq(await status(path), 404, `80 공개하지 않는 경로: ${path}`);
+  }
+  eq(await Promise.all(['/', '/index.html', '/style.css', '/src/ui/app.js', '/manifest.webmanifest'].map(status)), [200, 200, 200, 200, 200], '80 게임에 필요한 파일은 그대로');
+  const health = await (await fetch(`${base}/healthz`)).json();
+  eq([health.ok, 'dbHost' in health, 'dbKey' in health, 'node' in health, 'users' in health, typeof health.dbError, health.ipSource], [true, false, false, false, false, 'boolean', 'socket'], '80 /healthz 는 상태만 (DB 주소 · 키 종류 · 버전 · 오류 원문 없음)');
+
+  // 81. IP 판별: 클라이언트가 지어낸 X-Forwarded-For 로는 제한을 피할 수 없다
+  eq([
+    clientAddress({ 'x-forwarded-for': '1.1.1.1', 'cf-connecting-ip': '2.2.2.2' }, '9.9.9.9').ip,
+    clientAddress({ 'x-forwarded-for': '6.6.6.6, 3.3.3.3' }, '9.9.9.9', { proxyHops: 1 }).ip,
+    clientAddress({ 'x-forwarded-for': '6.6.6.6, 3.3.3.3', 'cf-connecting-ip': '2.2.2.2' }, '9.9.9.9', { trustCloudflare: true, proxyHops: 1 }).ip,
+  ], ['9.9.9.9', '3.3.3.3', '2.2.2.2'], '81 믿기로 한 앞단이 붙인 값만 읽는다 (기본은 소켓 주소 · 프록시는 뒤에서부터 · Cloudflare 헤더)');
+
+  // 82. 가입 속도 제한
+  const signup = async (i, headers = {}) => (await fetch(`${base}/api/signup`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ username: `sec_user${i}`, password: PASSWORD }) })).json();
+  const joined = [];
+  for (let i = 0; i < 6; i += 1) joined.push(await signup(i, { 'x-forwarded-for': `10.0.0.${i}` }));
+  eq(joined.map((r) => r.error ?? 'ok'), ['ok', 'ok', 'ok', 'ok', 'RATE_LIMITED', 'RATE_LIMITED'], '82 같은 IP 의 가입 도배 차단 (위조 헤더를 바꿔 가며 보내도)');
+  const as = async (i) => { const c = await client(port, { token: joined[i].token }); c.account = joined[i]; return c; };
+
+  // 83. 계정당 활성 방 · 대기 1개 (창을 여러 개 열어도)
+  const [a1, a2, b1] = [await as(0), await as(0), await as(1)];
+  const room = await a1.call('create_public_room', {});
+  eq([room.ok, (await a2.call('create_private_room', {})).error, (await a2.call('join_queue', { tier: 'free' })).error], [true, 'ACCOUNT_BUSY', 'ACCOUNT_BUSY'], '83 방을 연 계정의 두 번째 창은 새 방 · 대기 불가');
+  const other = await b1.call('create_private_room', {});
+  eq((await a2.call('join_private_room', other.code)).error, 'ACCOUNT_BUSY', '83 다른 방 입장도 불가');
+  await a1.call('leave_room');
+  await b1.call('leave_room');
+
+  // 84. 방 만들기 · 매칭 요청 속도 제한 (계정당)
+  const c2 = await as(2);
+  const burst = [];
+  for (let i = 0; i < 6; i += 1) { const r = await c2.call('create_public_room', {}); burst.push(r.error ?? 'ok'); if (r.ok) await c2.call('leave_room'); }
+  eq(burst, ['ok', 'ok', 'ok', 'ok', 'RATE_LIMITED', 'RATE_LIMITED'], '84 방 만들기 연타 차단');
+
+  // 85. 방 코드 대입 차단
+  const d = await as(3);
+  const real = await b1.call('create_private_room', {});
+  const guesses = [];
+  for (const code of ['AAAA', 'BBBB', 'CCCC', 'DDDD', real.code]) guesses.push((await d.call('join_private_room', code)).error ?? 'ok');
+  eq(guesses, ['ROOM_NOT_FOUND', 'ROOM_NOT_FOUND', 'ROOM_NOT_FOUND', 'RATE_LIMITED', 'RATE_LIMITED'], '85 없는 방을 3번 두드리면 잠시 막는다 (맞는 코드도)');
+  await b1.call('leave_room');
+  await server.stop();
+
+  // 86. 인게임 입력: 내 좌석 · 내 차례 · 실제 가진 아이템 · 중복 입력
+  const play = testServer({ quiet: true, onError, userDataFile: null, authSecret: 'test-secret' });
+  const p = await play.start(0, '127.0.0.1');
+  const [X, Y] = [await player(p, '치트X'), await player(p, '치트Y')];
+  const made = await X.call('create_private_room', {});
+  await Y.call('join_private_room', made.code);
+  const [sx, sy] = await Promise.all([X.waitFor('state_update', (m) => m.code === made.code), Y.waitFor('state_update', (m) => m.code === made.code)]);
+  const [me, foe, mine] = sx.state.turn.isMine ? [X, Y, sx] : [Y, X, sy];
+  const seq = mine.logFrom + mine.events.length;
+  eq((await foe.call('game_action', { type: 'shoot', target: 'self' })).error, 'NOT_YOUR_TURN', '86 상대 차례에 격발 불가');
+  eq([(await me.call('game_action', { type: 'use_item', index: 99, item: 'SCOPE' })).error, (await me.call('game_action', { type: 'use_item', index: '0' })).error, (await me.call('game_action', { type: 'give_item' })).error], ['INVALID_ITEM', 'INVALID_ITEM', 'INVALID_ACTION'], '86 갖지 않은 아이템 · 지어낸 값 · 모르는 동작 거절 (보낸 item 이름은 읽지 않는다)');
+  eq((await me.call('game_action', { type: 'shoot', target: 'self', seq: seq - 1 })).error, 'STALE_ACTION', '86 지난 상태에 대한 입력 거절');
+  const twice = await Promise.all([me.call('game_action', { type: 'shoot', target: 'self', seq }), me.call('game_action', { type: 'shoot', target: 'self', seq })]);
+  eq(twice.map((r) => r.error ?? 'ok'), ['ok', 'STALE_ACTION'], '86 같은 입력이 두 번 도착하면 한 번만 처리 (더블 클릭 · 재전송)');
+  const outsider = await player(p, '구경꾼');
+  eq([(await outsider.call('game_action', { type: 'shoot', target: 'opponent' })).error, (await outsider.call('surrender')).error], ['NOT_IN_GAME', 'NOT_IN_GAME'], '86 그 판에 앉지 않은 소켓의 입력은 무시');
+  await play.stop();
+
+  // 87. IP 당 동시 접속 수
+  const small = testServer({ quiet: true, onError, maxSocketsPerIp: 2 });
+  const sp = await small.start(0, '127.0.0.1');
+  const open = () => new Promise((resolve) => {
+    const s = connect(`http://127.0.0.1:${sp}`, { transports: ['websocket'], reconnection: false, forceNew: true });
+    allSockets.push(s);
+    s.once('connect', () => resolve({ s, error: null }));
+    s.once('connect_error', (err) => resolve({ s, error: err.message }));
+  });
+  const [o1, o2, o3] = [await open(), await open(), await open()];
+  eq([o1.error, o2.error, o3.error], [null, null, 'RATE_LIMITED'], '87 같은 IP 의 소켓 도배 차단');
+  o1.s.close();
+  await sleep(80);
+  eq((await open()).error, null, '87 연결을 닫으면 다시 접속할 수 있다');
+  await small.stop();
+}
+
 async function phase1() {
-  const server = createGameServer({ quiet: true, onError });
+  const server = testServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   eq([QUEUE_TIERS.free, QUEUE_TIERS.pro, QUEUE_TIERS.vip], [{ fee: 0, prize: 0 }, { fee: 200, prize: 360 }, { fee: 1000, prize: 1800 }], '등급표: free 0 · pro 200→360 · vip 1000→1800');
   const A = await player(port, '알파');
@@ -1231,7 +1332,7 @@ async function phase1() {
 
 
 async function phase2() {
-  const server = createGameServer({ quiet: true, turnMs: 250, graceMs: 400, onError });
+  const server = testServer({ quiet: true, turnMs: 250, graceMs: 400, onError });
   const port = await server.start(0, '127.0.0.1');
   const mk = async (name) => {
     const [x, y] = [await player(port, `${name}X`), await player(port, `${name}Y`)];
@@ -1268,9 +1369,11 @@ async function phase2() {
   const g2 = await mk('복귀');
   g2.y.socket.disconnect();
   await g2.x.waitFor('opponent_status', (p) => p.connected === false);
-  const intruder = await client(port);
+  const intruder = await client(port, { token: g2.x.account.token });
   eq(await intruder.call('rejoin_room', { code: g2.code, token: 'f'.repeat(32) }), { ok: false, error: 'ROOM_NOT_FOUND' }, '12 위조 토큰은 거절');
-  const back = await client(port);
+  const stranger = await client(port, { token: g2.x.account.token });
+  eq((await stranger.call('rejoin_room', { code: g2.code, token: g2.my.token })).error, 'ROOM_NOT_FOUND', '12 좌석 토큰을 알아도 그 좌석의 계정이 아니면 거절');
+  const back = await client(port, { token: g2.y.account.token });
   eq((await back.call('rejoin_room', { code: g2.code, token: g2.my.token })).ok, true, '12 진짜 토큰으로 재접속');
   const [rm, rs] = await Promise.all([back.waitFor('match_found'), back.waitFor('state_update', (p) => p.reason === 'rejoin')]);
   eq([rm.resume, rm.you, rm.token], [true, g2.my.you, g2.my.token], '12 같은 좌석 · 같은 토큰으로 복귀');
@@ -1282,7 +1385,7 @@ async function phase2() {
   ok(!g2.x.inbox.some((m) => m.event === 'game_over'), '12 재접속했다면 유예가 지나도 부전승은 없다');
 
   // 13. 옛 연결이 아직 살아 있어도 새 연결이 자리를 넘겨받는다 (모바일에서 망이 바뀐 경우)
-  const takeover = await client(port);
+  const takeover = await client(port, { token: g2.y.account.token });
   const replaced = back.waitFor('session_replaced');
   eq((await takeover.call('rejoin_room', { code: g2.code, token: g2.my.token })).ok, true, '13 새 연결로 재접속');
   await replaced;
@@ -1293,7 +1396,7 @@ async function phase2() {
   const overTake = g2.x.waitFor('game_over');
   await takeover.call('leave_room');
   eq([(await overTake).youWon, (await overTake).reason], [true, 'forfeit'], '13 새 연결이 나가면 상대 부전승');
-  const lateJoin = await client(port);
+  const lateJoin = await client(port, { token: g2.y.account.token });
   const lateOver = lateJoin.waitFor('game_over', undefined, 1000);
   eq((await lateJoin.call('rejoin_room', { code: g2.code, token: g2.my.token })).over, true, '13 끝난 판에 늦게 돌아오면 결과만 다시 받는다');
   eq((await lateOver).youWon, false, '13 늦게 온 사람은 패자로 확인');
@@ -1304,7 +1407,7 @@ async function phase2() {
 const IN_GAME_EVENTS = ['match_found', 'state_update', 'game_over', 'opponent_status', 'receive_emote', 'room_closed', 'session_replaced'];
 
 async function phase6() {
-  const server = createGameServer({ quiet: true, onError });
+  const server = testServer({ quiet: true, onError });
   const port = await server.start(0, '127.0.0.1');
   const channelSize = (code) => server.io.sockets.adapter.rooms.get(roomChannel(code))?.size ?? 0;
   const [A, B, C, D, E, F] = await Promise.all(Array.from({ length: 6 }, () => player(port)));
@@ -1385,6 +1488,7 @@ try {
   await phase11();
   await phase12();
   await phase13();
+  await phase14();
 } catch (err) {
   fails.push(`테스트 중단: ${err.message}`);
   console.log(`  ✗ 테스트 중단: ${err.stack ?? err.message}`);

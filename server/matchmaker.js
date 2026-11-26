@@ -35,6 +35,7 @@ export function createMatchmaker({ io, rooms, tiers = QUEUE_TIERS, wallets = nul
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
     const { fee, prize } = tiers[tier];
     const userId = socket.data.user?.id ?? null;
+    if (userId && (rooms.seatedElsewhere(userId, socket) || queuedElsewhere(userId, socket.id))) return fail('ACCOUNT_BUSY'); // 계정당 활성 방 · 대기 1개
     let paid = 0;
     if (fee > 0 && wallets?.managed(userId)) { // 참가비는 서버가 먼저 받아 둔다 (클라이언트가 속여 공짜로 들어오지 못한다)
       if (!wallets.spend(userId, fee)) return fail('INSUFFICIENT_BRASS');
@@ -59,12 +60,15 @@ export function createMatchmaker({ io, rooms, tiers = QUEUE_TIERS, wallets = nul
   function tryMatch(tier) { // 같은 등급 2명이 모이면 방을 만들고 바로 시작
     const queue = queues[tier];
     while (queue.length >= 2) {
-      const [a, b] = queue.splice(0, 2);
+      const j = queue.findIndex((e, i) => i > 0 && (!e.userId || e.userId !== queue[0].userId)); // 같은 계정끼리는 맺지 않는다
+      if (j < 0) break;
+      const [b] = queue.splice(j, 1);
+      const a = queue.shift();
       const sa = io.sockets.sockets.get(a.socketId);
       const sb = io.sockets.sockets.get(b.socketId);
       if (!sa?.connected || !sb?.connected) { // 끊긴 소켓은 disconnect 에서 이미 빠지지만 혹시 남았다면 살아 있는 쪽만 맨 앞으로 돌려 놓는다
-        if (sa?.connected) queue.unshift(a);
-        if (sb?.connected) queue.unshift(b);
+        if (sa?.connected) queue.unshift(a); else if (a.paid > 0) wallets?.grant(a.userId, a.paid); // 버리는 대기자의 참가비는 돌려준다
+        if (sb?.connected) queue.unshift(b); else if (b.paid > 0) wallets?.grant(b.userId, b.paid);
         continue;
       }
       if (!rooms.startMatchedRoom(tier, [{ socket: sa, profile: a.profile, paid: a.paid }, { socket: sb, profile: b.profile, paid: b.paid }])) { // 서버가 가득 참 — 두 사람은 대기열에 그대로 둔다
@@ -88,6 +92,11 @@ export function createMatchmaker({ io, rooms, tiers = QUEUE_TIERS, wallets = nul
     if (where?.kind === 'queue') removeFromQueue(where.tier, socket.id);
   }
 
+  /** 이 계정이 다른 접속으로 대기 중인가 */
+  function queuedElsewhere(userId, socketId) {
+    return Boolean(userId) && Object.values(queues).some((queue) => queue.some((e) => e.userId === userId && e.socketId !== socketId && io.sockets.sockets.get(e.socketId)?.connected));
+  }
+
   // ── 현황 · 종료 ──
   const queued = () => Object.values(queues).reduce((n, queue) => n + queue.length, 0); // 모든 등급의 대기 인원
 
@@ -95,5 +104,5 @@ export function createMatchmaker({ io, rooms, tiers = QUEUE_TIERS, wallets = nul
     for (const queue of Object.values(queues)) queue.length = 0;
   }
 
-  return { joinQueue, leaveQueue, onDisconnect, queued, clear };
+  return { joinQueue, leaveQueue, onDisconnect, queuedElsewhere, queued, clear };
 }

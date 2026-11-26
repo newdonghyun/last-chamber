@@ -148,7 +148,7 @@ function validEmote(p) {
  *   onRoomsChanged()  공개 방 목록이 바뀌었을 때 (index.js 가 로비 채널에 room_list 를 보낸다)
  * 이벤트 처리 함수는 (socket, payload) → ack 로 돌려줄 { ok, ... } 를 반환한다 (소켓 이벤트와의 연결은 server/index.js).
  */
-export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wallets = null, onRoomsChanged = () => {} }) {
+export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wallets = null, onRoomsChanged = () => {}, queuedElsewhere = () => false }) {
   const pairs = new Map(); // '계정A|계정B' → { day, ranked, friendly } — 오늘 이 두 계정의 정산이 반영된 판 수 (서버를 다시 켜면 비워진다)
   const rooms = new Map(); // code → room { code, mode, tier, status: 'waiting'|'playing'|'over', seats, engine, sent, turnTimer, turnSeq, deadline, ttlTimer, result }
 
@@ -315,9 +315,11 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     return view.round === 1 && view.me.wins === 0 && view.opponent.wins === 0;
   }
 
+  const sameAccount = (room) => Boolean(room.seats[0].userId) && room.seats[0].userId === room.seats[1]?.userId;
   const pairKeyOf = (room) => room.seats.map((s) => s.userId).sort().join('|');
   /** 이 판의 정산(MMR · 보상)을 무효로 할 이유 → 'EARLY_END' | 'PAIR_LIMIT' | null (반영되는 판이면 오늘 이 두 계정의 횟수를 올린다) */
   function judge(room, reason) {
+    if (sameAccount(room)) return 'PAIR_LIMIT'; // 혼자 두 자리를 앉은 판은 아무것도 지급하지 않는다 (들어올 수 없게 막지만 만에 하나)
     if (endedEarly(room, reason)) return 'EARLY_END';
     const [a, b] = room.seats;
     if (!a.userId || !b.userId || a.userId === b.userId) return null;
@@ -405,16 +407,37 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
   function surrender(socket) {
     const seated = seatOfSocket(socket);
     if (!seated || seated.room.status !== 'playing') return fail('NOT_IN_GAME');
+    if (!ownsSeat(socket, seated.seat)) return fail('AUTH_REQUIRED');
     finishGame(seated.room, otherSeat(seated.room, seated.seat), 'surrender');
     return { ok: true };
   }
+
+  // ── 계정당 활성 방 1개 ──
+  /**
+   * 이 계정이 다른 접속으로 이미 방(대기 · 진행 중)에 있는가. 만든 사람의 연결이 끊긴 대기 방은 새 일을 시작하는 순간 닫고 없는 것으로 본다
+   * (진행 중인 판은 끊겼어도 유예 시간 동안은 그 자리가 남아 있다).
+   */
+  function seatedElsewhere(userId, socket) {
+    if (!userId) return false;
+    for (const room of [...rooms.values()]) {
+      if (room.status === 'over') continue;
+      const seat = room.seats.find((s) => s.userId === userId);
+      if (!seat || seat.socketId === socket.id) continue;
+      if (room.status === 'waiting' && (room.hostAway || !socketOf(seat)?.connected)) { closeRoom(room); continue; }
+      return true;
+    }
+    return false;
+  }
+  const accountBusy = (socket) => {
+    const userId = socket.data.user?.id;
+    return Boolean(userId) && (seatedElsewhere(userId, socket) || queuedElsewhere(userId, socket.id));
+  };
 
   // ── 이벤트 처리 ──
   /** 상대를 기다리는 방을 만든다 (mode: 'private' 친선 비밀방 | 'public' 공개 방) */
   function openRoom(socket, payload, mode) {
     if (socket.data.where) return fail('ALREADY_IN_ROOM');
-    const userId = socket.data.user?.id;
-    for (const old of [...rooms.values()]) if (userId && old.status === 'waiting' && old.hostAway && old.seats[0].userId === userId) closeRoom(old);
+    if (accountBusy(socket)) return fail('ACCOUNT_BUSY');
     if (rooms.size >= cfg.maxRooms) return fail('SERVER_BUSY');
     const room = newRoom(mode, 'free');
     if (!room) return fail('SERVER_BUSY');
@@ -513,6 +536,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     const host = room.seats[0];
     if (host.userId && host.userId === socket.data.user?.id) return fail('OWN_ROOM'); // 같은 계정끼리(창 두 개)는 못 붙는다
     if (room.hostAway) return fail('HOST_AWAY'); // 방장이 잠시 자리를 비웠다 — 잠시 뒤 다시 시도하면 들어올 수 있다
+    if (accountBusy(socket)) return fail('ACCOUNT_BUSY');
     room.seats.push(makeSeat('P2', socket, profileOf(socket, profile)));
     attach(socket, room);
     startGame(room);
@@ -553,11 +577,17 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     return { ok: true };
   }
 
+  const ownsSeat = (socket, seat) => !seat.userId || socket.data.user?.id === seat.userId;
+
   function gameAction(socket, action) {
     const seated = seatOfSocket(socket);
     if (!seated || seated.room.status !== 'playing') return fail('NOT_IN_GAME');
     if (!isRecord(action)) return fail('BAD_REQUEST');
     const { room, seat } = seated;
+    if (!ownsSeat(socket, seat)) return fail('AUTH_REQUIRED');
+    // 낙관적 잠금: seq = 보낸 쪽이 받아 본 사건 수. 그새 상태가 바뀌었다면 (더블 클릭 · 다시 보낸 패킷 · 늦게 도착한 입력) 처리하지 않는다.
+    // 처리 자체는 이 함수가 끝날 때까지 다른 입력이 끼어들 수 없다 (Node 단일 스레드 · await 없음)
+    if (action.seq !== undefined && action.seq !== room.sent) return fail('STALE_ACTION');
     let result;
     if (action.type === 'shoot') result = room.engine.shoot(seat.id, action.target); // 좌석은 서버가 정한다 — 보낸 id 는 읽지 않는다
     else if (action.type === 'use_item') result = room.engine.useItem(seat.id, action.index);
@@ -581,7 +611,7 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
   function rejoinRoom(socket, payload) {
     const room = rooms.get(cleanCode(payload?.code));
     const seat = room?.seats.find((s) => sameToken(s.token, payload?.token));
-    if (!room || !seat) return fail('ROOM_NOT_FOUND'); // 코드와 토큰 중 어느 쪽이 틀렸는지는 알려 주지 않는다
+    if (!room || !seat || !ownsSeat(socket, seat)) return fail('ROOM_NOT_FOUND'); // 코드 · 토큰 · 계정 중 무엇이 틀렸는지는 알려 주지 않는다
     const where = socket.data.where;
     if (where && !(where.kind === 'room' && where.code === room.code)) return fail('ALREADY_IN_ROOM');
     if (room.status === 'over') {
@@ -649,5 +679,5 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     rooms.clear();
   }
 
-  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, resumeRoom, hostedRoomOf, gameAction, sendEmote, onDisconnect, stats, shutdown };
+  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, resumeRoom, hostedRoomOf, seatedElsewhere, gameAction, sendEmote, onDisconnect, stats, shutdown };
 }
