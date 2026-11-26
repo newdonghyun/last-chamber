@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS } from '../server/index.js';
-import { roomChannel } from '../server/roomManager.js';
+import { roomChannel, ROOM_DEFAULTS } from '../server/roomManager.js';
 import { cleanNickname } from '../server/userStore.js';
 import { noirNickname, NOIR_ADJECTIVES, NOIR_NOUNS } from '../server/nicknames.js';
 import { hashPassword, issueToken, TOKEN_TTL_SEC } from '../server/auth.js';
@@ -1027,15 +1027,18 @@ async function phase12() {
   const [m1, m2] = await Promise.all([host2.waitFor('match_found', (p) => p.code === made.code), friend.waitFor('match_found', (p) => p.code === made.code)]);
   eq([m1.mode, m2.mode, server.stats().playing], ['private', 'private', 1], '75 새 연결의 방장도 match_found 를 받는다');
 
-  // 76. 화면만 가려진 경우 (연결은 살아 있음)
-  const [h3, f3] = [await player(port, '가림방장'), await player(port, '가림친구')];
+  // 76. 같은 계정이 새 접속으로 들어오면 끊긴 채 남은 기존 방을 알려 준다 · 방은 최소 3분 유지
+  ok(ROOM_DEFAULTS.hostAwayMs >= 180_000 && ROOM_DEFAULTS.roomTtlMs >= 180_000, '76 기본값: 끊긴 방장을 3분 넘게 기다린다');
+  const [h3, f3] = [await player(port, '복귀방장'), await player(port, '복귀친구')];
   const r3 = await h3.call('create_private_room', {});
-  eq((await h3.call('room_presence', { away: true })).ok, true, '76 방장 화면 가려짐 알림');
-  eq((await join(f3, r3.code)).error, 'HOST_AWAY', '76 가려진 동안에는 판을 시작하지 않는다');
-  eq((await f3.call('room_presence', { away: false })).error, 'ROOM_NOT_FOUND', '76 방장이 아니면 상태를 바꿀 수 없다');
-  await h3.call('room_presence', { away: false });
-  await sleep(800); // 돌아왔으면 비움 타이머는 멈춘다
-  eq((await join(f3, r3.code)).ok, true, '76 방장이 돌아오면 (비움 시간이 지난 뒤에도) 입장');
+  eq((await h3.call('register_player', { token: h3.account.token })).hostedRoom, undefined, '76 연결이 살아 있는 방은 알리지 않는다 (다른 창이 방을 가져가지 않게)');
+  h3.socket.disconnect();
+  await sleep(60);
+  const h3b = await again(h3);
+  eq((await h3b.call('register_player', { token: h3.account.token })).hostedRoom, r3.code, '76 끊겼던 방장이 다시 접속하면 기존 방 코드를 알려 준다');
+  eq((await f3.call('register_player', { token: f3.account.token })).hostedRoom, undefined, '76 다른 계정에게는 알리지 않는다');
+  eq((await h3b.call('resume_room', { code: r3.code })).status, 'waiting', '76 방장 자리 복구');
+  eq((await join(f3, r3.code)).ok, true, '76 그 뒤 친구 입장 → 시작');
 
   // 77. 오래 비우면 닫힌다 · 직접 닫으면 바로 · 새 방을 만들면 이전 빈 방은 닫는다
   const [h4, f4] = [await player(port, '만료방장'), await player(port, '만료친구')];

@@ -32,8 +32,8 @@
  *
  * ── 초대 링크 (src/ui/invite.js) ──  친선 방을 만들면 [초대 링크 복사] → '<서버 주소>/?room=코드'. 링크로 들어온 사람은 로그인(자동 · 가입 · 수동)과
  *   소켓 연결이 모두 된 순간 그 비밀방에 입장한다 ('초대 방(코드)에 입장하는 중' 화면). 손님은 로그인 화면부터. 방이 없거나 가득 차면 안내창.
- *   방장은 링크를 보내러 다른 앱에 다녀온다 → 친선 대기 방은 화면을 떠나도 접지 않고, 서버가 5분 남겨 둔다 (room_presence · resume_room).
- *   그동안 들어오려는 친구는 HOST_AWAY 를 받고 방장이 돌아올 때까지 기다린다.
+ *   방장이 링크를 보내러 다른 창 · 앱에 다녀와도 연결과 방은 그대로다 (blur · visibilitychange 에는 아무것도 하지 않는다).
+ *   연결이 끊기면 서버가 방을 5분 남겨 두고, 다시 붙은 방장은 resume_room 으로 자리를 되찾는다. 끊긴 동안 들어오려는 친구는 HOST_AWAY 를 받고 기다린다.
  *
  * ── 로그인 (src/ui/session.js) ──
  *   소켓을 열 때 handshake auth 로 { token } (로그인 토큰)을 보낸다 → 서버가 확인해 이 소켓을 그 계정으로 기록한다
@@ -112,7 +112,6 @@ const INVITE_WAIT_MS = 5 * 60_000; // 이만큼 기다려도 방장이 안 오�
 let inviteTimer = 0;
 let inviteUntil = 0;
 let hostedCode = null; // 내가 만들고 기다리는 친선 방 코드
-let creatingRoom = false; // 친선 방을 만드는 중 (응답 전에 다른 앱으로 가도 접지 않는다)
 let phase = 'menu'; // 'menu' | 'public'(공개 방 대기) | 'room'(비밀방 대기) | 'queue'(빠른 매칭 대기)
 let busy = false; // 요청이 오가는 동안 버튼 잠금
 let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보내는 동안만 true
@@ -606,6 +605,7 @@ function registerPlayer(s) {
       }
       const record = asRecord(res.me ?? res.user);
       if (record) takeServerRecord(record);
+      if (typeof res.hostedRoom === 'string' && s === sock) restoreHostedRoom(res.hostedRoom);
       resolve(res);
     });
   });
@@ -944,18 +944,22 @@ function cancelInvite() {
 
 // ───────── 친선 방 방장이 자리를 비웠다 돌아옴 ─────────
 
-/**
- * 화면이 가려졌다 → 서버에 알려, 가려진 동안에는 친구가 들어오지 않고 기다리게 한다 (자리를 비운 채 판이 시작되지 않게).
- * 답은 보지 않는다: 연결이 죽어 있으면 이 요청은 재연결 때 뒤늦게 나가 '없는 방' 이 돌아올 수 있고, 그때는 서버가 이미 비움으로 알고 있다.
- */
-function sendAway() {
-  if (phase === 'room' && sock?.connected) request('room_presence', { away: true });
+/** 서버가 '이 계정이 만들어 두고 끊긴 방' 을 알려 줬다 → 대기 화면을 다시 열고 자리를 받는다 */
+function restoreHostedRoom(code) {
+  if (phase !== 'menu' || busy || !dialog.open || peekInvite()) return;
+  ui.roomCode.textContent = code;
+  ui.copyLabel.textContent = '코드 복사';
+  ui.inviteLabel.textContent = '초대 링크 복사';
+  setPhase('room');
+  hostedCode = code;
+  say('만들어 둔 방으로 돌아왔어요', 'ok');
+  resumeHostRoom();
 }
 
 /**
- * 방장이 자리를 되찾는다 — 화면으로 돌아오거나 다시 연결될 때마다 부른다 (서버의 resume_room 은 여러 번 불러도 안전).
+ * 방장이 자리를 되찾는다 — 연결이 끊겼다 다시 붙었을 때, 또는 같은 계정으로 다시 들어와 기존 방이 있을 때 (서버의 resume_room 은 여러 번 불러도 안전).
  * 대기 방이면 그대로, 그새 판이 시작됐으면 서버가 match_found 를 다시 보내 게임 화면으로 넘어간다.
- * 방을 접는 근거는 resume_room 의 '없는 방' 답 하나뿐이다 — 시간 초과 · 끊김이면 다음 연결 · 복귀 때 다시 한다.
+ * 방을 접는 근거는 resume_room 의 '없는 방' 답 하나뿐이다 — 시간 초과 · 끊김이면 다음 연결 때 다시 한다.
  */
 async function resumeHostRoom() {
   const code = hostedCode;
@@ -965,7 +969,6 @@ async function resumeHostRoom() {
   if (res.ok) {
     if (res.status === 'over') { toMenu('자리를 비운 사이 판이 끝났어요.', 'error'); return; }
     say('');
-    if (document.hidden) sendAway();
     return;
   }
   if (res.error === 'ROOM_NOT_FOUND') toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
@@ -1056,8 +1059,7 @@ function joinPublicRoom(code) {
 function createFriendlyRoom() {
   run(async () => {
     say('비밀방을 만드는 중…');
-    creatingRoom = true;
-    const res = await request('create_private_room', { profile: buildProfile() }).finally(() => { creatingRoom = false; });
+    const res = await request('create_private_room', { profile: buildProfile() });
     if (!res.ok) throw new Error(res.error);
     ui.roomCode.textContent = res.code;
     ui.copyLabel.textContent = '코드 복사';
@@ -1067,7 +1069,6 @@ function createFriendlyRoom() {
     setPhase('room');
     hostedCode = res.code;
     say('');
-    if (document.hidden) sendAway(); // 만드는 사이 화면이 가려졌다
     ui.inviteBtn.focus(); // 친구에게 보내는 가장 쉬운 방법이 링크 — 먼저 눌리게
   });
 }
@@ -1238,26 +1239,9 @@ function leavePage() {
   disposeSocket(); // 먼저, 곧바로 — close 이벤트는 나중에 오므로 창을 닫는 중이면 leave_room 이 못 나간다 (연결 중이던 랭킹 조회 소켓도 여기서 정리)
   if (dialog.open) dialog.close(); // → close 이벤트에서 resetUi
 }
-// 친선 대기 방만은 '페이지가 실제로 닫힐 때'(pagehide, bfcache 보관 아님)에만 접는다 — beforeunload 는 취소되거나 앱 전환 링크에서도 온다
-window.addEventListener('pagehide', (e) => { if (!(e.persisted && phase === 'room')) leavePage(); });
-window.addEventListener('beforeunload', () => { if (phase !== 'room') leavePage(); });
-window.addEventListener('pageshow', () => resumeHostRoom());
-// 화면을 떠남(blur · freeze — src/ui/lifecycle.js 의 onHalt 를 app.js 가 알려 준다): 매칭 · 공개 방을 그만두고 소켓을 끊는다 (돌아오면 메뉴부터).
-// 친선 대기 방만은 예외: 방장은 초대 링크를 보내려고 다른 앱으로 간다 → 방을 접지 않는다 (소리는 app.js 가 그대로 끊는다)
-window.addEventListener('lastchamber:halt', () => { if (phase !== 'room' && !creatingRoom) leavePage(); });
-function onReturnToScreen() {
-  resumeHostRoom();
-  resumeInvite();
-}
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) sendAway();
-  else onReturnToScreen();
-});
-window.addEventListener('focus', onReturnToScreen);
-// 화면을 떠나느라 접었던 초대 입장은 돌아오면 이어서
-function resumeInvite() {
-  if (peekInvite() && loggedIn() && phase !== 'invite' && !inviteFail.open && !document.hidden) setTimeout(joinInvite, 0);
-}
+// 소켓을 끊고 방에서 나가는 것은 두 가지뿐: 스스로 누른 [방 닫기] · ✕, 그리고 페이지가 실제로 닫힐 때(pagehide — bfcache 보관 아님).
+// 창이 비활성화되는 것(다른 창 클릭 blur · 탭 전환 visibilitychange · 앱 전환)에는 아무것도 하지 않는다 — 소리만 app.js 가 멈춘다.
+window.addEventListener('pagehide', (e) => { if (!e.persisted) leavePage(); });
 
 // PLAY 가로채기: document 캡처 단계라 app.js 의 클릭 핸들러(타깃/버블 단계)보다 항상 먼저 돌고, 로드 순서에도 영향받지 않는다
 // 손님도 로비는 연다 (AI 딜러 연습 · 방 목록 · TOP 10 보기) — 온라인 대전 버튼만 로그인 화면으로

@@ -42,7 +42,7 @@ import {
   KIND, CATALOG, SKIN_VAR_KEYS, REWARD, MMR, LEADERBOARD, TITLES, PlayerProfile, getItem, getTitle, loadoutVars, adGoalOf, leaderboard,
   CHEST, CHEST_ITEMS, LIMITED_FLAMES, RARITY, DEFAULT_FLAME_ID, TAUNTS, chestOdds, getFlame, getTaunt, makeTauntEvent, validateTauntEvent,
 } from './storeData.js';
-import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpPause, pvpResume, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
+import { initPvp, pvpEngine, pvpOpponent, pvpLoadoutFor, pvpRemainingMs, pvpSettle, pvpEnd, pvpSurrender, pvpMode, pvpOver } from './pvpSession.js'; // 실시간 PvP: 소켓 · 상태 동기화는 전부 여기 (4-3단계)
 import { userSession, attachNicknameFilter, NICK_HINT } from './session.js';
 import { sharedWallet, WALLET_CHANGED } from './walletClient.js'; // 탄피 · 스킨 · 출석 · 긴급 보급의 원본은 서버 지갑 (이 기기는 거울)
 import { changeNickname } from './accountApi.js'; // 닉네임 변경은 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절)
@@ -2701,28 +2701,17 @@ document.addEventListener('lastchamber:profile-changed', () => {
   if (el.profile.open) renderRecord();
 });
 document.addEventListener('visibilitychange', onVisibilityChange);
-// 앱 생명주기 — 화면을 떠나면(백그라운드 전환 · 화면 꺼짐 · 다른 앱/창) 소리를 즉시 멈추고, 보이고 포커스가 돌아오면 이어서.
-// 페이지를 떠나면(창 닫기 · 뒤로 가기 · 새로고침) 오디오 컨텍스트 · 배경음 타이머 · PvP 소켓 리스너를 정리한다 (로비 소켓은 multiplayer.js 가 같은 시점에 정리)
-let pvpLeftBehind = false; // 페이지 이탈로 진행 중이던 PvP 연결을 끊었다 → bfcache 로 돌아오면 새로 불러와 깨끗한 화면에서 다시 시작
+// 앱 생명주기 — 화면을 떠나면(백그라운드 전환 · 화면 꺼짐 · 다른 앱/창 클릭) 소리만 즉시 멈추고(suspend), 보이고 포커스가 돌아오면 이어서.
+// 소켓 · 방 · 진행 중인 판은 건드리지 않는다. 연결과 오디오 컨텍스트를 정리하는 것은 페이지가 실제로 닫힐 때(pagehide — bfcache 보관 아님)뿐이다
+// (로비 소켓은 multiplayer.js 가 같은 시점에 정리한다)
 watchLifecycle({
   onAway: () => guardUi(sound.suspend()),
   onBack: () => guardUi(sound.resume()),
-  // blur · freeze (화면 잠금 · 탭 내림 · 앱 전환): 곧바로 오디오 컨텍스트를 닫고 소켓을 끊는다 — 소리가 새지 않고, 얼어붙기 전에 연결을 정리한다.
-  // PvP 판은 세션을 유지한 채 끊고(pvpPause), 돌아오면 15초 유예 안에 같은 자리로 다시 붙는다(pvpResume). 로비는 매칭 · 기다리는 방을 접는다 (multiplayer.js 가 이 이벤트를 듣는다)
-  onHalt: ({ reason }) => {
-    guardUi(sound.close());
-    pvpPause();
-    window.dispatchEvent(new CustomEvent('lastchamber:halt', { detail: { reason } }));
-  },
-  onRestore: () => pvpResume(),
-  onLeave: () => {
-    guardUi(sound.close());
-    if (online) pvpLeftBehind = true;
-    pvpEnd();
-  },
-  onReturn: () => {
-    if (pvpLeftBehind) window.location.reload();
-  },
+});
+window.addEventListener('pagehide', (ev) => {
+  if (ev.persisted) return; // 뒤로 가기용 보관 — 돌아올 수 있다
+  guardUi(sound.close());
+  pvpEnd();
 });
 // 닫았다 다시 만든 컨텍스트 · iOS 처럼 제스처가 있어야 켜지는 경우: 화면 안에서의 다음 터치가 소리를 되살린다
 document.addEventListener('pointerdown', () => {

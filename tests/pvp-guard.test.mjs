@@ -1,7 +1,7 @@
 // PvP 수신 가드 검증 (브라우저 없음 · 가짜 소켓): node tests/pvp-guard.test.mjs
 //   pvpSession.js 는 인게임 이벤트(state_update · game_over · opponent_status · receive_emote · match_found · room_closed · session_replaced)를
 //   ① 지금 세션이고 ② 닫히지 않았고 ③ 이벤트의 방 코드가 내 방과 같을 때만 처리한다 — 다른 방 · 코드 없는 · 끝난 판의 이벤트는 화면 갱신 · 도발 · 알림 없이 버린다.
-//   pvpPause() / pvpResume(): blur · freeze 때 소켓만 끊고(알림 · 재연결 시도 없음) 판은 유지 → 돌아오면 같은 소켓이 다시 붙어 rejoin_room 으로 자리를 되찾는다.
+//   blur · 숨김에는 아무것도 끊지 않는다. 연결이 끊겼다 다시 붙으면 rejoin_room 으로 자리를 되찾는다.
 //   pvpSettle(): 서버 지갑이 정산한 판은 이 기기에서 다시 계산하지 않는다 (참가비 feePaid · 서버 보상 reward · 거울 wallet) · 무효 판(voided)은 MMR · 보상 없이 안내만.
 //   pvpSurrender(): 항복 요청은 서버에 surrender 로만 보낸다 — 승패는 서버의 game_over(reason 'surrender')로만 정해지고, 끝난 판 · 연결 없음 · 시간 초과는 판을 건드리지 않는다.
 const T0 = performance.now();
@@ -13,7 +13,7 @@ const eq = (got, want, name) => ok(JSON.stringify(got) === JSON.stringify(want),
 // pvpSession 이 쓰는 브라우저 전역만 흉내 (window · document 이벤트)
 globalThis.window = new EventTarget();
 globalThis.document = new EventTarget();
-const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine, pvpSurrender, pvpPause, pvpResume, pvpSettle } = await import('../src/ui/pvpSession.js');
+const { initPvp, pvpEnd, pvpOver, pvpMode, pvpEngine, pvpSurrender, pvpSettle } = await import('../src/ui/pvpSession.js');
 
 class FakeSocket {
   handlers = new Map();
@@ -147,36 +147,21 @@ sock4.acks.at(-1)(null, { ok: false, error: 'NOT_IN_GAME' });
 eq(await again, { ok: false, error: 'NOT_IN_GAME' }, '8 서버가 이미 끝난 판이라고 하면 그대로 전달 (동시 항복 · 상대가 먼저 끝냄)');
 pvpEnd();
 
-// 화면을 떠남(blur · freeze): 소켓만 끊고 판은 유지 → 돌아오면 같은 소켓으로 다시 붙어 자리를 되찾는다
+// 화면을 떠나는 것으로는 끊지 않는다 · 네트워크가 끊겼다 다시 붙으면 자리를 되찾는다
 const sock5 = new FakeSocket();
 window.dispatchEvent(new CustomEvent('pvp:start', { detail: { match: { code: 'PAU1', mode: 'queue', ranked: true, tier: 'free', fee: 0, prize: 0, you: 'P1', token: 'tok5', opponent: { id: 'P2', profile: {} } }, socket: sock5 } }));
 sock5.fire('state_update', state('PAU1'));
-const noticed = calls.notice.length;
-pvpPause();
-eq([sock5.connected, sock5.disconnects, calls.notice.length - noticed], [false, 1, 0], '9 pvpPause → 소켓 disconnect · 일부러 끊은 것이라 "끊어졌습니다" 알림 없음');
-eq([pvpOver(), pvpMode()], [null, 'ranked'], '9 끊어도 판(세션)은 그대로');
-pvpPause();
-eq(sock5.disconnects, 1, '9 이미 끊었으면 다시 끊지 않는다');
-eq(await pvpSurrender(), { ok: false, error: 'OFFLINE' }, '9 끊긴 동안 항복 · 행동은 OFFLINE (서버에 보내지 않는다)');
-pvpResume();
-eq([sock5.connected, sock5.connects], [true, 1], '9 pvpResume → 같은 소켓을 다시 연결');
-pvpResume();
-eq(sock5.connects, 1, '9 이미 이었으면 다시 잇지 않는다');
+window.dispatchEvent(new Event('blur'));
+window.dispatchEvent(new CustomEvent('lastchamber:halt'));
+eq([sock5.connected, sock5.disconnects], [true, 0], '9 blur 에는 PvP 소켓을 끊지 않는다');
 sock5.fire('connect');
-eq(sock5.payloads.filter(([e]) => e === 'rejoin_room').at(-1)?.[1], { code: 'PAU1', token: 'tok5' }, '9 연결되면 rejoin_room(방 코드 · 좌석 토큰)으로 자리를 되찾는다');
-sock5.acks.at(-1)({ ok: true }); // rejoin_room 은 timeout() 없이 보내므로 ack 는 (res) 하나
+eq(sock5.payloads.filter(([e]) => e === 'rejoin_room').at(-1)?.[1], { code: 'PAU1', token: 'tok5' }, '9 다시 연결되면 rejoin_room(방 코드 · 좌석 토큰)으로 자리를 되찾는다');
+sock5.acks.at(-1)({ ok: true });
 eq([calls.notice.at(-1), pvpOver()], ['다시 연결되었습니다.', null], '9 자리를 되찾으면 알림 · 판 계속');
-
-pvpPause();
-pvpResume();
 sock5.fire('connect');
 sock5.acks.at(-1)({ ok: false, error: 'ROOM_NOT_FOUND' });
 eq([pvpOver()?.reason, pvpOver()?.youWon], ['disconnect', false], '9 유예가 지나 자리를 잃었으면 부전패로 끝 (기존 재접속 규칙 그대로)');
-pvpPause();
-eq(sock5.disconnects, 2, '9 끝난 판은 더 끊지 않는다');
 pvpEnd();
-pvpResume();
-eq(sock5.connects, 2, '9 닫힌 세션은 다시 잇지 않는다');
 
 // 서버 지갑이 정산한 판: 참가비는 서버가 이미 받았고(feePaid) 보상 · 지갑도 서버 값
 const startMatch = (code, extra = {}) => {

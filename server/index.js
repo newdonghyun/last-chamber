@@ -32,6 +32,7 @@
  *
  *   ── 클라이언트 → 서버 (마지막 인자로 ack 콜백을 줄 수 있다: { ok: true, ... } | { ok: false, error: 'CODE' }) ──
  *   register_player({ token })                    로비 접속 즉시: 토큰 확인 → { ok, user, me, top }  (me · top = get_leaderboard 와 같다) · 틀린 토큰은 AUTH_REQUIRED
+ *                                                 끊긴 채 남아 있는 내 친선 방이 있으면 hostedRoom: 코드 (→ resume_room)
  *   get_leaderboard()                             → { ok, top: [{ rank, nickname, wins, losses, games, streak, maxStreak, mmr, isMe }] (랭킹전 1판 이상 둔 계정만 · mmr 내림차순 10명), me: 내 전적 | null }
  *   watch_rooms() / unwatch_rooms()               로비 방 목록 보기 시작 · 그만 → { ok, rooms, online, queued }  (+ 바뀔 때마다 room_list, 주기적으로 lobby_stats)
  *   create_public_room({ profile })               공개 방 (로비 목록에 보임 · 랭킹전) → { ok, code, mode }  (+ room_created { code, mode })   ⟵ 로그인 필요
@@ -39,7 +40,6 @@
  *   create_private_room({ profile })              친선 비밀방 (목록에 안 보임 · 친선전) → { ok, code, mode }   code = 4자리 영문/숫자 (예: A7K9)  ⟵ 로그인 필요
  *   join_private_room(code | { code, profile })   방 코드로 입장 → 곧바로 판이 시작된다                                                  ⟵ 로그인 필요
  *                                                 방장이 자리를 비운 방은 HOST_AWAY (잠시 뒤 다시 시도)
- *   room_presence({ away })                       친선 대기 방 방장: 화면이 가려짐(true) · 돌아옴(false) → { ok, code }
  *   resume_room({ code })                         돌아온 방장이 자기 친선 방 자리를 다시 받는다 → { ok, code, mode, status: 'waiting'|'playing'|'over' }   ⟵ 로그인 필요
  *                                                 (대기 방은 끊긴 뒤 5분 안 · 그새 판이 시작됐으면 match_found(resume) · state_update 를 다시 보낸다)
  *   join_queue({ tier: 'free'|'pro'|'vip', profile })   빠른 매칭 대기 → { ok, tier, fee, prize }  (+ queue_joined)   같은 등급 2명이 모이면 자동으로 방 생성  ⟵ 로그인 필요
@@ -384,7 +384,8 @@ export function createGameServer(options = {}) {
     if (payload?.token !== undefined && !(await authSocket(socket, payload.token))) return fail('AUTH_REQUIRED');
     if (!socket.data.user) return fail('AUTH_REQUIRED');
     const board = await getLeaderboard(socket);
-    return { ok: true, user: board.me, me: board.me, top: board.top };
+    const hostedRoom = rooms.hostedRoomOf(socket.data.user.id); // 끊긴 채 남아 있는 내 친선 방
+    return { ok: true, user: board.me, me: board.me, top: board.top, ...(hostedRoom ? { hostedRoom } : {}) };
   }
 
   /** TOP 10 (mmr 내림차순) + 내 전적. 유저 ID 는 응답에 넣지 않는다 (내 줄은 isMe 로만) */
@@ -435,7 +436,6 @@ export function createGameServer(options = {}) {
     create_private_room: needUser(rooms.createPrivateRoom),
     join_private_room: needUser(rooms.joinPrivateRoom),
     resume_room: needUser(rooms.resumeRoom), // 자리를 비웠던 방장이 자기 친선 방을 다시 받는다
-    room_presence: rooms.roomPresence, // 친선 대기 방 방장의 화면이 가려짐 · 돌아옴
     join_queue: needUser(matchmaker.joinQueue),
     leave_queue: matchmaker.leaveQueue,
     surrender: rooms.surrender,

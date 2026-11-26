@@ -439,8 +439,8 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
   }
 
   // ── 친선 비밀방: 방장이 자리를 비운 동안 ──
-  // 방장이 초대 링크를 보내려고 다른 앱으로 가면 연결이 멈추거나 끊긴다 → 방은 hostAwayMs 동안 남겨 두고, 그동안 들어오려는 친구에게는
-  // HOST_AWAY 를 답한다 (자리를 비운 방장과 판을 시작하지 않는다). 방장이 돌아오면 room_presence · resume_room 으로 다시 받는다.
+  // 방장의 연결이 끊겨도(모바일에서 앱 전환 · 네트워크 흔들림) 방은 hostAwayMs 동안 남겨 두고, 그동안 들어오려는 친구에게는
+  // HOST_AWAY 를 답한다 (끊긴 방장과 판을 시작하지 않는다). 방장이 다시 붙으면 resume_room 으로 자리를 받는다.
   function setHostAway(room, away) {
     clearTimeout(room.awayTimer);
     room.hostAway = away;
@@ -451,12 +451,11 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
 
   const waitingPrivateHost = (room, test) => Boolean(room) && room.mode === 'private' && room.status === 'waiting' && test(room.seats[0]);
 
-  /** room_presence({ away }): 방장의 화면이 가려졌다 · 돌아왔다 (연결은 살아 있다) */
-  function roomPresence(socket, payload) {
-    const seated = seatOfSocket(socket);
-    if (!seated || !waitingPrivateHost(seated.room, (host) => host === seated.seat)) return fail('ROOM_NOT_FOUND');
-    setHostAway(seated.room, payload?.away === true);
-    return { ok: true, code: seated.room.code };
+  /** 이 계정이 만들어 두고 연결이 끊긴 채인 친선 대기 방 코드 (없으면 null) — 로비에 다시 들어온 방장에게 알려 준다 */
+  function hostedRoomOf(userId) {
+    if (!userId) return null;
+    for (const room of rooms.values()) if (room.hostAway && waitingPrivateHost(room, (host) => host.userId === userId)) return room.code;
+    return null;
   }
 
   /**
@@ -649,5 +648,5 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     rooms.clear();
   }
 
-  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, resumeRoom, roomPresence, gameAction, sendEmote, onDisconnect, stats, shutdown };
+  return { createPrivateRoom, joinPrivateRoom, createPublicRoom, joinPublicRoom, publicRooms, startMatchedRoom, leaveRoom, surrender, rejoinRoom, resumeRoom, hostedRoomOf, gameAction, sendEmote, onDisconnect, stats, shutdown };
 }
