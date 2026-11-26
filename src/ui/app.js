@@ -2064,7 +2064,7 @@ async function fireSequence(shooter, target, token, known = null) {
     }
     if (onGameScreen(token)) { // 실제 게임 화면에서만 총성 · 진동
       if (documentFocused()) { // 포커스가 없으면 소리는 내지 않는다 (진동은 그대로)
-        sound.playGunshot();
+        sound.playGunshot({ double: result.damage > 1 }); // 더블샷은 저음 · 폭발이 더 크다
         sound.playDamage();
         sound.duckAmbient(); // 배경음을 잠깐 낮춰 총성이 살게
       }
@@ -2073,7 +2073,7 @@ async function fireSequence(shooter, target, token, known = null) {
     restartClasses([[el.gun, 'fire'], [el.app, 'shake-hard'], [el.flash, 'flash-red']]); // 강제 리플로우 1번으로 세 연출을 함께 시작
     if (slow) await wait(SLOWMO_MS);
   } else {
-    gameSfx(() => sound.playClick(), token); // 공포탄: 딸깍 소리만 (진동 없음)
+    gameSfx(() => sound.playBlank(), token); // 공포탄: 빈 쇳소리 '찰칵' + 공기 빠지는 소리만 (진동 없음)
   }
   await wait(AFTERMATH_MS);
   el.gun.classList.remove('fire', 'aim-up', 'aim-down');
@@ -2137,7 +2137,7 @@ async function presentEntry(e, rest, index) {
       break;
     case 'SHOT':
       if (online && e.idx > animatedIdx) { // 상대(또는 시간 초과로 서버가 대신 쏜) 격발 — 총 연출부터
-        await fireSequence(e.actor, e.actor === e.target ? 'self' : 'opponent', gameId, { ok: true, shell: e.shell, idx: e.idx });
+        await fireSequence(e.actor, e.actor === e.target ? 'self' : 'opponent', gameId, { ok: true, shell: e.shell, damage: e.damage, idx: e.idx });
       }
       reveal(index); // 총이 나간 뒤: 남은 탄 · 체력이 결과대로 (차례는 아직 쏜 사람 것 — 다음 차례는 'TURN' 에서)
       await presentShot(e, rest);

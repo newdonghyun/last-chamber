@@ -335,7 +335,7 @@ function memoryStorage(initial = {}) {
   ok(/async function endGame\([\s\S]{0,1800}?sound\.setInGame\(false\)/.test(app), '8 결과 화면에서 잠금을 다시 닫는다');
   ok(/setInGame\(false\)/.test(app.match(/function leaveAiGame\([^)]*\) \{[\s\S]*?\n\}\n/)?.[0] ?? ''), '8 AI 나가기에서도 잠금을 다시 닫는다');
   ok(/const gameSoundOk = \(token = gameId\) => onGameScreen\(token\) && documentFocused\(\)/.test(app) && /const gameSfx = \(play, token = gameId\) => \{ if \(gameSoundOk\(token\)\) play\(\); \}/.test(app), '8 게임 효과음 가드: 같은 판의 게임 화면 + 창 포커스');
-  ok(/if \(documentFocused\(\)\) \{[\s\S]{0,80}sound\.playGunshot\(\)/.test(app), '8 총성도 포커스가 있을 때만');
+  ok(/if \(documentFocused\(\)\) \{[\s\S]{0,80}sound\.playGunshot\(\{ double: result\.damage > 1 \}\)/.test(app) && /sound\.playBlank\(\)/.test(app), '8 총성도 포커스가 있을 때만');
   ok(!/setTimeout\(\(\) => \(kind === 'item' \? sound\./.test(app) && /setTimeout\(\(\) => gameSfx\(/.test(app), '8 예약한 도발 효과음도 울리는 시점에 다시 가드 (판이 끝난 뒤에 새지 않는다)');
   // 게임 전용 소리 호출은 가드(gameSfx · onGameScreen · gameSoundOk) 안에서만 — 직접 호출 줄 수를 고정해 새 호출이 가드 없이 늘어나는 것을 잡는다
   const direct = app.split('\n').filter((l) => /sound\.(playGunshot|playDamage|playHeartbeat)\(/.test(l) && !/gameSfx\(/.test(l)).length;

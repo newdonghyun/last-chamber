@@ -7,12 +7,17 @@
  *
  * - 모든 효과음은 외부 파일 없이 실시간 합성한다.
  * - 격발음 설계 — 총성 뒤에 '띠딩' 하는 음정이 남지 않는 것이 원칙이다:
- *   실탄(playGunshot)  스마트폰 작은 스피커에서도 꽂히도록 700Hz~3kHz 대역에 힘을 싣는다. 세 겹을 동시에 터뜨리고 0.45초 안에 전부 끝난다.
- *                      ① 뇌관 파열음(0~0.03초, 2200→400Hz 급강하 '땅!') ② 중저음 바디(280→65Hz 0.18초 사각 · 삼각파 + WaveShaper 포화로 배음 증폭)
- *                      ③ 화약 폭발 노이즈(로우패스 2500→350Hz 0.45초). 총성 전용 버스(GUN_BOOST)로 밀어 올리고 마스터 뒤 DynamicsCompressor 가 피크만 눌러 클리핑을 막는다.
- *   피격(playDamage)   둔탁한 저음 '퍽' 하나뿐 (예전의 하강 경고음 · 귀울림은 총성 직후 '띠딩'으로 들려 없앴다).
- *   공포탄(playClick)  800~2500Hz 로 깎은 노이즈 '딸' + 금속 틱 '깍' — 0.06초에 끝나고 음정 있는 소리는 없다.
- *   그 밖의 소리도 길게 울리는 고음은 없다: 배경 소리는 1kHz 미만, 장전 '철컥'의 금속 울림은 0.06초 이하, 총성의 2.2kHz 소리는 0.03초뿐 (tests/sound.test.mjs 가 지킨다).
+ *   실탄(playGunshot)  좁은 방에서 쏜 대구경 리볼버. 네 겹이 겹쳐 터진다 (전부 합성 — 녹음 파일 없음)
+ *                      ① 해머 · 뇌관 타격 0~15ms : 2~5kHz 의 날카로운 금속 클릭
+ *                      ② 화약 폭발 0~80ms       : 400→45Hz 급강하 + 포화(WaveShaper)시킨 노이즈의 찢어지는 어택, 뒤이은 짧은 압력파
+ *                      ③ 저음 펀치 0~180ms      : 110→50Hz 서브 베이스 (+ 작은 스피커에서도 들리도록 포화시킨 배음)
+ *                      ④ 방 울림 50~650ms       : 합성한 임펄스 응답(ConvolverNode)에 폭발음을 보내고 어둡게 깎은 잔향
+ *                      더블샷(데미지 2)이면 저음 · 폭발을 키우고 더 낮은 '쿵' 한 겹을 얹는다: playGunshot({ double: true })
+ *                      네 겹은 총성 전용 버스 → DynamicsCompressor(피크를 눌러 음압) → 소프트클립(±1 보장) → 마스터. 클리핑(찢어지는 잡음) 없이 크게 난다.
+ *   피격(playDamage)   둔탁한 저음 '퍽' 하나뿐 (예전의 하강 경고음 · 귀울림은 총성 직후 '띠딩'으로 들려 없앴다). 총성과 겹쳐도 넘치지 않게 같은 체인을 지난다.
+ *   공포탄(playBlank)  빈 약실의 마른 '찰칵' + 짧게 공기 빠지는 '푸슉' — 작고 가볍게 (실탄과 극명한 대비). 총성 체인을 타지 않는다.
+ *   클릭(playClick)    화면 조작용 '딸깍' (0.06초 · 음정 없음).
+ *   그 밖의 소리도 길게 울리는 고음은 없다: 배경 소리는 1kHz 미만, 장전 '철컥'의 금속 울림은 0.06초 이하, 총성의 2kHz 위 금속 클릭은 0.015초뿐 (tests/sound.test.mjs 가 지킨다).
  * - 배경 앰비언트(startAmbient)는 음악이 아니라 저음 드론·실내 소음·전등 험·드문 먼 소리를 합성해 까는 소리 바닥이다.
  *   setTension(0~1)으로 긴장도에 따라 서서히 커지고, duckAmbient()는 총성 때 잠깐 낮춘다.
  *   효과음 음량(volume)·배경음 음량(ambientVolume)·음소거(muted)는 따로 조절한다.
@@ -29,14 +34,51 @@
  *   resume()   화면으로 돌아옴 → 컨텍스트 재가동 · 음량 복구 · 배경음 예약 재개 (close() 뒤라면 새 컨텍스트를 만들고 배경음도 이어서 켠다)
  *   close()    페이지 이탈 → 모든 소스 정지 · 타이머 해제 · 컨텍스트 close()
  *
- * 사용 노드: OscillatorNode, 화이트 노이즈 AudioBuffer(AudioBufferSourceNode), BiquadFilterNode, GainNode, WaveShaperNode, DynamicsCompressorNode
+ * 사용 노드: OscillatorNode, 화이트 노이즈 AudioBuffer(AudioBufferSourceNode), BiquadFilterNode, GainNode, WaveShaperNode, DynamicsCompressorNode, ConvolverNode
  */
 
 const NOISE_SECONDS = 2;
-const GUN_BOOST = 2.2; // 총성 전용 버스의 증폭 — 합이 1 을 넘어도 바로 뒤의 컴프레서 · 소프트클립이 받아 준다
-const GUN_COMP = { threshold: -12, knee: 10, ratio: 6, attack: 0.001, release: 0.1 }; // 총성 전용 컴프레서: 피크를 눌러 평균 음량(음압)을 키운다
-const GUN_CLIP_DRIVE = 1.4; // 컴프레서 뒤의 소프트클립(tanh) — 어떤 경우에도 ±1 을 넘지 않게 마지막으로 둥글게 눌러 클리핑(찢어지는 소리)을 막는다
+const GUN_BOOST = 2.4; // 총성 전용 버스의 증폭 — 합이 1 을 넘어도 바로 뒤의 컴프레서 · 소프트클립이 받아 준다
+const GUN_COMP = { threshold: -18, knee: 8, ratio: 6, attack: 0.001, release: 0.14 }; // 총성 전용 컴프레서: 피크를 눌러 평균 음량(음압)을 키운다
+const GUN_CLIP_DRIVE = 2.2; // 컴프레서 뒤의 소프트클립(tanh) — 어떤 경우에도 ±1 을 넘지 않게 마지막으로 둥글게 눌러 클리핑(찢어지는 소리)을 막는다
 const SATURATE_DRIVE = 5; // 바디 파형 포화 정도 (tanh) — 클수록 배음이 많다
+// 방 울림(합성 임펄스 응답): 좁은 콘크리트 · 나무 방
+const ROOM_SECONDS = 0.65; // 울림이 끝나는 시각
+const ROOM_PREDELAY = 0.05; // 첫 반사까지 — 직접음의 어택이 흐려지지 않게
+const ROOM_DECAY = 0.13; // 지수 감쇠 시간 상수 (초)
+const ROOM_TONE = 1500; // 잔향을 어둡게 깎는 로우패스 (Hz)
+const ROOM_LEVEL = 1.25; // 잔향 음량
+const ROOM_EARLY = [[[2, 0.5], [17, 0.4], [34, 0.3], [58, 0.22]], [[8, 0.45], [24, 0.36], [41, 0.27], [66, 0.2]]]; // 초기 반사 [ms, 크기] (왼쪽 · 오른쪽)
+const DOUBLE_POWER = 1.45; // 더블샷: 폭발 · 저음 · 잔향 증폭
+
+/** 방의 임펄스 응답: 갈수록 어두워지며 사라지는 노이즈 + 벽에서 먼저 돌아오는 반사 몇 개 (에너지를 1 로 맞춘다) */
+function roomImpulse(ctx) {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(rate * ROOM_SECONDS);
+  const pre = Math.floor(rate * ROOM_PREDELAY);
+  const ir = ctx.createBuffer(2, length, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = ir.getChannelData(ch);
+    let low = 0;
+    for (let i = pre; i < length; i++) {
+      const t = (i - pre) / rate;
+      low += (Math.random() * 2 - 1 - low) * Math.max(0.07, 0.55 - t * 1.1); // 벽이 고음부터 먹는다
+      data[i] = low * Math.exp(-t / ROOM_DECAY) * Math.min(1, t / 0.004);
+    }
+    const width = Math.floor(rate * 0.0015);
+    for (const [ms, level] of ROOM_EARLY[ch]) {
+      const at = pre + Math.floor((rate * ms) / 1000);
+      for (let k = 0; k < width; k++) data[at + k] += level * (1 - k / width) * (Math.random() * 2 - 1);
+    }
+    const fade = Math.floor(rate * 0.05); // 끝은 0 으로
+    for (let k = 0; k < fade; k++) data[length - 1 - k] *= k / fade;
+    let energy = 0;
+    for (let i = 0; i < length; i++) energy += data[i] * data[i];
+    const norm = energy > 0 ? 1 / Math.sqrt(energy) : 1;
+    for (let i = 0; i < length; i++) data[i] *= norm;
+  }
+  return ir;
+}
 
 // 앰비언트 층별 기본 음량 (효과음이 늘 앞에 서도록 아주 낮게)
 const AMBIENT = { room: 0.2, air: 0.03, drone: 0.05, hum: 0.014, tension: 0.07, event: 0.06 };
@@ -72,6 +114,10 @@ export class SoundEngine {
   #gunBus = null; // 총성 전용 증폭 버스 → 총성 컴프레서 → 소프트클립 → #master (음량 · 음소거 · 화면 밖 무음은 그대로 받는다)
   #gunComp = null;
   #gunClip = null;
+  #room = null; // 방 울림(ConvolverNode) → 로우패스 → 잔향 음량 → 총성 버스 (지원하지 않는 브라우저면 null — 잔향 없이)
+  #roomIn = null; // 잔향 출구(로우패스) — 화면을 떠날 때 #room 만 새로 만들어 남은 꼬리를 버린다
+  #roomIr = null;
+  #roomDirty = false; // 지금 #room 안에 울리던 소리가 있는가
   #curve = null; // 포화(WaveShaper) 곡선
   #volume; // 효과음 음량
   #ambientVolume; // 배경음 음량
@@ -199,7 +245,8 @@ export class SoundEngine {
       }
     }
     const ctx = this.#ctx;
-    this.#ctx = this.#master = this.#ambientBus = this.#duck = this.#noise = this.#gunBus = this.#gunComp = this.#gunClip = this.#curve = null;
+    this.#ctx = this.#master = this.#ambientBus = this.#duck = this.#noise = this.#gunBus = this.#gunComp = this.#gunClip = this.#curve = this.#room = this.#roomIn = this.#roomIr = null;
+    this.#roomDirty = false;
     if (!ctx || 'startRendering' in ctx || ctx.state === 'closed') return;
     try {
       await ctx.close();
@@ -251,21 +298,44 @@ export class SoundEngine {
   }
 
   /**
-   * 2) 실탄: 스마트폰 작은 스피커에서도 '땅!' 하고 꽂히는 묵직한 총성 — 세 겹을 동시에 터뜨리고 0.45초 안에 전부 끝낸다.
-   *    저음(100Hz 이하)은 폰 스피커에서 거의 안 나오므로, 힘을 700Hz~3kHz 에 싣는다 (뇌관 파열음 · 포화시킨 바디의 배음 · 노이즈).
-   *    세 겹은 총성 전용 버스(GUN_BOOST)로 보내 마스터 음량보다 크게 밀어 올리고, 넘치는 피크는 마스터 뒤 컴프레서가 눌러 준다.
-   *    모든 겹이 지수 감쇠(exponentialRamp)로 −80dB 까지 떨어지므로 뒤에 멜로디 · '띠딩' 같은 꼬리가 남지 않는다 (2.2kHz 소리는 0.03초뿐).
+   * 2) 실탄: 좁은 방에서 쏜 대구경 리볼버 — 네 겹(해머 클릭 · 화약 폭발 · 저음 펀치 · 방 울림)을 한꺼번에 터뜨린다. double = 데미지 2 (더블샷).
+   *    직접음은 0.2초 안(더블샷 0.3초)에 지수 감쇠로 −80dB 까지 떨어지고, 그 뒤에는 어두운 방 울림만 0.65초까지 남는다 (멜로디 · '띠딩' 같은 꼬리 없음).
+   *    저음(100Hz 이하)은 폰 스피커에서 거의 안 나오므로 포화시킨 배음과 클릭 · 폭발 노이즈가 존재감을 맡는다. → 소리가 끝날 때까지의 시간(초)
    */
-  playGunshot() {
+  playGunshot({ double = false } = {}) {
+    if (!this.#inGame) return 0; // 잠금 2
+    const power = double ? DOUBLE_POWER : 1;
+    const hold = double ? 1.4 : 1;
+    const layers = [
+      // ① 해머 · 뇌관 타격 (0~15ms): 2~5kHz 금속 클릭
+      { bus: 'gun', filters: [['highpass', 2200, 0.7], ['lowpass', 5000, 0.7]], peak: 2.4, attack: 0.0003, decay: 0.0145 },
+      { bus: 'gun', osc: 'square', freq: 4800, to: 2100, glide: 0.012, filters: [['bandpass', 3200, 1.4]], peak: 1.1, attack: 0.0003, decay: 0.0145 },
+      // ② 화약 폭발 (0~80ms): 400→45Hz 급강하 + 포화 노이즈 · 귀를 찢는 중음 크랙, 이어지는 압력파
+      { bus: 'gun', shape: true, filters: [['bandpass', 1500, 0.6, 700, 0.09]], peak: 1.5 * power, attack: 0.0005, decay: 0.095 },
+      { bus: 'gun', osc: 'square', freq: 400, to: 45, glide: 0.07, shape: true, peak: 0.34 * power, attack: 0.0008, decay: 0.079 },
+      { bus: 'gun', shape: true, filters: [['highpass', 170, 0.7], ['lowpass', 7500, 0.8, 1100, 0.075]], peak: 1.05 * power, attack: 0.0006, decay: 0.079 },
+      { bus: 'gun', filters: [['lowpass', 2400, 1, 380, 0.18]], peak: 0.62 * power, attack: 0.002, decay: 0.17 * hold },
+      { bus: 'gun', shape: true, filters: [['bandpass', 600, 0.8, 280, 0.12]], peak: 0.95 * power, attack: 0.001, decay: 0.13 * hold }, // 총열을 때리는 묵직한 몸통 (노이즈 — 음정 없음)
+      // ③ 저음 펀치 (0~180ms): 서브 베이스 킥 + 작은 스피커용 배음
+      { bus: 'gun', osc: 'sine', freq: 110, to: 50, glide: 0.1, peak: 0.85 * power, attack: 0.004, decay: 0.175 * hold },
+      { bus: 'gun', osc: 'triangle', freq: 165, to: 60, glide: 0.09, shape: true, peak: 0.16 * power, attack: 0.002, decay: 0.12 * hold },
+      // ④ 방 울림 (50~650ms): 잔향으로만 보내는 짧은 폭발음
+      { bus: 'room', filters: [['lowpass', 3000, 0.7, 700, 0.07]], peak: 0.8 * power, attack: 0.001, decay: 0.07 },
+    ];
+    if (double) layers.push({ bus: 'gun', osc: 'sine', freq: 78, to: 36, glide: 0.22, peak: 0.75, attack: 0.008, decay: 0.29 }); // 더블샷: 바닥이 울리는 한 겹 더
+    const dry = this.#play(layers);
+    return dry ? Math.max(dry, ROOM_SECONDS + 0.08) : 0; // 잔향까지
+  }
+
+  /**
+   * 2-1) 공포탄: 빈 약실을 때리는 마른 '찰칵' + 짧게 공기가 빠지는 '푸슉'. 실탄과 극명하게 대비되도록 작고 가볍다 — 저음 · 잔향 · 압축 없음.
+   */
+  playBlank() {
     if (!this.#inGame) return 0; // 잠금 2
     return this.#play([
-      // ① 초기 뇌관 파열음: 0~0.03초에 2200Hz → 400Hz 로 급강하하는 날카로운 어택 펀치 (귀에 '땅!' 하고 꽂히는 핵심 타격감)
-      { bus: 'gun', osc: 'triangle', freq: 2200, to: 400, glide: 0.03, peak: 0.6, attack: 0.0005, decay: 0.0295 },
-      // ② 중저음 총성 바디: 280Hz → 65Hz 로 0.18초 떨어지는 사각파 · 삼각파를 포화(WaveShaper)시켜 배음을 두껍게
-      { bus: 'gun', osc: 'square', freq: 280, to: 65, glide: 0.18, shape: true, peak: 0.45, attack: 0.001, decay: 0.22 },
-      { bus: 'gun', osc: 'triangle', freq: 280, to: 65, glide: 0.18, shape: true, peak: 0.5, attack: 0.001, decay: 0.2 },
-      // ③ 화약 폭발: 2500Hz 로우패스가 0.45초 동안 350Hz 로 닫히는 거친 화이트 노이즈 (예전 0.55 → 1.1, 2배 출력)
-      { bus: 'gun', filters: [['lowpass', 2500, 1, 350, 0.45]], peak: 1.1, attack: 0.0008, decay: 0.4492 },
+      { filters: [['highpass', 1500, 0.7], ['lowpass', 6000, 0.7]], peak: 1.1, attack: 0.0004, decay: 0.012 }, // 찰
+      { at: 0.024, filters: [['bandpass', vary(2600, 0.06), 4]], peak: 2.3, attack: 0.0004, decay: 0.022 }, // 칵
+      { at: 0.034, filters: [['bandpass', 3400, 0.8, 1300, 0.09]], peak: 0.2, attack: 0.012, decay: 0.09 }, // 푸슉
     ]);
   }
 
@@ -317,9 +387,9 @@ export class SoundEngine {
    */
   playDamage() {
     if (!this.#inGame) return 0; // 잠금 2
-    return this.#play([
-      { at: 0.05, osc: 'sine', freq: 90, to: 34, glide: 0.14, peak: 0.4, attack: 0.003, decay: 0.2 },
-      { at: 0.05, filters: [['lowpass', 520, 1, 140, 0.12]], peak: 0.34, attack: 0.002, decay: 0.14 },
+    return this.#play([ // 총성 체인으로: 총성과 합쳐진 뒤에 피크를 누르므로 겹쳐도 넘치지 않는다
+      { bus: 'gun', at: 0.05, osc: 'sine', freq: 90, to: 34, glide: 0.14, peak: 0.2, attack: 0.003, decay: 0.2 },
+      { bus: 'gun', at: 0.05, filters: [['lowpass', 520, 1, 140, 0.12]], peak: 0.17, attack: 0.002, decay: 0.14 },
     ]);
   }
 
@@ -523,6 +593,7 @@ export class SoundEngine {
   }
 
   #stopVoices() {
+    if (this.#roomDirty) this.#makeRoom(); // 잔향 노드를 갈아 끼워, 돌아왔을 때 남은 총성 꼬리가 마저 나지 않게
     for (const src of this.#voices) {
       try {
         src.stop();
@@ -635,6 +706,18 @@ export class SoundEngine {
     this.#gunBus = ctx.createGain();
     this.#gunBus.gain.value = GUN_BOOST;
     this.#gunBus.connect(this.#gunComp);
+    if (typeof ctx.createConvolver === 'function') { // 방 울림: ConvolverNode → 로우패스 → 잔향 음량 → 총성 버스
+      this.#roomIr = roomImpulse(ctx);
+      this.#roomIn = ctx.createBiquadFilter();
+      this.#roomIn.type = 'lowpass';
+      this.#roomIn.frequency.value = ROOM_TONE;
+      this.#roomIn.Q.value = 0.6;
+      const level = ctx.createGain();
+      level.gain.value = ROOM_LEVEL;
+      this.#roomIn.connect(level);
+      level.connect(this.#gunBus);
+      this.#makeRoom();
+    }
     if (!this.#visBound && typeof globalThis.document?.addEventListener === 'function') { // 가려지거나 포커스를 잃는 순간 곧바로 마스터를 0 으로 (돌아오면 원래 음량으로 — suspend 중이면 0 유지)
       this.#visBound = true;
       const onAway = () => (this.#away() ? this.#silence() : this.#applyVolumes());
@@ -645,6 +728,17 @@ export class SoundEngine {
     this.#noise = ctx.createBuffer(1, length, ctx.sampleRate);
     const data = this.#noise.getChannelData(0);
     for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+  }
+
+  // 방 울림 노드를 (다시) 만든다
+  #makeRoom() {
+    if (!this.#ctx || !this.#roomIr) return;
+    this.#room?.disconnect();
+    this.#room = this.#ctx.createConvolver();
+    this.#room.normalize = false; // 임펄스 응답은 이미 크기를 맞춰 두었다
+    this.#room.buffer = this.#roomIr;
+    this.#room.connect(this.#roomIn);
+    this.#roomDirty = false;
   }
 
   // 잠금 1: 탭이 가려졌거나 창이 포커스를 잃었다. 스피커로 나가지 않는 OfflineAudioContext(테스트 · 측정)는 대상이 아니다
@@ -682,7 +776,7 @@ export class SoundEngine {
   }
 
   /**
-   * 소리 한 겹: 오실레이터(osc 지정 시) 또는 화이트 노이즈 → (shape 면 포화) → 필터 체인 → 엔벌로프 GainNode → 마스터 (bus: 'gun' 이면 총성 버스 → 마스터)
+   * 소리 한 겹: 오실레이터(osc 지정 시) 또는 화이트 노이즈 → (shape 면 포화) → 필터 체인 → 엔벌로프 GainNode → 마스터 (bus: 'gun' = 총성 버스 → 마스터 · 'room' = 방 울림으로만)
    * filters: [type, freq, Q = 1, 목표 freq?, 스윕 시간?][]   shape: 파형을 WaveShaper 로 포화시켜 배음을 늘린다   반환: 끝나는 절대 시각
    */
   #layer(ctx, t0, { at = 0, bus, osc, freq, to, glide, shape = false, filters = [], peak, attack = 0.002, decay }) {
@@ -721,7 +815,8 @@ export class SoundEngine {
     amp.gain.exponentialRampToValueAtTime(peak, t + attack);
     amp.gain.exponentialRampToValueAtTime(SILENT, end);
     node.connect(amp);
-    amp.connect(bus === 'gun' ? this.#gunBus : this.#master);
+    if (bus === 'room' && this.#room) this.#roomDirty = true;
+    amp.connect(bus === 'gun' ? this.#gunBus : bus === 'room' ? (this.#room ?? this.#gunBus) : this.#master);
     if (osc) src.start(t);
     else src.start(t, Math.random() * (NOISE_SECONDS - 0.5)); // 노이즈 버퍼의 임의 지점부터 → 매번 다른 질감
     src.stop(end + 0.02);
