@@ -1021,7 +1021,8 @@ async function phase12() {
   eq((await other.call('resume_room', { code: made.code })).error, 'ROOM_NOT_FOUND', '75 다른 계정은 방을 가져갈 수 없다');
   const host2 = await again(host);
   eq((await join(host2, made.code)).error, 'OWN_ROOM', '75 방장 본인이 코드로 들어오려 하면 OWN_ROOM');
-  eq(await host2.call('resume_room', { code: made.code }), { ok: true, code: made.code, mode: 'private' }, '75 돌아온 방장(같은 계정)은 방을 다시 받는다');
+  eq(await host2.call('resume_room', { code: made.code }), { ok: true, code: made.code, mode: 'private', status: 'waiting' }, '75 돌아온 방장(같은 계정)은 방을 다시 받는다');
+  eq((await host2.call('resume_room', { code: made.code })).status, 'waiting', '75 resume_room 은 여러 번 불러도 안전');
   eq((await join(friend, made.code)).ok, true, '75 그 뒤 친구가 입장하면 판이 시작된다');
   const [m1, m2] = await Promise.all([host2.waitFor('match_found', (p) => p.code === made.code), friend.waitFor('match_found', (p) => p.code === made.code)]);
   eq([m1.mode, m2.mode, server.stats().playing], ['private', 'private', 1], '75 새 연결의 방장도 match_found 를 받는다');
@@ -1053,6 +1054,28 @@ async function phase12() {
   const h6b = await again(h6);
   const r7 = await h6b.call('create_private_room', {});
   eq([(await join(f4, r6.code)).error, r7.ok, server.stats().waiting], ['ROOM_NOT_FOUND', true, 1], '77 같은 계정이 새 방을 만들면 이전 빈 방은 닫는다');
+
+  // 78. 서버가 방장의 끊김을 알아채기 전에 친구가 들어와 판이 시작됨 → 돌아온 방장은 튕기지 않고 그 판의 자기 자리로
+  const [h8, f8] = [await player(port, '늦은방장'), await player(port, '빠른친구')];
+  const r8 = await h8.call('create_private_room', {});
+  await join(f8, r8.code); // h8 의 옛 연결은 살아 있는 것으로 보인다 (실제 기기에서는 이미 멈춘 상태)
+  const first = await h8.waitFor('match_found', (p) => p.code === r8.code);
+  const h8b = await again(h8);
+  const back = await h8b.call('resume_room', { code: r8.code });
+  eq([back.ok, back.status], [true, 'playing'], '78 resume_room: 그새 시작된 판이면 status playing');
+  const [m8, s8] = await Promise.all([h8b.waitFor('match_found', (p) => p.code === r8.code), h8b.waitFor('state_update', (p) => p.code === r8.code)]);
+  eq([m8.resume, m8.you, m8.token, s8.reason, s8.logFrom], [true, first.you, first.token, 'rejoin', 0], '78 새 연결에 match_found(resume) · 같은 좌석 · 전체 상태');
+  const f8m = await f8.waitFor('match_found', (p) => p.code === r8.code);
+  eq([f8m.resume, server.stats().playing >= 1], [false, true], '78 친구의 판은 그대로');
+  const turn = await (async () => { // 1턴: 차례인 쪽이 격발하면 양쪽이 같은 상태 갱신을 받는다
+    const shooter = s8.state.turn.isMine ? h8b : f8;
+    const before = [h8b, f8].map((p) => p.inbox.filter((m) => m.event === 'state_update' && m.payload.code === r8.code).length);
+    const ack = await shooter.call('game_action', { type: 'shoot', target: 'opponent' });
+    await sleep(80);
+    return [ack.ok, [h8b, f8].every((p, i) => p.inbox.filter((m) => m.event === 'state_update' && m.payload.code === r8.code).length > before[i])];
+  })();
+  eq(turn, [true, true], '78 1턴 진행 — 양쪽 모두 상태 갱신');
+  eq((await f4.call('resume_room', { code: r8.code })).error, 'ROOM_NOT_FOUND', '78 그 판의 사람이 아니면 자리를 가져갈 수 없다');
   await server.stop();
 }
 

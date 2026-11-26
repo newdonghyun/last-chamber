@@ -112,6 +112,7 @@ const INVITE_WAIT_MS = 5 * 60_000; // 이만큼 기다려도 방장이 안 오�
 let inviteTimer = 0;
 let inviteUntil = 0;
 let hostedCode = null; // 내가 만들고 기다리는 친선 방 코드
+let creatingRoom = false; // 친선 방을 만드는 중 (응답 전에 다른 앱으로 가도 접지 않는다)
 let phase = 'menu'; // 'menu' | 'public'(공개 방 대기) | 'room'(비밀방 대기) | 'queue'(빠른 매칭 대기)
 let busy = false; // 요청이 오가는 동안 버튼 잠금
 let passThrough = false; // AI 딜러 대전이 PLAY 클릭을 다시 흘려보내는 동안만 true
@@ -943,25 +944,31 @@ function cancelInvite() {
 
 // ───────── 친선 방 방장이 자리를 비웠다 돌아옴 ─────────
 
-/** 화면이 가려졌는지 서버에 알린다 → 가려진 동안에는 친구가 들어오지 않고 기다린다 (자리를 비운 채 판이 시작되지 않게) */
-async function sendPresence() {
-  if (phase !== 'room' || !sock?.connected) return;
-  const away = document.hidden;
-  const res = await request('room_presence', { away });
-  if (!away && res.error === 'ROOM_NOT_FOUND' && phase === 'room') toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
+/**
+ * 화면이 가려졌다 → 서버에 알려, 가려진 동안에는 친구가 들어오지 않고 기다리게 한다 (자리를 비운 채 판이 시작되지 않게).
+ * 답은 보지 않는다: 연결이 죽어 있으면 이 요청은 재연결 때 뒤늦게 나가 '없는 방' 이 돌아올 수 있고, 그때는 서버가 이미 비움으로 알고 있다.
+ */
+function sendAway() {
+  if (phase === 'room' && sock?.connected) request('room_presence', { away: true });
 }
 
+/**
+ * 방장이 자리를 되찾는다 — 화면으로 돌아오거나 다시 연결될 때마다 부른다 (서버의 resume_room 은 여러 번 불러도 안전).
+ * 대기 방이면 그대로, 그새 판이 시작됐으면 서버가 match_found 를 다시 보내 게임 화면으로 넘어간다.
+ * 방을 접는 근거는 resume_room 의 '없는 방' 답 하나뿐이다 — 시간 초과 · 끊김이면 다음 연결 · 복귀 때 다시 한다.
+ */
 async function resumeHostRoom() {
   const code = hostedCode;
-  if (!code || phase !== 'room') return;
+  if (!code || phase !== 'room' || !sock?.connected) return; // 끊겨 있으면 'connect' 가 다시 부른다
   const res = await request('resume_room', { code });
-  if (phase !== 'room' || hostedCode !== code) return;
+  if (phase !== 'room' || hostedCode !== code || !sock) return; // 그새 match_found 로 게임이 시작됐거나 방을 닫았다
   if (res.ok) {
+    if (res.status === 'over') { toMenu('자리를 비운 사이 판이 끝났어요.', 'error'); return; }
     say('');
-    if (document.hidden) sendPresence();
+    if (document.hidden) sendAway();
     return;
   }
-  toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
+  if (res.error === 'ROOM_NOT_FOUND') toMenu('방이 만료되어 닫혔습니다. 다시 만들어 주세요.', 'error');
 }
 
 /** 가입 · 로그인 직후 (loginGate.js): 초대 링크가 있으면 그 방으로, 새로 가입했다면 로비로 */
@@ -1049,7 +1056,8 @@ function joinPublicRoom(code) {
 function createFriendlyRoom() {
   run(async () => {
     say('비밀방을 만드는 중…');
-    const res = await request('create_private_room', { profile: buildProfile() });
+    creatingRoom = true;
+    const res = await request('create_private_room', { profile: buildProfile() }).finally(() => { creatingRoom = false; });
     if (!res.ok) throw new Error(res.error);
     ui.roomCode.textContent = res.code;
     ui.copyLabel.textContent = '코드 복사';
@@ -1059,7 +1067,7 @@ function createFriendlyRoom() {
     setPhase('room');
     hostedCode = res.code;
     say('');
-    if (document.hidden) sendPresence(); // 만드는 사이 화면이 가려졌다
+    if (document.hidden) sendAway(); // 만드는 사이 화면이 가려졌다
     ui.inviteBtn.focus(); // 친구에게 보내는 가장 쉬운 방법이 링크 — 먼저 눌리게
   });
 }
@@ -1230,16 +1238,22 @@ function leavePage() {
   disposeSocket(); // 먼저, 곧바로 — close 이벤트는 나중에 오므로 창을 닫는 중이면 leave_room 이 못 나간다 (연결 중이던 랭킹 조회 소켓도 여기서 정리)
   if (dialog.open) dialog.close(); // → close 이벤트에서 resetUi
 }
-window.addEventListener('pagehide', leavePage);
-window.addEventListener('beforeunload', leavePage);
+// 친선 대기 방만은 '페이지가 실제로 닫힐 때'(pagehide, bfcache 보관 아님)에만 접는다 — beforeunload 는 취소되거나 앱 전환 링크에서도 온다
+window.addEventListener('pagehide', (e) => { if (!(e.persisted && phase === 'room')) leavePage(); });
+window.addEventListener('beforeunload', () => { if (phase !== 'room') leavePage(); });
+window.addEventListener('pageshow', () => resumeHostRoom());
 // 화면을 떠남(blur · freeze — src/ui/lifecycle.js 의 onHalt 를 app.js 가 알려 준다): 매칭 · 공개 방을 그만두고 소켓을 끊는다 (돌아오면 메뉴부터).
 // 친선 대기 방만은 예외: 방장은 초대 링크를 보내려고 다른 앱으로 간다 → 방을 접지 않는다 (소리는 app.js 가 그대로 끊는다)
-window.addEventListener('lastchamber:halt', () => { if (phase !== 'room') leavePage(); });
+window.addEventListener('lastchamber:halt', () => { if (phase !== 'room' && !creatingRoom) leavePage(); });
+function onReturnToScreen() {
+  resumeHostRoom();
+  resumeInvite();
+}
 document.addEventListener('visibilitychange', () => {
-  sendPresence();
-  if (!document.hidden) resumeInvite();
+  if (document.hidden) sendAway();
+  else onReturnToScreen();
 });
-window.addEventListener('focus', () => resumeInvite());
+window.addEventListener('focus', onReturnToScreen);
 // 화면을 떠나느라 접었던 초대 입장은 돌아오면 이어서
 function resumeInvite() {
   if (peekInvite() && loggedIn() && phase !== 'invite' && !inviteFail.open && !document.hidden) setTimeout(joinInvite, 0);

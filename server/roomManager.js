@@ -459,20 +459,32 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     return { ok: true, code: seated.room.code };
   }
 
-  /** resume_room({ code }): 끊겼던 방장이 돌아와 자기 대기 방을 다시 받는다 (같은 계정만) */
+  /**
+   * resume_room({ code }): 방을 만들고 기다리던 방장이 돌아와(화면 복귀 · 재연결) 자기 자리를 다시 받는다 (같은 계정만 · 여러 번 불러도 안전).
+   *   → { ok, code, mode, status: 'waiting' }  대기 방 그대로
+   *   → { ok, code, mode, status: 'playing' }  자리를 비운 사이 판이 시작됐다 → 자리를 넘겨받고 match_found(resume) · state_update 를 다시 보낸다
+   *   → { ok, code, mode, status: 'over' }     그 사이 판이 끝났다
+   */
   function resumeRoom(socket, payload) {
     const room = rooms.get(cleanCode(typeof payload === 'string' ? payload : payload?.code));
-    if (!waitingPrivateHost(room, (host) => host.userId && host.userId === socket.data.user?.id)) return fail('ROOM_NOT_FOUND');
+    const userId = socket.data.user?.id;
+    const seat = room?.mode === 'private' && userId ? room.seats.find((s) => s.userId === userId) : undefined;
+    if (!seat || (room.status === 'waiting' && seat !== room.seats[0])) return fail('ROOM_NOT_FOUND');
     const where = socket.data.where;
     if (where && !(where.kind === 'room' && where.code === room.code)) return fail('ALREADY_IN_ROOM');
-    const host = room.seats[0];
-    const old = socketOf(host);
+    const done = { ok: true, code: room.code, mode: room.mode, status: room.status };
+    if (room.status === 'over') return done;
+    if (room.status === 'playing') {
+      if (seat.socketId !== socket.id) reseat(socket, room, seat);
+      return done;
+    }
+    const old = socketOf(seat);
     if (old && old !== socket) release(old, room.code); // 끊긴 줄 모르는 옛 연결
-    host.socketId = socket.id;
-    host.connected = true;
+    seat.socketId = socket.id;
+    seat.connected = true;
     attach(socket, room);
     setHostAway(room, false);
-    return { ok: true, code: room.code, mode: room.mode };
+    return done;
   }
 
   function joinPrivateRoom(socket, payload) {
@@ -577,6 +589,12 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
       return { ok: true, over: true };
     }
     if (room.status !== 'playing') return fail('ROOM_NOT_FOUND');
+    reseat(socket, room, seat);
+    return { ok: true };
+  }
+
+  /** 진행 중인 판의 자리를 이 연결이 넘겨받는다 → 이 사람에게 match_found(resume) · 전체 상태, 상대에게 '다시 연결' */
+  function reseat(socket, room, seat) {
     const old = socketOf(seat); // 끊긴 줄 모르는 옛 연결이 아직 살아 있다면 새 연결이 자리를 넘겨받는다
     seat.socketId = socket.id;
     seat.connected = true;
@@ -592,7 +610,6 @@ export function createRoomManager({ io, cfg, log, guard, tiers, users = null, wa
     emitTo(room, seat, 'state_update', snapshot(room, seat, 'rejoin', 0, room.engine.getLog(seat.id, 0))); // 전체 로그부터 — logFrom 0
     const opp = otherSeat(room, seat);
     emitTo(room, opp, 'opponent_status', { code: room.code, connected: true });
-    return { ok: true };
   }
 
   function onDisconnect(socket) { // 방에 앉아 있던 소켓이 끊겼을 때 (대기열에 있던 소켓은 matchmaker.onDisconnect)

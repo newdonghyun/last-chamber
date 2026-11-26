@@ -40,7 +40,8 @@
  *   join_private_room(code | { code, profile })   방 코드로 입장 → 곧바로 판이 시작된다                                                  ⟵ 로그인 필요
  *                                                 방장이 자리를 비운 방은 HOST_AWAY (잠시 뒤 다시 시도)
  *   room_presence({ away })                       친선 대기 방 방장: 화면이 가려짐(true) · 돌아옴(false) → { ok, code }
- *   resume_room({ code })                         끊겼던 방장이 자기 친선 대기 방을 다시 받는다 (같은 계정만 · 끊긴 뒤 5분 안)           ⟵ 로그인 필요
+ *   resume_room({ code })                         돌아온 방장이 자기 친선 방 자리를 다시 받는다 → { ok, code, mode, status: 'waiting'|'playing'|'over' }   ⟵ 로그인 필요
+ *                                                 (대기 방은 끊긴 뒤 5분 안 · 그새 판이 시작됐으면 match_found(resume) · state_update 를 다시 보낸다)
  *   join_queue({ tier: 'free'|'pro'|'vip', profile })   빠른 매칭 대기 → { ok, tier, fee, prize }  (+ queue_joined)   같은 등급 2명이 모이면 자동으로 방 생성  ⟵ 로그인 필요
  *   leave_queue()                                 대기열에서 나가기
  *   game_action({ type: 'shoot', target: 'self'|'opponent' } | { type: 'use_item', index })   → { ok: true } | { ok: false, error }  (엔진 오류 코드 그대로)
