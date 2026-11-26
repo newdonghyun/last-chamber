@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 순수 게임 엔진 (DOM 비의존 ES Module)
+ * ODD ROULETTE - 순수 게임 엔진 (DOM 비의존 ES Module)
  *
  *   const game = new GameEngine({ players: ['A', 'B'], rng: Math.random });
  *   game.useItem('A', 0);          // 자신의 아이템 슬롯 인덱스

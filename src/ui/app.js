@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 게임 화면 컨트롤러 (모든 모듈 조립)
+ * ODD ROULETTE - 게임 화면 컨트롤러 (모든 모듈 조립)
  *
  *   GameEngine(규칙) · AIDealer(딜러 AI) · SoundEngine(효과음)을 index.html 화면에 연결한다.
  *   ES Module이라 index.html을 파일로 직접 열면(file://) 동작하지 않는다 → 로컬 서버로 열 것.
@@ -365,7 +365,7 @@ const isPaused = () => !online && (el.rules.open || el.leave.open || el.coach.op
 
 function guard(promise) {
   promise.catch((err) => {
-    console.error('[LAST CHAMBER]', err);
+    console.error('[ODD ROULETTE]', err);
     busy = false;
     render();
   });
@@ -464,7 +464,7 @@ function onVisibilityChange() {
 // ───────── 탄피(BRASS) · 스킨 적용 · 경기 결과 보상 ─────────
 
 const fmt = (n) => Math.round(n).toLocaleString('ko-KR');
-const guardUi = (promise) => promise.catch((err) => console.error('[LAST CHAMBER]', err)); // 상점·보상 화면의 비동기 오류 (게임 진행 상태는 건드리지 않음)
+const guardUi = (promise) => promise.catch((err) => console.error('[ODD ROULETTE]', err)); // 상점·보상 화면의 비동기 오류 (게임 진행 상태는 건드리지 않음)
 
 function h(tag, className, text) {
   const node = document.createElement(tag);
@@ -841,7 +841,7 @@ async function renderBoard() {
   try {
     standings = await leaderboard.getStandings(profile.forLeaderboard(), { top: LEADERBOARD.top });
   } catch (err) {
-    console.error('[LAST CHAMBER] 순위표', err);
+    console.error('[ODD ROULETTE] 순위표', err);
     if (gen !== boardGen) return;
     el.boardSummary.replaceChildren(h('small', '', 'LIVE RANK'), h('p', 'lb-me-line', '순위를 불러오지 못했어요. 잠시 뒤에 다시 열어 주세요'));
     el.boardList.replaceChildren();
@@ -1736,6 +1736,7 @@ async function endGame(s, token) {
   if (token === gameId) platform.triggerHaptic(won ? 'win' : 'lose'); // 승패 확정: 진동 1회 (승리 Medium · 패배 Heavy)
   await headline(surrendered && !won ? 'SURRENDER' : won ? 'VICTORY' : 'DEFEAT', won ? 'info' : 'danger', 1900);
   if (token !== gameId) return;
+  el.titleHeading.classList.remove('is-brand');
   setHtml(el.titleHeading, won ? 'YOU<span>SURVIVED</span>' : 'GAME<span>OVER</span>'); // 같은 결과가 이어지면 다시 파싱하지 않는다
   el.titleSub.textContent = surrendered ? (won ? '상대가 테이블을 떠났다. 오늘 밤 마지막 약실은 당신의 것.' : '당신은 테이블을 떠났다. 다시 앉겠는가?') : vsFoe(won ? '딜러가 테이블 위에 쓰러졌다. 오늘 밤 마지막 약실은 당신의 것.' : '마지막 약실은 딜러의 것이었다. 다시 앉겠는가?');
   el.titleResult.textContent = `${online ? 'OPPONENT' : 'DEALER'} ${s.opponent.wins} : ${s.me.wins} YOU${surrendered ? (won ? ' · 상대 항복' : ' · 항복') : ''}`;
@@ -1919,7 +1920,8 @@ function leaveAiGame() {
   sound.stopAmbient({ fade: 1.5 });
   sound.setInGame(false); // 잠금 2 닫기
   applyLoadout(profile.activeLoadout()); // 1판 체험 스킨이었다면 장착해 둔 스킨으로 복귀
-  setHtml(el.titleHeading, 'LAST<span>CHAMBER</span>');
+  el.titleHeading.classList.add('is-brand');
+  setHtml(el.titleHeading, '오드 룰렛<span lang="en">ODD ROULETTE</span>');
   el.titleSub.textContent = '연습 게임을 마쳤다. 다시 앉겠는가?';
   el.titleResult.hidden = true;
   el.btnStart.querySelector('.title-btn-main').textContent = '게임 시작';

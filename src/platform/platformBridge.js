@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 멀티 플랫폼 어댑터 (web · app(Capacitor) · toss(앱인토스))
+ * ODD ROULETTE - 멀티 플랫폼 어댑터 (web · app(Capacitor) · toss(앱인토스))
  *
  *   UI(app.js)는 플랫폼별 SDK를 직접 부르지 않고, 아래 표준 메서드만 호출한다.
  *     getPlatform()                              'web' | 'app' | 'toss'

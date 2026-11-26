@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 매칭 큐 (server/index.js 에서 분리)
+ * ODD ROULETTE - 매칭 큐 (server/index.js 에서 분리)
  *
  *   free · pro · vip 등급별 대기열을 관리하고, 같은 등급 2명이 모이면 roomManager 에게 방을 만들어 바로 시작하라고 넘긴다.
  *   등급표(QUEUE_TIERS: 참가비 fee · 승자 상금 prize)도 여기서 정한다 — 방 관리자에게는 createRoomManager({ tiers }) 로 건네 준다.

@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 서버 유저 저장소: 계정(아이디 · 비밀번호 · 닉네임) · 랭킹 전적(승/패 · 연승 · MMR)
+ * ODD ROULETTE - 서버 유저 저장소: 계정(아이디 · 비밀번호 · 닉네임) · 랭킹 전적(승/패 · 연승 · MMR)
  *
  *   계정 하나 = players 행 하나 (user_id 는 서버가 가입 때 만든 UUID):
  *     { id, username, nickname, passwordHash, wins, losses, streak, maxStreak, mmr, createdAt, updatedAt, lastSeenAt }   (시각은 ms)

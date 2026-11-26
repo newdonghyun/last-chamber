@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 서버 지갑 클라이언트 (탄피 · 스킨 · 출석 · 긴급 보급의 거울)
+ * ODD ROULETTE - 서버 지갑 클라이언트 (탄피 · 스킨 · 출석 · 긴급 보급의 거울)
  *
  *   로그인한 계정의 탄피 · 스킨 · 화염 · 도발 · 칭호 · 상자 기록 · 출석 · 긴급 보급 횟수는 서버(Supabase players)가 원본이다 (server/wallet.js).
  *   이 클래스는 그 동작을 서버에 요청하고, 돌려받은 지갑으로 이 기기의 PlayerProfile(localStorage)을 맞춘다 (adoptWallet).

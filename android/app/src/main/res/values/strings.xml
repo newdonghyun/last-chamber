@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">LAST CHAMBER</string>
-    <string name="title_activity_main">LAST CHAMBER</string>
+    <string name="app_name">오드 룰렛</string>
+    <string name="title_activity_main">오드 룰렛</string>
     <string name="package_name">com.lastchamber.duel</string>
     <string name="custom_url_scheme">com.lastchamber.duel</string>
 </resources>

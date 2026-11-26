@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 유저 세션: 아이디 · 비밀번호 계정의 로그인 상태 · 자동 로그인 · 손님(둘러보기)
+ * ODD ROULETTE - 유저 세션: 아이디 · 비밀번호 계정의 로그인 상태 · 자동 로그인 · 손님(둘러보기)
  *
  *   DOM 을 건드리지 않는 순수 모듈이다 (저장소만 주입받는다 — Node 테스트에서도 그대로 돈다). 화면은 src/ui/loginGate.js, 서버 호출은 src/ui/accountApi.js.
  *   · 로그인 · 회원가입에 성공하면 서버가 준 로그인 토큰 · user_id · 아이디 · 닉네임을 이 기기에 저장한다(signIn) → 다시 접속하면 로그인 화면 없이 바로 들어간다.
@@ -265,7 +265,7 @@ export class UserSession {
       try {
         fn(user);
       } catch (err) {
-        console.error('[LAST CHAMBER] 세션 구독 오류', err);
+        console.error('[ODD ROULETTE] 세션 구독 오류', err);
       }
     }
   }

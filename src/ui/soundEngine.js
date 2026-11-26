@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 효과음 엔진 (Web Audio API)
+ * ODD ROULETTE - 효과음 엔진 (Web Audio API)
  *
  *   const sound = new SoundEngine();
  *   startButton.addEventListener('click', () => sound.unlock()); // 첫 사용자 클릭에서 오디오 활성화

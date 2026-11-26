@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 출석 팝업의 판단 규칙 (DOM 없음 — Node 테스트에서도 그대로 돈다)
+ * ODD ROULETTE - 출석 팝업의 판단 규칙 (DOM 없음 — Node 테스트에서도 그대로 돈다)
  *
  * 출석의 원본은 서버다 (server/wallet.js · walletStatus). 여기서는 서버가 알려 준 상태를 화면이 어떻게 읽을지만 정한다.
  */

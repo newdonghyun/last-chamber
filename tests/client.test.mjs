@@ -647,6 +647,19 @@ function memoryStorage(initial = {}) {
   ok(pvp.includes('getViewAfter: (_id, index) => S?.log[index]?.view ?? null') && pvp.includes('m.views?.[i]'), '12 PvP: 서버가 보낸 시점 상태를 로그에 붙인다');
 }
 
+// ───────── 13. 게임 이름: 오드 룰렛 (ODD ROULETTE) ─────────
+{
+  const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+  const html = read('../index.html');
+  const desc = '실탄과 공포탄, 7종 아이템으로 판을 뒤집는 실시간 1:1 리볼버 심리전 웹게임';
+  ok(html.includes('<title>오드 룰렛 (ODD ROULETTE) - 1:1 리볼버 심리전</title>'), '13 브라우저 제목');
+  ok(['og:title', 'twitter:title'].every((k) => html.includes(k + '" content="오드 룰렛 (ODD ROULETTE)"')) && ['og:description', 'twitter:description'].every((k) => html.includes(k + '" content="' + desc + '"')) && !html.includes('property="og:url"'), '13 링크 미리보기 태그 (og:url 은 두지 않는다 — 초대 코드가 빠지지 않게)');
+  eq((html.match(/<h1 class="title-heading is-brand"[^>]*>오드 룰렛<span lang="en">ODD ROULETTE<\/span><\/h1>/g) ?? []).length, 2, '13 타이틀 · 로그인 화면의 로고');
+  ok(read('../src/ui/app.js').includes("setHtml(el.titleHeading, '오드 룰렛<span lang=\"en\">ODD ROULETTE</span>');"), '13 결과 화면에서 돌아와도 같은 로고');
+  const shown = ['../index.html', '../manifest.webmanifest', '../capacitor.config.json', '../android/app/src/main/res/values/strings.xml', '../style.css', '../src/ui/app.js', '../src/ui/multiplayer.js', '../src/ui/loginGate.js', '../src/ui/guide.js', '../src/ui/monetization.js', '../src/ui/attendance.js'];
+  eq(shown.filter((p) => /last chamber|LAST<|CHAMBER</i.test(read(p))), [], '13 옛 이름이 남은 파일 없음');
+}
+
 const ms = Math.round(performance.now() - T0);
 console.log(fails.length === 0 ? `PASS  ${pass} checks, 0 failed — ${ms} ms` : `FAIL  ${pass} passed, ${fails.length} failed — ${ms} ms`);
 process.exitCode = fails.length === 0 ? 0 : 1;

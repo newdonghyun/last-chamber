@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 방 · 판 관리 (server/index.js 에서 분리)
+ * ODD ROULETTE - 방 · 판 관리 (server/index.js 에서 분리)
  *
  *   방 3종의 한살이를 맡는다:
  *     'public'  공개 방 — 방장이 만들면 로비 방 목록(publicRooms)에 보이고, 목록에서 누르면 바로 1:1 시작 (랭킹전)

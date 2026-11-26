@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 대전 모드 선택 & 매칭 로비
+ * ODD ROULETTE - 대전 모드 선택 & 매칭 로비
  *
  * 타이틀의 PLAY(#btn-start)를 가로채 '대전 모드 선택' 모달을 연다. 모달은 이 파일이 직접 만들어 body 에 붙이고, 스타일은 multiplayer.css.
  *
@@ -600,7 +600,7 @@ function registerPlayer(s) {
         return;
       }
       if (err || !res?.ok) {
-        console.warn('[LAST CHAMBER] register_player 실패', err?.message ?? res?.error);
+        console.warn('[ODD ROULETTE] register_player 실패', err?.message ?? res?.error);
         resolve(null);
         return;
       }

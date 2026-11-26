@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - AI 딜러 (gameEngine.js 공개 API 전용, DOM 비의존 ES Module)
+ * ODD ROULETTE - AI 딜러 (gameEngine.js 공개 API 전용, DOM 비의존 ES Module)
  *
  *   const dealer = new AIDealer('B');
  *   const memory = { knownShell: null };

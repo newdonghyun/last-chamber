@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 앱 생명주기 감시 (모바일 브라우저 · PWA · 앱 WebView 공통)
+ * ODD ROULETTE - 앱 생명주기 감시 (모바일 브라우저 · PWA · 앱 WebView 공통)
  *
  *   watchLifecycle({
  *     onAway:   () => sound.suspend(),   // 화면을 떠남: 백그라운드 전환 · 화면 꺼짐 · 다른 앱/창으로 포커스 이동 · 페이지 숨김

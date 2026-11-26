@@ -1,5 +1,5 @@
 /*
- * LAST CHAMBER - 대전 모드 선택 & 매칭 로비 (4-2단계) 전용 스타일
+ * ODD ROULETTE - 대전 모드 선택 & 매칭 로비 (4-2단계) 전용 스타일
  * src/ui/multiplayer.js 가 만드는 <dialog class="mp-modal"> 만 꾸민다. 클래스는 전부 mp- 로 시작해서 style.css 와 겹치지 않는다.
  * 색 · 글꼴은 style.css :root 의 토큰(--brass · --blood · --ink · --font-*)을 그대로 쓰고, 토큰이 없을 때를 위한 fallback 도 적어 둔다.
  */

@@ -5,19 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#050506" />
   <meta name="color-scheme" content="dark" />
-  <meta name="description" content="지하 카지노 느와르 러시안 룰렛 · LAST CHAMBER" />
+  <meta name="description" content="실탄과 공포탄, 7종 아이템으로 판을 뒤집는 실시간 1:1 리볼버 심리전 웹게임" />
+  <!-- 링크 공유 미리보기 (카카오톡 · 디스코드 · SNS). og:url 은 두지 않는다 — 두면 ?room= 초대 코드가 빠진 주소로 안내하는 곳이 있다 -->
+  <meta property="og:type" content="website" />
+  <meta property="og:locale" content="ko_KR" />
+  <meta property="og:site_name" content="오드 룰렛" />
+  <meta property="og:title" content="오드 룰렛 (ODD ROULETTE)" />
+  <meta property="og:description" content="실탄과 공포탄, 7종 아이템으로 판을 뒤집는 실시간 1:1 리볼버 심리전 웹게임" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="오드 룰렛 (ODD ROULETTE)" />
+  <meta name="twitter:description" content="실탄과 공포탄, 7종 아이템으로 판을 뒤집는 실시간 1:1 리볼버 심리전 웹게임" />
   <!-- PWA: 홈 화면에 추가하면 주소창 없이 앱처럼 전체 화면으로 실행 (Android Chrome · iOS Safari) -->
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./assets/icons/apple-touch-icon.png" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="LAST CHAMBER" />
+  <meta name="apple-mobile-web-app-title" content="오드 룰렛" />
   <!-- 서버 주소 자동 설정 (window.LAST_CHAMBER_SERVER): 웹 = 현재 도메인 · Capacitor 앱/토스 웹뷰 = 클라우드 서버 — 모듈 스크립트(multiplayer.js 등)보다 먼저 실행돼야 해서 일반 스크립트로 맨 위에 둔다 -->
   <script src="./src/platform/serverConfig.js"></script>
   <!-- 로그인 여부를 첫 화면을 그리기 전에 판단 (html.needs-login) → 로그인 화면 · 타이틀이 깜빡이며 바뀌지 않게. 판단은 src/ui/loginGate.js 가 넘겨받는다 -->
   <script src="./src/ui/sessionBoot.js"></script>
-  <title>LAST CHAMBER</title>
+  <title>오드 룰렛 (ODD ROULETTE) - 1:1 리볼버 심리전</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23c9a35b'/%3E%3Ccircle cx='16' cy='16' r='12.5' fill='%2316181d'/%3E%3Cg fill='%23050506'%3E%3Ccircle cx='16' cy='8' r='3.2'/%3E%3Ccircle cx='22.9' cy='12' r='3.2'/%3E%3Ccircle cx='22.9' cy='20' r='3.2'/%3E%3Ccircle cx='16' cy='24' r='3.2'/%3E%3Ccircle cx='9.1' cy='20' r='3.2'/%3E%3Ccircle cx='9.1' cy='12' r='3.2'/%3E%3C/g%3E%3Ccircle cx='16' cy='8' r='2.4' fill='%23d92626'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="./style.css" />
   <link rel="stylesheet" href="./src/ui/monetization.css" /> <!-- 유료 상품 2종(VIP 광고 스킵 패스 · 스타터 팩) 전용 스타일 -->
@@ -27,7 +36,7 @@
 </head>
 <body>
   <!--
-    LAST CHAMBER 화면 (요소·상태 클래스 목록은 style.css 맨 위 'JS 연결 계약')
+    ODD ROULETTE 화면 (요소·상태 클래스 목록은 style.css 맨 위 'JS 연결 계약')
     · 시작 화면(#login-modal): 처음 오면 [회원가입]이 기본 탭 — 아이디 · 비밀번호(눈 아이콘) 두 칸만, 닉네임은 서버가 느와르 닉네임을 붙인다 → 가입 즉시 로그인 · 로비 진입 (이 기기에서 쓰던 아이디가 있으면 [로그인]) / 로그인 토큰을 이 기기에 저장, 다음부터 자동 로그인 · [로그인 없이 AI 맛보기] = AI 딜러 연습만 · 초대 링크(?room=코드)로 오면 가입 직후 그 친선방에 자동 입장
       → 타이틀. 타이틀 우상단 계정 버튼(#btn-account) → #account-modal 닉네임 [변경] · 로그아웃 (손님이면 로그인 화면)
     · 타이틀(#start-modal, 경기가 끝나면 결과 화면으로 재사용) → 게임 시작 / 프로필 & 랭킹(#profile-modal, 좌상단 미니 카드) / 상점 & 무기고(#store-modal: 총기 · 테이블 · 암시장 상자 & 이펙트 · 도발 액션 4탭) / 룰 & 도감(#rules-modal)
@@ -472,8 +481,8 @@
       </div>
 
       <div class="title-logo">
-        <p class="title-kicker">UNDERGROUND · NOIR · ROULETTE</p>
-        <h1 class="title-heading" id="title-heading">LAST<span>CHAMBER</span></h1>
+        <p class="title-kicker">UNDERGROUND · NOIR</p>
+        <h1 class="title-heading is-brand" id="title-heading">오드 룰렛<span lang="en">ODD ROULETTE</span></h1>
         <p class="title-sub" id="title-sub">마지막 약실의 주인은 누구인가</p>
         <p class="title-result" id="title-result" hidden></p>
       </div>
@@ -522,7 +531,7 @@
     <div class="codex-shell">
       <header class="codex-head">
         <div>
-          <p class="codex-kicker">LAST CHAMBER</p>
+          <p class="codex-kicker">ODD ROULETTE</p>
           <h2 class="codex-title" id="codex-title">HOW TO PLAY</h2>
         </div>
         <button class="icon-btn codex-close" id="btn-rules-close" type="button" aria-label="닫기">
@@ -641,7 +650,7 @@
     <div class="codex-shell store-shell">
       <header class="codex-head">
         <div>
-          <p class="codex-kicker">LAST CHAMBER</p>
+          <p class="codex-kicker">ODD ROULETTE</p>
           <h2 class="codex-title" id="store-title">ARMORY</h2>
         </div>
         <div class="store-tools">
@@ -740,7 +749,7 @@
     <div class="codex-shell profile-shell">
       <header class="codex-head">
         <div>
-          <p class="codex-kicker">LAST CHAMBER</p>
+          <p class="codex-kicker">ODD ROULETTE</p>
           <h2 class="codex-title" id="profile-title">PROFILE</h2>
         </div>
         <button class="icon-btn codex-close" id="btn-profile-close" type="button" aria-label="닫기">
@@ -788,8 +797,8 @@
   <dialog class="login-gate" id="login-modal" aria-labelledby="login-title" aria-describedby="login-lead">
     <div class="login-card">
       <div class="title-logo">
-        <p class="title-kicker">UNDERGROUND · NOIR · ROULETTE</p>
-        <h1 class="title-heading" id="login-title">LAST<span>CHAMBER</span></h1>
+        <p class="title-kicker">UNDERGROUND · NOIR</p>
+        <h1 class="title-heading is-brand" id="login-title">오드 룰렛<span lang="en">ODD ROULETTE</span></h1>
         <p class="title-sub" id="login-lead">아이디와 비밀번호만 — 5초면 테이블에 앉는다</p>
       </div>
       <!-- [로그인] [회원가입] 탭 — 같은 폼, 회원가입이면 닉네임 · 비밀번호 확인 칸이 더 보인다 (loginGate.js) -->
@@ -852,7 +861,7 @@
     <div class="acct-card">
       <header class="acct-head">
         <div>
-          <p class="acct-kicker">LAST CHAMBER</p>
+          <p class="acct-kicker">ODD ROULETTE</p>
           <h2 class="acct-title" id="acct-title">ACCOUNT</h2>
         </div>
         <button class="icon-btn acct-close" type="button" data-acct="close" aria-label="닫기">

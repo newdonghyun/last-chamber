@@ -1,7 +1,7 @@
 {
-  "name": "LAST CHAMBER",
-  "short_name": "LAST CHAMBER",
-  "description": "지하 카지노 느와르 러시안 룰렛",
+  "name": "오드 룰렛 (ODD ROULETTE)",
+  "short_name": "오드 룰렛",
+  "description": "실탄과 공포탄, 7종 아이템으로 판을 뒤집는 실시간 1:1 리볼버 심리전 웹게임",
   "lang": "ko",
   "id": "./",
   "start_url": "./",

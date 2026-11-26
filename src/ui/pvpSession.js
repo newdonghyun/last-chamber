@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 인게임 실시간 PvP 세션 (4-3단계)
+ * ODD ROULETTE - 인게임 실시간 PvP 세션 (4-3단계)
  *
  * 4-2 로비가 넘겨 준 소켓('pvp:start' 의 detail = { match, socket, serverUrl })을 받아, 한 판 동안 서버와의 통신을 맡는다. 화면은 app.js 가 그린다.
  *   · 서버의 state_update 를 '원격 엔진'(pvpEngine)에 쌓아 두면, app.js 의 렌더러 · 로그 연출이 로컬 GameEngine 을 읽던 그대로 읽는다 (getPublicState / getLog).

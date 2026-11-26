@@ -1,5 +1,5 @@
 /*
- * LAST CHAMBER - 시작 화면 로그인 · 계정 창 (src/ui/loginGate.js) 전용 스타일
+ * ODD ROULETTE - 시작 화면 로그인 · 계정 창 (src/ui/loginGate.js) 전용 스타일
  *   · html.needs-login  src/ui/sessionBoot.js 가 첫 화면 전에 붙인다 → 로그인 화면을 처음부터 보여 주고 타이틀은 숨긴다
  *   · #login-modal.login-gate   시작 화면: [로그인] [회원가입] 탭 · 둘러보기        · #account-modal.acct-modal   닉네임 [변경] · 로그아웃
  *   · .title-hud .hud-right      타이틀 우상단: 보유 탄피(#wallet) + 계정 버튼(#btn-account)
@@ -42,6 +42,7 @@ html.needs-login .title-screen { visibility: hidden; } /* 로그인 전에는 �
   text-align: center;
 }
 .login-card .title-heading { font-size: clamp(42px, calc(var(--vh) * 8.4), 76px); }
+.login-card .title-heading.is-brand { font-size: min(clamp(40px, calc(var(--vh) * 7.4), 68px), 13.5vw); }
 .login-form {
   width: 100%;
   display: grid;

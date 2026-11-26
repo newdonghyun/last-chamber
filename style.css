@@ -1,5 +1,5 @@
 /* ==========================================================================
-   LAST CHAMBER — 모던 다크 느와르 UI
+   ODD ROULETTE — 모던 다크 느와르 UI
    --------------------------------------------------------------------------
    JS 연결 계약 (src/ui/app.js)
    · #app                .shake-hard          실탄 피격: 화면 흔들림
@@ -1561,6 +1561,18 @@ button.card:disabled::after { /* 사용 불가 빗금 */
   -webkit-background-clip: text;
   background-clip: text;
 }
+/* 상표 '오드 룰렛 / ODD ROULETTE': 한글은 명조 계열(영문 전용 서체에는 한글이 없다), 영문 제목은 넓은 자간의 작은 대문자로 그 아래 */
+.title-heading.is-brand {
+  font-family: var(--font-quote);
+  font-weight: 800;
+  font-size: min(clamp(44px, calc(var(--vh) * 8.6), 80px), 15vw);
+  line-height: 1.05;
+  letter-spacing: .08em;
+  text-indent: .08em;
+  white-space: nowrap;
+  filter: drop-shadow(0 1px 0 #000) drop-shadow(0 0 28px rgba(201, 163, 91, .32)); /* 작은 영문 제목이 겹쳐 보이지 않게 그림자는 1px */
+}
+.title-heading.is-brand span { margin-top: .5em; font-size: max(.23em, 12px); letter-spacing: .6em; text-indent: .6em; }
 .title-sub { font-family: var(--font-quote); font-size: var(--fs-s); letter-spacing: .1em; color: var(--ink-dim); }
 .title-sub::before {
   content: '';

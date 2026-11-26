@@ -2,7 +2,7 @@
   "name": "last-chamber",
   "version": "0.1.0",
   "private": true,
-  "description": "LAST CHAMBER — 지하 카지노 느와르 러시안 룰렛. 정적 파일 서빙 + Socket.io 멀티플레이 서버(서버 권위 엔진)",
+  "description": "오드 룰렛 (ODD ROULETTE) — 지하 카지노 느와르 러시안 룰렛. 정적 파일 서빙 + Socket.io 멀티플레이 서버(서버 권위 엔진)",
   "type": "module",
   "main": "server/index.js",
   "scripts": {

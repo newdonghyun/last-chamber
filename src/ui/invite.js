@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 친선 비밀방 초대 링크 (DOM 비의존 — 저장소 · window 를 주입받는다)
+ * ODD ROULETTE - 친선 비밀방 초대 링크 (DOM 비의존 — 저장소 · window 를 주입받는다)
  *
  *   buildInviteLink('A7K9', base) → 'https://…/?room=A7K9'   방장이 [초대 링크 복사]로 친구에게 보낸다
  *   captureInvite()               링크로 들어온 사람: 주소의 ?room=코드 를 sessionStorage 'pending_invite_room' 에 보관한다

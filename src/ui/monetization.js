@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 유료 상품 2종 UI : VIP 광고 스킵 패스(₩3,900) · 초보자 스타터 팩(₩1,900 · 1회)
+ * ODD ROULETTE - 유료 상품 2종 UI : VIP 광고 스킵 패스(₩3,900) · 초보자 스타터 팩(₩1,900 · 1회)
  *
  *   app.js · style.css 를 고치지 않는 독립 모듈 — index.html 의 <link>(monetization.css) 와 <script type="module"> 두 줄로만 붙는다.
  *   저장·지급은 storeData.js(PlayerProfile), 결제는 platformBridge.purchaseProduct 하나만 쓴다.
@@ -346,7 +346,7 @@ function mountUi({ profile, bridge = platformBridge, doc = document }) {
     payLabel = `${won(product.krw)} 결제하기`;
     payBtn = button('mz-pay', payLabel);
     laterBtn = button('mz-later', '나중에');
-    payBtn.addEventListener('click', () => { onPay(kind).catch((err) => console.error('[LAST CHAMBER]', err)); });
+    payBtn.addEventListener('click', () => { onPay(kind).catch((err) => console.error('[ODD ROULETTE]', err)); });
     laterBtn.addEventListener('click', () => dlg.close());
     const row = h('div', 'mz-actions');
     row.append(payBtn, laterBtn);
@@ -445,7 +445,7 @@ function boot() {
   try {
     ui = mountUi({ profile });
   } catch (err) {
-    console.error('[LAST CHAMBER] monetization UI', err);
+    console.error('[ODD ROULETTE] monetization UI', err);
   }
 }
 

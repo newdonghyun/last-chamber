@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 계정 API (아이디 · 비밀번호 · 닉네임) — 서버 server/index.js 의 POST /api/signup · /api/login · /api/rename
+ * ODD ROULETTE - 계정 API (아이디 · 비밀번호 · 닉네임) — 서버 server/index.js 의 POST /api/signup · /api/login · /api/rename
  *
  *   signUp({ username, password, nickname })  회원가입 → 성공하면 바로 로그인 (session.signIn — 토큰 · user_id · 아이디 · 닉네임을 이 기기에)
  *   logIn({ username, password })             로그인 → 같은 계정의 전적 · MMR 을 이어서 (다른 기기 · 브라우저에서도)

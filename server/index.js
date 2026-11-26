@@ -1,5 +1,5 @@
 /**
- * LAST CHAMBER - 멀티플레이 서버 코어
+ * ODD ROULETTE - 멀티플레이 서버 코어
  *
  *   Express(정적 파일 + 계정 API) + Socket.io(실시간)를 한 프로세스에서 돌린다:  node server/index.js   (포트 process.env.PORT || 3000)
  *   게임 규칙은 src/engine/gameEngine.js 를 그대로 쓴다. 방마다 GameEngine 을 서버 메모리에 하나씩 들고 있는 '서버 권위' 구조라서
@@ -112,7 +112,7 @@ const SERVER_DEFAULTS = {
   pingInterval: 5000, // 끊긴 연결을 빨리 알아채려고 기본(25초)보다 짧게
   pingTimeout: 5000,
   quiet: false,
-  onError: (err) => console.error('[LAST CHAMBER] 서버 오류', err),
+  onError: (err) => console.error('[ODD ROULETTE] 서버 오류', err),
   userDataFile: null, // 유저 닉네임 · 전적 JSON 파일 (null = 메모리에만 — 직접 실행할 때는 아래 isMainModule 이 server/data/users.json 을 넘긴다)
   maxUsers: USER_DEFAULTS.maxUsers,
   userSaveDelayMs: USER_DEFAULTS.saveDelayMs,
@@ -250,7 +250,7 @@ function corsOptions(raw) {
  */
 export function createGameServer(options = {}) {
   const cfg = { ...ROOM_DEFAULTS, ...SERVER_DEFAULTS, corsOrigin: process.env.CORS_ORIGIN ?? '', ...options };
-  const log = (...args) => { if (!cfg.quiet) console.log('[LAST CHAMBER]', ...args); };
+  const log = (...args) => { if (!cfg.quiet) console.log('[ODD ROULETTE]', ...args); };
   const guard = (fn) => { // 타이머 · 이벤트 안의 예외가 프로세스를 죽이지 않게
     try { return fn(); } catch (err) { cfg.onError(err); return undefined; }
   };
@@ -601,9 +601,9 @@ if (isMainModule()) {
   const userDataFile = process.env.USER_DATA_FILE ?? path.join(ROOT, 'server', 'data', 'users.json');
   const server = createGameServer({ userDataFile, supabaseUrl: process.env.SUPABASE_URL || null, supabaseKey: process.env.SUPABASE_KEY || null });
   server.start(Number(process.env.PORT || 3000), process.env.HOST || undefined).then((port) => {
-    console.log(`[LAST CHAMBER] http://localhost:${port}  (정적 파일 + Socket.io · 턴 ${TURN_MS / 1000}초 · 재접속 ${GRACE_MS / 1000}초)`);
+    console.log(`[ODD ROULETTE] http://localhost:${port}  (정적 파일 + Socket.io · 턴 ${TURN_MS / 1000}초 · 재접속 ${GRACE_MS / 1000}초)`);
   }).catch((err) => {
-    console.error('[LAST CHAMBER] 서버를 시작하지 못했습니다:', err.message);
+    console.error('[ODD ROULETTE] 서버를 시작하지 못했습니다:', err.message);
     process.exit(1);
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {
