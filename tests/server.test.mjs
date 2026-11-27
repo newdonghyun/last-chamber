@@ -1138,7 +1138,8 @@ async function phase14() {
   for (const path of ['/server/index.js', '/server/userStore.js', '/tests/server.test.mjs', '/package.json', '/.env', '/.git/config', '/scripts/build-www.mjs', '/notes.txt', '/backup.sql', '/capacitor.config.json', '/node_modules/express/package.json']) {
     eq(await status(path), 404, `80 공개하지 않는 경로: ${path}`);
   }
-  eq(await Promise.all(['/', '/index.html', '/style.css', '/src/ui/app.js', '/manifest.webmanifest'].map(status)), [200, 200, 200, 200, 200], '80 게임에 필요한 파일은 그대로');
+  eq(await Promise.all(['/', '/index.html', '/style.css', '/src/ui/app.js', '/manifest.webmanifest', '/public/sounds/live-shot.mp3'].map(status)), [200, 200, 200, 200, 200, 200], '80 게임에 필요한 파일은 그대로 (실탄 녹음 포함)');
+  eq([(await headersOf('/public/sounds/live-shot.mp3')).get('content-type'), await status('/public/../server/index.js')], ['audio/mpeg', 404], '80 녹음은 audio/mpeg 로 · public 을 거쳐 서버 파일로 갈 수 없다');
   const health = await (await fetch(`${base}/healthz`)).json();
   eq([health.ok, 'dbHost' in health, 'dbKey' in health, 'node' in health, 'users' in health, typeof health.dbError, health.ipSource], [true, false, false, false, false, 'boolean', 'socket'], '80 /healthz 는 상태만 (DB 주소 · 키 종류 · 버전 · 오류 원문 없음)');
 

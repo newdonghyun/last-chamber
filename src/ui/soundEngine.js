@@ -5,16 +5,17 @@
  *   startButton.addEventListener('click', () => sound.unlock()); // 첫 사용자 클릭에서 오디오 활성화
  *   sound.playHeartbeat();                                         // play*()는 소리 길이(초) 반환, 활성화 전이면 0
  *
- * - 모든 효과음은 외부 파일 없이 실시간 합성한다.
+ * - 효과음은 실시간 합성한다. 실탄만은 녹음 파일(public/sounds/live-shot.mp3)을 튼다 — 아직 못 불러왔거나 불러오기에 실패하면 아래의 합성 총성이 대신 난다.
+ *   녹음은 첫 사용자 터치(unlock) 때 한 번 불러와, 앞의 무음을 건너뛰고(화면의 섬광과 맞게) 최대 크기를 맞춰 마스터로 바로 보낸다 (압축 · 포화 없이 원음 그대로).
  * - 격발음 설계 — 총성 뒤에 '띠딩' 하는 음정이 남지 않는 것이 원칙이다:
- *   실탄(playGunshot)  좁은 방에서 쏜 대구경 리볼버. 네 겹이 겹쳐 터진다 (전부 합성 — 녹음 파일 없음)
+ *   실탄(playGunshot)  녹음이 있으면 녹음(더블샷은 조금 낮고 크게). 없을 때의 합성음: 좁은 방에서 쏜 대구경 리볼버 — 네 겹이 겹쳐 터진다
  *                      ① 해머 · 뇌관 타격 0~15ms : 2~5kHz 의 날카로운 금속 클릭
  *                      ② 화약 폭발 0~80ms       : 400→45Hz 급강하 + 포화(WaveShaper)시킨 노이즈의 찢어지는 어택, 뒤이은 짧은 압력파
  *                      ③ 저음 펀치 0~180ms      : 110→50Hz 서브 베이스 (+ 작은 스피커에서도 들리도록 포화시킨 배음)
  *                      ④ 방 울림 50~650ms       : 합성한 임펄스 응답(ConvolverNode)에 폭발음을 보내고 어둡게 깎은 잔향
  *                      더블샷(데미지 2)이면 저음 · 폭발을 키우고 더 낮은 '쿵' 한 겹을 얹는다: playGunshot({ double: true })
  *                      네 겹은 총성 전용 버스 → DynamicsCompressor(피크를 눌러 음압) → 소프트클립(±1 보장) → 마스터. 클리핑(찢어지는 잡음) 없이 크게 난다.
- *   피격(playDamage)   둔탁한 저음 '퍽' 하나뿐 (예전의 하강 경고음 · 귀울림은 총성 직후 '띠딩'으로 들려 없앴다). 총성과 겹쳐도 넘치지 않게 같은 체인을 지난다.
+ *   피격(playDamage)   (합성 총성일 때만 — 녹음이 있으면 겹치지 않는다) 둔탁한 저음 '퍽' 하나뿐 (예전의 하강 경고음 · 귀울림은 총성 직후 '띠딩'으로 들려 없앴다). 총성과 겹쳐도 넘치지 않게 같은 체인을 지난다.
  *   공포탄(playBlank)  빈 약실의 마른 '찰칵' + 짧게 공기 빠지는 '푸슉' — 작고 가볍게 (실탄과 극명한 대비). 총성 체인을 타지 않는다.
  *   클릭(playClick)    화면 조작용 '딸깍' (0.06초 · 음정 없음).
  *   그 밖의 소리도 길게 울리는 고음은 없다: 배경 소리는 1kHz 미만, 장전 '철컥'의 금속 울림은 0.06초 이하, 총성의 2kHz 위 금속 클릭은 0.015초뿐 (tests/sound.test.mjs 가 지킨다).
@@ -38,6 +39,9 @@
  */
 
 const NOISE_SECONDS = 2;
+const SHOT_SAMPLE_URL = new URL('../../public/sounds/live-shot.mp3', import.meta.url).href; // 실탄 녹음
+const SHOT_SAMPLE_PEAK = 0.85; // 녹음의 최대 크기를 여기에 맞춘다 (더블샷 × 1.15 · 음량 최대여도 1 을 넘지 않게)
+const SHOT_DOUBLE = Object.freeze({ rate: 0.9, gain: 1.15 }); // 더블샷: 조금 낮고(느리고) 크게
 const GUN_BOOST = 2.4; // 총성 전용 버스의 증폭 — 합이 1 을 넘어도 바로 뒤의 컴프레서 · 소프트클립이 받아 준다
 const GUN_COMP = { threshold: -18, knee: 8, ratio: 6, attack: 0.001, release: 0.14 }; // 총성 전용 컴프레서: 피크를 눌러 평균 음량(음압)을 키운다
 const GUN_CLIP_DRIVE = 2.2; // 컴프레서 뒤의 소프트클립(tanh) — 어떤 경우에도 ±1 을 넘지 않게 마지막으로 둥글게 눌러 클리핑(찢어지는 소리)을 막는다
@@ -107,6 +111,17 @@ const beat = (at, freq, peak) => [
   { at, filters: [['lowpass', freq * 3]], peak: peak * 0.6, attack: 0.004, decay: 0.07 },
 ];
 
+/** 녹음의 앞쪽 무음 길이와 크기 맞춤값 → { buffer, offset, gain } */
+function measureShot(buffer) {
+  let peak = 0;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    for (const v of buffer.getChannelData(ch)) if (Math.abs(v) > peak) peak = Math.abs(v);
+  }
+  if (!(peak > 0)) throw new Error('빈 녹음');
+  const first = buffer.getChannelData(0).findIndex((v) => Math.abs(v) > peak * 0.05); // 소리가 시작되는 지점
+  return { buffer, offset: Math.max(0, first / buffer.sampleRate - 0.003), gain: SHOT_SAMPLE_PEAK / peak };
+}
+
 export class SoundEngine {
   #ctx = null;
   #master = null;
@@ -114,6 +129,8 @@ export class SoundEngine {
   #gunBus = null; // 총성 전용 증폭 버스 → 총성 컴프레서 → 소프트클립 → #master (음량 · 음소거 · 화면 밖 무음은 그대로 받는다)
   #gunComp = null;
   #gunClip = null;
+  #shot = null; // 실탄 녹음 { buffer, offset(앞의 무음 길이 · 초), gain } — 컨텍스트를 새로 만들어도 다시 쓴다
+  #shotLoading = null;
   #room = null; // 방 울림(ConvolverNode) → 로우패스 → 잔향 음량 → 총성 버스 (지원하지 않는 브라우저면 null — 잔향 없이)
   #roomIn = null; // 잔향 출구(로우패스) — 화면을 떠날 때 #room 만 새로 만들어 남은 꼬리를 버린다
   #roomIr = null;
@@ -173,6 +190,55 @@ export class SoundEngine {
   setMuted(muted) {
     this.#muted = Boolean(muted);
     this.#applyVolumes();
+  }
+
+  /** 실탄 녹음을 쓸 수 있는가 */
+  get shotSampleReady() {
+    return this.#shot !== null;
+  }
+
+  /**
+   * 실탄 녹음을 한 번 불러와 둔다 → 성공하면 true. 실패하면 false (합성 총성이 대신 나고, 다음 격발 때 다시 시도한다).
+   * 컨텍스트가 없거나 녹음을 풀 수 없는 환경이면 아무것도 하지 않는다.
+   */
+  loadShotSample(fetchImpl = globalThis.fetch) {
+    const ctx = this.#ctx;
+    if (this.#shot) return Promise.resolve(true);
+    if (!ctx || typeof ctx.decodeAudioData !== 'function' || typeof fetchImpl !== 'function') return Promise.resolve(false);
+    this.#shotLoading ??= (async () => {
+      try {
+        const res = await fetchImpl(SHOT_SAMPLE_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const bytes = await res.arrayBuffer();
+        const buffer = await new Promise((resolve, reject) => { ctx.decodeAudioData(bytes, resolve, reject)?.catch?.(() => {}); }); // 구형 Safari 는 콜백 방식만
+        this.#shot = measureShot(buffer);
+        return true;
+      } catch (err) {
+        console.warn('[ODD ROULETTE] 총성 녹음을 불러오지 못해 합성음을 씁니다', err?.message ?? err);
+        return false;
+      } finally {
+        this.#shotLoading = null;
+      }
+    })();
+    return this.#shotLoading;
+  }
+
+  // 녹음 재생: 화면 밖 · 닫힘이면 나지 않는 것은 합성음과 같다 → 남은 길이(초)
+  #playShot(double) {
+    const ctx = this.#ready();
+    if (!ctx) return 0;
+    const { buffer, offset, gain } = this.#shot;
+    const rate = double ? SHOT_DOUBLE.rate : 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = rate;
+    const amp = ctx.createGain();
+    amp.gain.value = gain * (double ? SHOT_DOUBLE.gain : 1);
+    src.connect(amp);
+    amp.connect(this.#master); // 음량 · 음소거 · 화면 밖 무음은 마스터가
+    src.start(ctx.currentTime + 0.005, offset);
+    this.#track(src);
+    return (buffer.duration - offset) / rate;
   }
 
   /** 잠금 2 — 앱이 실제 인게임 화면이면 true. false 가 되면 켜져 있던 배경음도 곧바로 접는다 (총성 · 피격 · 심박 · 배경음은 true 일 때만 난다) */
@@ -304,6 +370,8 @@ export class SoundEngine {
    */
   playGunshot({ double = false } = {}) {
     if (!this.#inGame) return 0; // 잠금 2
+    if (this.#shot) return this.#playShot(double); // 실탄 녹음
+    this.loadShotSample(); // 아직 없으면 불러 두고 이번에는 합성음
     const power = double ? DOUBLE_POWER : 1;
     const hold = double ? 1.4 : 1;
     const layers = [
@@ -387,6 +455,7 @@ export class SoundEngine {
    */
   playDamage() {
     if (!this.#inGame) return 0; // 잠금 2
+    if (this.#shot) return 0; // 녹음에 타격감이 담겨 있다 — 합성 '퍽' 을 겹치면 출력이 넘쳐 찢어진다
     return this.#play([ // 총성 체인으로: 총성과 합쳐진 뒤에 피크를 누르므로 겹쳐도 넘치지 않는다
       { bus: 'gun', at: 0.05, osc: 'sine', freq: 90, to: 34, glide: 0.14, peak: 0.2, attack: 0.003, decay: 0.2 },
       { bus: 'gun', at: 0.05, filters: [['lowpass', 520, 1, 140, 0.12]], peak: 0.17, attack: 0.002, decay: 0.14 },
@@ -724,6 +793,7 @@ export class SoundEngine {
       globalThis.document.addEventListener('visibilitychange', onAway);
       for (const type of ['blur', 'focus']) globalThis.window?.addEventListener?.(type, (e) => { if (e.target === globalThis.window) onAway(); }); // 입력칸 같은 요소의 blur 는 무시
     }
+    this.loadShotSample(); // 첫 격발 전에 녹음을 받아 둔다
     const length = Math.floor(ctx.sampleRate * NOISE_SECONDS);
     this.#noise = ctx.createBuffer(1, length, ctx.sampleRate);
     const data = this.#noise.getChannelData(0);

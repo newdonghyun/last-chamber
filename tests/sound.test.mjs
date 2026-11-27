@@ -5,7 +5,8 @@
 //   2. 공포탄: 빈 쇳소리 '찰칵' + 공기 빠지는 소리 (음정 · 저음 · 잔향 · 압축 없음 — 실탄과 극명한 대비) · 화면 조작 클릭은 0.06초
 //   3. 피격 · 아이템: 총성 뒤에 '띠딩'으로 들리던 경고음 · 귀울림 · 고배음 없음
 //   4. 배경음: 드문 먼 소리까지 전부 돌려 봐도 1kHz 이상 오실레이터 없음 (유리잔 '챙' 제거)
-//   5. 녹음 재생 코드 제거 (preload · hasRecordedGunshot 없음)
+//   5. 실탄 녹음(public/sounds/live-shot.mp3): 실탄에만 · 앞 무음 건너뛰기 · 크기 맞춤 · 마스터로 직접 · 실패하면 합성음
+import { readFileSync } from 'node:fs';
 import { SoundEngine } from '../src/ui/soundEngine.js';
 
 const T0 = performance.now();
@@ -251,10 +252,52 @@ const gunshot = render((s) => s.playGunshot());
   ok(Math.max(...freqs) < 1000, `4 배경음 오실레이터 최고 ${Math.max(...freqs).toFixed(0)}Hz < 1000 — 유리잔 '챙' · 차임 없음`);
 }
 
-// ───────── 5. 녹음 재생 코드 제거 ─────────
+// ───────── 5. 실탄 녹음 ─────────
 {
-  const { sound } = engine();
-  ok(!('preload' in sound) && !('hasRecordedGunshot' in sound), '5 총성 녹음 불러오기 코드가 없다 (총성은 항상 합성)');
+  const file = readFileSync(new URL('../public/sounds/live-shot.mp3', import.meta.url));
+  ok(file.length > 10_000 && (file.subarray(0, 3).toString() === 'ID3' || (file[0] === 0xff && (file[1] & 0xe0) === 0xe0)), '5 public/sounds/live-shot.mp3 가 MP3 파일 (' + file.length + 'B)');
+
+  // 가짜 녹음: 0.5초, 앞 0.1초는 무음, 최대 0.5
+  const rate = 48000;
+  const data = new Float32Array(rate / 2);
+  for (let i = rate / 10; i < data.length; i += 1) data[i] = i === rate / 10 ? 0.5 : 0.3 * Math.sin(i);
+  const buffer = { duration: 0.5, sampleRate: rate, numberOfChannels: 1, getChannelData: () => data };
+  const loaded = async (fetchImpl) => {
+    const { ctx, sound } = engine();
+    ctx.decodeAudioData = (_bytes, resolve) => { resolve(buffer); };
+    const okLoad = await sound.loadShotSample(fetchImpl);
+    return { ctx, sound, okLoad };
+  };
+  const requested = [];
+  const fine = async (url) => { requested.push(url); return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) }; };
+  const voicesOf = (ctx, from) => ctx.nodes.slice(from).filter((n) => n.kind === 'source' && n.started);
+
+  const { ctx, sound, okLoad } = await loaded(fine);
+  ok(okLoad && sound.shotSampleReady && requested[0].endsWith('/public/sounds/live-shot.mp3'), '5 녹음을 불러온다 (' + (requested[0] ?? '').split('/').slice(-3).join('/') + ')');
+  let from = ctx.nodes.length;
+  const seconds = sound.playGunshot();
+  let voices = voicesOf(ctx, from);
+  ok(voices.length === 1 && voices[0].buffer === buffer && ctx.nodes.slice(from).every((n) => !['osc', 'convolver', 'compressor'].includes(n.kind)), '5 실탄 = 녹음 하나 (합성 겹 없음)');
+  ok(voices[0].to.kind === 'gain' && voices[0].to.to.kind === 'gain' && voices[0].to.to.to === ctx.destination, '5 크기 맞춤 → 마스터 → 출력 (총성 압축 · 포화를 거치지 않는다)');
+  near(voices[0].to.gain.value, 0.85 / 0.5, 0.001, '5 녹음의 최대 크기를 0.85 로 맞춘다');
+  near(seconds, 0.5 - (0.1 - 0.003), 0.002, '5 앞의 무음은 건너뛰고 재생 (섬광과 맞게)');
+  from = ctx.nodes.length;
+  sound.playGunshot({ double: true });
+  voices = voicesOf(ctx, from);
+  ok(voices[0].playbackRate.value === 0.9 && voices[0].to.gain.value > 0.85 / 0.5 && voices[0].to.gain.value * 0.5 < 1, '5 더블샷: 조금 낮고 크게 (그래도 최대 1 미만)');
+  from = ctx.nodes.length;
+  ok(sound.playDamage() === 0 && ctx.nodes.length === from, '5 녹음을 쓰면 합성 피격음을 겹치지 않는다 (출력이 넘치지 않게)');
+  from = ctx.nodes.length;
+  sound.playBlank();
+  ok(voicesOf(ctx, from).every((v) => v.buffer !== buffer), '5 공포탄에는 녹음을 쓰지 않는다');
+  sound.setInGame(false);
+  ok(sound.playGunshot() === 0, '5 판 밖에서는 녹음도 나지 않는다');
+
+  const broken = await loaded(async () => ({ ok: false, status: 404 }));
+  from = broken.ctx.nodes.length;
+  broken.sound.playGunshot();
+  ok(!broken.okLoad && !broken.sound.shotSampleReady && broken.ctx.nodes.slice(from).some((n) => n.kind === 'osc'), '5 불러오기에 실패하면 합성 총성이 대신 난다');
+  ok(broken.sound.playDamage() > 0, '5 합성 총성일 때는 피격음도 그대로');
 }
 
 console.log(`\nsound.test.mjs ${pass} 통과 · ${fails.length} 실패 (${(performance.now() - T0).toFixed(0)}ms)`);

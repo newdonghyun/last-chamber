@@ -181,7 +181,7 @@ function keyRole(key) {
 // ───────── 정적 파일: 서버 내부 경로는 숨긴다 ─────────
 
 // 허용 목록: 여기 없는 것은 모두 404 (서버 소스 · 설정 · 나중에 생길 파일까지) — 게임 화면에 필요한 것만 연다
-const PUBLIC_TOP = new Set(['', 'index.html', 'style.css', 'manifest.webmanifest', 'favicon.ico', 'src', 'assets']);
+const PUBLIC_TOP = new Set(['', 'index.html', 'style.css', 'manifest.webmanifest', 'favicon.ico', 'src', 'assets', 'public']); // public/ = 효과음 같은 정적 파일
 
 function topSegment(urlPath) {
   const normalized = path.posix.normalize(`/${urlPath.replace(/\\/g, '/')}`); // . · .. 정리 (/x/../server 로 돌아 들어오는 길 차단)
