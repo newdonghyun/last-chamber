@@ -1,8 +1,9 @@
 /**
  * ODD ROULETTE - 시작 화면(로그인 · 회원가입 · 둘러보기) · 계정 창 — src/ui/session.js · src/ui/accountApi.js 의 화면
  *
- *   · 로그인 기록이 없으면 #login-modal 이 뜬다 — 처음 온 사람에게는 [회원가입]이 기본 탭: 아이디 · 비밀번호(눈 아이콘으로 보기) 딱 두 칸, 닉네임은 서버가 느와르 닉네임을 붙인다
- *     (로비 · 계정 창에서 언제든 변경). 이 기기에서 로그인한 적 있는 사람(마지막 아이디가 남아 있음)에게는 [로그인]이 기본 탭.
+ *   · 로그인 기록이 없으면 #login-modal 이 뜬다 — 처음 온 사람에게는 [회원가입]이 기본 탭: 아이디 · 비밀번호(눈 아이콘으로 보기) · 닉네임.
+ *     닉네임은 입력을 멈추면(NICK_CHECK_DELAY_MS) 서버에 중복을 확인해 칸 아래에 알리고, '사용 가능'일 때만 [회원가입]이 켜진다 (그새 누가 가져가면 서버가 거절).
+ *     이 기기에서 로그인한 적 있는 사람(마지막 아이디가 남아 있음)에게는 [로그인]이 기본 탭.
  *     가입에 성공하면 곧바로 로그인 상태가 되어 로비로 들어간다 (window 'lastchamber:signed-in' → multiplayer.js).
  *     초대 링크(?room=코드)로 들어왔다면 가입 · 로그인 직후 그 친선 비밀방에 자동 입장한다 (src/ui/invite.js).
  *     성공하면 서버가 준 로그인 토큰을 session.js 가 localStorage 에 저장 → 다시 접속하면 이 화면 없이 바로 타이틀(자동 로그인).
@@ -20,7 +21,8 @@ import {
   userSession, validateUsername, validatePassword, nicknameErrorText, attachNicknameFilter,
   NICK_RULE, NICK_HINT, SESSION_KEY,
 } from './session.js';
-import { logIn, signUp, changeNickname } from './accountApi.js';
+import { logIn, signUp, changeNickname, checkNickname } from './accountApi.js';
+import { checkNewNickname, NEW_NICK_TEXT } from '../engine/nicknameRules.js';
 import { captureInvite } from './invite.js';
 
 const $ = (id) => document.getElementById(id);
@@ -33,6 +35,9 @@ const gate = {
   pass: $('login-pass'),
   eye: $('login-eye'),
   eyeIcon: $('login-eye-icon'),
+  nick: $('login-nick'),
+  nickCount: $('login-nick-count'),
+  nickState: $('login-nick-state'),
   invite: $('login-invite'),
   msg: $('login-msg'),
   submit: $('login-submit'),
@@ -55,9 +60,12 @@ const acct = {
 };
 const MODE = {
   login: { main: '로그인', sub: 'LOG IN', hint: '아이디와 비밀번호로 로그인하세요', pass: 'current-password' },
-  signup: { main: '회원가입', sub: 'SIGN UP', hint: '아이디와 비밀번호만 정하면 바로 입장해요. 닉네임은 자동으로 만들어 드려요', pass: 'new-password' },
+  signup: { main: '회원가입', sub: 'SIGN UP', hint: '아이디 · 비밀번호 · 닉네임을 정하면 바로 입장해요', pass: 'new-password' },
 };
 const SLOW_HINT_MS = 4000; // 서버가 잠들어 있으면 깨어나는 데 시간이 걸린다 → 이만큼 지나면 안내를 바꾼다
+const SLOW_HINT = '서버를 깨우는 중이에요 — 처음 접속이면 최대 1분쯤 걸릴 수 있어요';
+const NICK_CHECK_DELAY_MS = 400; // 입력을 멈추고 이만큼 지나면 중복 확인
+const NICK_RETRY_MS = [3000, 8000, 20000]; // 확인 요청이 실패하면(연결 · 서버) 이 간격으로 다시
 
 const glyphs = (text) => [...text].length;
 
@@ -105,6 +113,87 @@ const recordText = (me) => (me && me.wins + me.losses > 0 ? ` — 랭킹전 ${me
 // ───────── 시작 화면: 로그인 · 회원가입 · 둘러보기 ─────────
 
 let mode = 'signup'; // 처음 온 사람은 회원가입이 기본
+let gateBusy = false;
+
+// ── 닉네임 중복 확인 ──
+/** state: idle(비었음) · typing · checking · ok(사용 가능) · bad(형식 · 비속어) · taken(중복) · error(확인 실패) — 'ok' 일 때만 가입할 수 있다 */
+const nick = { state: 'idle', value: '', timer: 0, seq: 0, retries: 0 };
+
+function paintSubmit() {
+  gate.submit.disabled = gateBusy || (mode === 'signup' && nick.state !== 'ok');
+}
+
+function paintNick(state, text) {
+  nick.state = state;
+  if (gate.nickState) {
+    gate.nickState.textContent = text;
+    gate.nickState.classList.toggle('is-ok', state === 'ok');
+    gate.nickState.classList.toggle('is-bad', state === 'bad' || state === 'taken' || state === 'error');
+  }
+  gate.nick?.setAttribute('aria-invalid', String(state === 'bad' || state === 'taken'));
+  paintSubmit();
+}
+
+/** 예약 · 진행 중인 확인을 버린다 (늦게 온 응답은 seq 로 무시) */
+function cancelNickCheck() {
+  clearTimeout(nick.timer);
+  nick.seq += 1;
+}
+
+function resetNick() {
+  cancelNickCheck();
+  nick.value = '';
+  nick.retries = 0;
+  if (gate.nick) gate.nick.value = '';
+  paintCount(gate.nickCount, '');
+  paintNick('idle', NICK_HINT);
+}
+
+async function runNickCheck() {
+  cancelNickCheck();
+  const { value, seq } = nick;
+  const local = checkNewNickname(value);
+  if (!local.ok) {
+    paintNick('bad', NEW_NICK_TEXT[local.reason]);
+    return;
+  }
+  paintNick('checking', '닉네임을 확인하는 중…');
+  const slow = setTimeout(() => { if (seq === nick.seq) paintNick('checking', SLOW_HINT); }, SLOW_HINT_MS);
+  const res = await checkNickname(value);
+  clearTimeout(slow);
+  if (seq !== nick.seq) return; // 그새 다시 입력했다
+  if (res.ok) {
+    paintNick(res.available ? 'ok' : 'taken', res.available ? NEW_NICK_TEXT.available : NEW_NICK_TEXT.taken);
+    return;
+  }
+  if (res.error === 'INVALID_NICKNAME') {
+    paintNick('bad', res.message);
+    return;
+  }
+  const wait = NICK_RETRY_MS[nick.retries];
+  paintNick('error', wait ? `${res.message} 곧 다시 확인할게요.` : `${res.message} 닉네임 칸을 다시 눌러 확인해 주세요.`);
+  if (wait) {
+    nick.retries += 1;
+    nick.timer = setTimeout(runNickCheck, wait);
+  }
+}
+
+/** 닉네임이 바뀔 때마다 (attachNicknameFilter 가 공백을 지운 뒤) — 입력이 멈추면 확인한다 */
+function onNickInput(value) {
+  paintCount(gate.nickCount, value);
+  if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
+  if (value === nick.value && nick.state !== 'idle') return; // 같은 값 (한글 조합이 끝날 때 한 번 더 온다)
+  cancelNickCheck();
+  nick.value = value;
+  nick.retries = 0;
+  if (!value) {
+    paintNick('idle', NICK_HINT);
+    return;
+  }
+  paintNick('typing', NICK_HINT); // 앞서 확인한 결과는 바로 무효
+  nick.timer = setTimeout(runNickCheck, NICK_CHECK_DELAY_MS);
+}
+
 function setMode(next, { focus = true } = {}) {
   mode = next === 'login' ? 'login' : 'signup';
   gate.form.dataset.mode = mode;
@@ -118,6 +207,7 @@ function setMode(next, { focus = true } = {}) {
   if (gate.submitSub) gate.submitSub.textContent = m.sub;
   gate.pass.autocomplete = m.pass;
   note(gate.msg, m.hint);
+  paintSubmit();
   if (focus) (gate.user.value ? gate.pass : gate.user).focus();
 }
 
@@ -144,6 +234,7 @@ function openGate(message = '') {
     gate.user.value = userSession.lastUsername ?? '';
     gate.pass.value = '';
     setPasswordShown(false);
+    resetNick();
     setMode(userSession.lastUsername ? 'login' : 'signup', { focus: false }); // 이 기기에서 쓰던 아이디가 있으면 로그인, 처음이면 회원가입
   }
   paintInvite();
@@ -165,7 +256,7 @@ function setNeedsLogin(on) {
 
 function setGateBusy(on) {
   gate.form.classList.toggle('is-busy', on);
-  gate.submit.disabled = on;
+  paintSubmit();
   gate.form.setAttribute('aria-busy', String(on));
 }
 
@@ -176,12 +267,12 @@ function precheck() {
   if (mode === 'login') return gate.pass.value ? null : { node: gate.pass, message: '비밀번호를 입력해 주세요' };
   const p = validatePassword(gate.pass.value);
   if (!p.ok) return { node: gate.pass, message: nicknameErrorText(p.reason) };
+  if (nick.state !== 'ok' || gate.nick.value !== nick.value) return { node: gate.nick, message: '닉네임 중복 확인을 통과해야 가입할 수 있어요' };
   return null;
 }
 
-const FOCUS_ON_ERROR = { USERNAME_TAKEN: 'user', INVALID_USERNAME: 'user', BAD_CREDENTIALS: 'pass', INVALID_PASSWORD: 'pass' };
+const FOCUS_ON_ERROR = { USERNAME_TAKEN: 'user', INVALID_USERNAME: 'user', BAD_CREDENTIALS: 'pass', INVALID_PASSWORD: 'pass', NICKNAME_TAKEN: 'nick', INVALID_NICKNAME: 'nick' };
 
-let gateBusy = false;
 async function onGateSubmit(ev) {
   ev.preventDefault(); // method="dialog" 가 창을 닫지 않게 — 닫는 건 로그인이 성공했을 때(onSession)만
   if (gateBusy) return;
@@ -194,17 +285,21 @@ async function onGateSubmit(ev) {
   gateBusy = true;
   setGateBusy(true);
   note(gate.msg, mode === 'login' ? '로그인하는 중…' : '계정을 만드는 중…');
-  const slow = setTimeout(() => note(gate.msg, '서버를 깨우는 중이에요 — 처음 접속이면 최대 1분쯤 걸릴 수 있어요'), SLOW_HINT_MS);
+  const slow = setTimeout(() => note(gate.msg, SLOW_HINT), SLOW_HINT_MS);
   const signing = mode;
   const res = signing === 'login'
     ? await logIn({ username: gate.user.value, password: gate.pass.value })
-    : await signUp({ username: gate.user.value, password: gate.pass.value }); // 닉네임은 보내지 않는다 — 서버가 느와르 닉네임을 붙인다
+    : await signUp({ username: gate.user.value, password: gate.pass.value, nickname: gate.nick.value });
   clearTimeout(slow);
   gateBusy = false;
   setGateBusy(false);
   if (!res.ok) {
     note(gate.msg, res.message, 'bad');
     const field = FOCUS_ON_ERROR[res.error];
+    if (field === 'nick') { // 확인한 뒤 가입하는 사이 다른 사람이 가져갔다
+      cancelNickCheck();
+      paintNick(res.error === 'NICKNAME_TAKEN' ? 'taken' : 'bad', res.error === 'NICKNAME_TAKEN' ? NEW_NICK_TEXT.taken : res.message);
+    }
     if (field === 'pass') gate.pass.value = '';
     gate[field]?.focus();
     return;
@@ -214,7 +309,7 @@ async function onGateSubmit(ev) {
   setPasswordShown(false);
   toast(signing === 'login'
     ? `${res.user.nickname}, 다시 오셨군요${recordText(res.me)}`
-    : `${res.user.nickname} 닉네임으로 가입했어요 — 로비에서 언제든 바꿀 수 있어요`);
+    : `${res.user.nickname} 님, 환영해요 — 닉네임은 로비에서 언제든 바꿀 수 있어요`);
   // 로그인 상태가 됐다 (화면은 이미 session 구독으로 닫혔다). 가입 직후 → 로비 · 초대 링크가 있으면 그 방으로 (multiplayer.js 가 이 이벤트를 듣는다)
   window.dispatchEvent(new CustomEvent('lastchamber:signed-in', { detail: { created: signing === 'signup' } }));
 }
@@ -347,6 +442,14 @@ if (gate.modal && gate.form && gate.user && gate.pass) {
     if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint);
   });
   gate.pass.addEventListener('input', () => { if (gate.msg.classList.contains('is-bad')) note(gate.msg, MODE[mode].hint); });
+  if (gate.nick) {
+    attachNicknameFilter(gate.nick, onNickInput);
+    gate.nick.addEventListener('focus', () => { // 확인에 실패한 채라면 칸을 다시 누를 때 한 번 더
+      if (nick.state !== 'error') return;
+      nick.retries = 0;
+      runNickCheck();
+    });
+  }
   gate.eye?.addEventListener('click', () => {
     setPasswordShown(gate.pass.type === 'password');
     gate.pass.focus();

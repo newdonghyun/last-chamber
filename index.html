@@ -37,7 +37,7 @@
 <body>
   <!--
     ODD ROULETTE 화면 (요소·상태 클래스 목록은 style.css 맨 위 'JS 연결 계약')
-    · 시작 화면(#login-modal): 처음 오면 [회원가입]이 기본 탭 — 아이디 · 비밀번호(눈 아이콘) 두 칸만, 닉네임은 서버가 느와르 닉네임을 붙인다 → 가입 즉시 로그인 · 로비 진입 (이 기기에서 쓰던 아이디가 있으면 [로그인]) / 로그인 토큰을 이 기기에 저장, 다음부터 자동 로그인 · [로그인 없이 AI 맛보기] = AI 딜러 연습만 · 초대 링크(?room=코드)로 오면 가입 직후 그 친선방에 자동 입장
+    · 시작 화면(#login-modal): 처음 오면 [회원가입]이 기본 탭 — 아이디 · 비밀번호(눈 아이콘) · 닉네임(입력을 멈추면 중복 확인, 통과해야 가입 버튼이 켜진다) → 가입 즉시 로그인 · 로비 진입 (이 기기에서 쓰던 아이디가 있으면 [로그인]) / 로그인 토큰을 이 기기에 저장, 다음부터 자동 로그인 · [로그인 없이 AI 맛보기] = AI 딜러 연습만 · 초대 링크(?room=코드)로 오면 가입 직후 그 친선방에 자동 입장
       → 타이틀. 타이틀 우상단 계정 버튼(#btn-account) → #account-modal 닉네임 [변경] · 로그아웃 (손님이면 로그인 화면)
     · 타이틀(#start-modal, 경기가 끝나면 결과 화면으로 재사용) → 게임 시작 / 프로필 & 랭킹(#profile-modal, 좌상단 미니 카드) / 상점 & 무기고(#store-modal: 총기 · 테이블 · 암시장 상자 & 이펙트 · 도발 액션 4탭) / 룰 & 도감(#rules-modal)
     · 인게임: 상단 딜러 · 중앙 테이블 · 하단 플레이어 (100dvh 안에 스크롤 없이). 상단 모서리에 [항복](온라인 대전 — 서버가 정산) / [나가기](AI 연습 — 기록 없음) 버튼(#btn-leave) → 확인 모달(#leave-modal). 장착한 도발이 있으면 테이블 우상단 구석에 작은 도발 버튼(#btn-taunt), 쓰면 테이블 중앙에 #taunt-fx 연출
@@ -771,7 +771,7 @@
             <input id="nick-input" name="nickname" type="text" maxlength="10" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="done" aria-describedby="nick-msg" />
             <button class="sk-btn sk-equip" type="submit">저장</button>
           </div>
-          <p class="nick-msg" id="nick-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
+          <p class="nick-msg" id="nick-msg" role="status" aria-live="polite">한글 · 영문 · 숫자 2~10자 (공백 · 특수문자 · 비속어 불가)</p>
         </form>
 
         <dl class="pf-stats" id="pf-stats"></dl>
@@ -799,9 +799,9 @@
       <div class="title-logo">
         <p class="title-kicker">UNDERGROUND · NOIR</p>
         <h1 class="title-heading is-brand" id="login-title">오드 룰렛<span lang="en">ODD ROULETTE</span></h1>
-        <p class="title-sub" id="login-lead">아이디와 비밀번호만 — 5초면 테이블에 앉는다</p>
+        <p class="title-sub" id="login-lead">이름을 정하고 — 바로 테이블에 앉는다</p>
       </div>
-      <!-- [로그인] [회원가입] 탭 — 같은 폼, 회원가입이면 닉네임 · 비밀번호 확인 칸이 더 보인다 (loginGate.js) -->
+      <!-- [로그인] [회원가입] 탭 — 같은 폼, 회원가입이면 닉네임 칸이 더 보인다 (loginGate.js) -->
       <div class="login-tabs" role="tablist" aria-label="로그인 · 회원가입">
         <button class="login-tab" id="tab-login" type="button" role="tab" aria-selected="false" aria-controls="login-form" data-mode="login" tabindex="-1">로그인</button>
         <button class="login-tab" id="tab-signup" type="button" role="tab" aria-selected="true" aria-controls="login-form" data-mode="signup">회원가입</button>
@@ -820,7 +820,14 @@
             <svg aria-hidden="true"><use id="login-eye-icon" href="#i-eye"></use></svg>
           </button>
         </div>
-        <p class="login-msg" id="login-msg" role="status" aria-live="polite">아이디와 비밀번호만 정하면 바로 입장해요. 닉네임은 자동으로 만들어 드려요</p>
+        <!-- 회원가입에서만 보인다: 입력을 멈추면(400ms) 서버에 중복을 확인한다 — 통과해야 [회원가입]이 켜진다 -->
+        <div class="login-nick" id="login-nick-field">
+          <label class="login-label" for="login-nick">NICKNAME · 닉네임 <span class="login-count" id="login-nick-count" aria-hidden="true">0/10</span></label>
+          <input class="login-input" id="login-nick" name="nickname" type="text" maxlength="10" enterkeyhint="go" spellcheck="false" autocapitalize="off"
+            autocomplete="off" autocorrect="off" placeholder="한글 · 영문 · 숫자 2~10자" aria-describedby="login-nick-state" />
+          <p class="login-nick-state" id="login-nick-state" role="status" aria-live="polite">한글 · 영문 · 숫자 2~10자 (공백 · 특수문자 · 비속어 불가)</p>
+        </div>
+        <p class="login-msg" id="login-msg" role="status" aria-live="polite">아이디 · 비밀번호 · 닉네임을 정하면 바로 입장해요</p>
         <button class="title-btn title-btn-play login-submit" id="login-submit" type="submit">
           <span class="title-btn-main" id="login-submit-main">회원가입</span><span class="title-btn-sub" id="login-submit-sub">SIGN UP</span>
         </button>
@@ -882,7 +889,7 @@
           <input id="acct-nick" name="nickname" type="text" maxlength="10" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" enterkeyhint="done" aria-describedby="acct-msg" />
           <button class="sk-btn sk-equip" type="submit">변경</button>
         </div>
-        <p class="nick-msg" id="acct-msg" role="status" aria-live="polite">2~10자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )</p>
+        <p class="nick-msg" id="acct-msg" role="status" aria-live="polite">한글 · 영문 · 숫자 2~10자 (공백 · 특수문자 · 비속어 불가)</p>
       </form>
       <button class="acct-btn is-danger" id="acct-logout" type="button" data-acct="logout">로그아웃</button>
       <div class="acct-confirm" id="acct-confirm" role="alertdialog" aria-labelledby="acct-confirm-text" hidden>

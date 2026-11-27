@@ -2,24 +2,26 @@
  * ODD ROULETTE - 계정 API (아이디 · 비밀번호 · 닉네임) — 서버 server/index.js 의 POST /api/signup · /api/login · /api/rename
  *
  *   signUp({ username, password, nickname })  회원가입 → 성공하면 바로 로그인 (session.signIn — 토큰 · user_id · 아이디 · 닉네임을 이 기기에)
+ *   checkNickname(nickname)                   가입 화면의 중복 확인 → { ok: true, available }
  *   logIn({ username, password })             로그인 → 같은 계정의 전적 · MMR 을 이어서 (다른 기기 · 브라우저에서도)
  *   changeNickname(nickname)                  닉네임 변경 — 서버가 players 를 바로 UPDATE (다른 계정이 쓰는 닉네임이면 거절) → 이 기기 세션도
  *   토큰이 틀리거나 만료되면(AUTH_REQUIRED) 로그아웃하고 로그인 화면을 다시 연다 (window 'lastchamber:need-login').
  *   서버 주소는 multiplayer.js 와 같다: window.LAST_CHAMBER_SERVER → 페이지를 서빙한 서버 → 클라우드 기본 주소. 비밀번호는 이 기기에 저장하지 않는다.
  */
-import { userSession, validateNickname, validateUsername, validatePassword, nicknameErrorText } from './session.js';
+import { userSession, validateUsername, validatePassword, nicknameErrorText } from './session.js';
+import { checkNewNickname, NEW_NICK_TEXT } from '../engine/nicknameRules.js';
 
 const DEFAULT_SERVER = 'https://last-chamber-aaz9.onrender.com';
 const TIMEOUT_MS = 75_000; // 무료 서버가 잠들어 있으면 첫 응답까지 1분 가까이 걸린다
 
 export const ACCOUNT_ERROR_TEXT = Object.freeze({
   USERNAME_TAKEN: '이미 사용 중인 아이디예요.',
-  NICKNAME_TAKEN: '이미 사용 중인 닉네임이에요.',
+  NICKNAME_TAKEN: NEW_NICK_TEXT.takenOnSubmit,
   BAD_CREDENTIALS: '아이디 또는 비밀번호가 맞지 않아요.',
   LOGIN_LOCKED: '비밀번호를 여러 번 틀렸어요. 잠시 뒤에 다시 시도해 주세요.',
   INVALID_USERNAME: '아이디는 영문 소문자 · 숫자 · _ 4~16자로 정해 주세요.',
   INVALID_PASSWORD: '비밀번호는 6자 이상이어야 해요.',
-  INVALID_NICKNAME: '닉네임 규칙에 맞지 않아요.',
+  INVALID_NICKNAME: NEW_NICK_TEXT.format,
   AUTH_REQUIRED: '로그인이 풀렸어요. 다시 로그인해 주세요.',
   RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤에 다시 시도해 주세요.',
   ACCOUNT_SETUP_REQUIRED: '서버 계정 설정이 아직 끝나지 않았어요. 잠시 뒤에 다시 시도해 주세요.',
@@ -82,22 +84,29 @@ function keep(res, session) {
   return { ok: true, user: signed.user, me: res.me ?? null };
 }
 
+const badNickname = (reason) => failed('INVALID_NICKNAME', NEW_NICK_TEXT[reason] ?? NEW_NICK_TEXT.format);
+
 /**
- * 회원가입 → { ok: true, user, me } | { ok: false, error, message } (성공하면 바로 로그인 상태)
- * nickname 은 선택 — 비우면 서버가 느와르 닉네임('붉은총잡이' 등)을 중복 없이 붙여 준다 (user.nickname 으로 돌아온다). 로비 · 계정 창에서 언제든 바꿀 수 있다.
+ * 닉네임 중복 확인 (가입 화면) → { ok: true, nickname, available } | { ok: false, error, message }
+ * 형식 · 비속어는 보내기 전에 여기서 거른다.
  */
-export async function signUp({ username, password, nickname = '' }, { session = userSession, ...opts } = {}) {
+export async function checkNickname(nickname, opts = {}) {
+  const n = checkNewNickname(nickname);
+  if (!n.ok) return badNickname(n.reason);
+  const res = await post('nickname', { nickname: n.nickname }, opts);
+  if (!res.ok) return { ...res, message: res.reason ? NEW_NICK_TEXT[res.reason] : accountErrorText(res.error, res) };
+  return { ok: true, nickname: n.nickname, available: res.available === true };
+}
+
+/** 회원가입 (아이디 · 비밀번호 · 닉네임 모두 필수) → { ok: true, user, me } | { ok: false, error, message } (성공하면 바로 로그인 상태) */
+export async function signUp({ username, password, nickname }, { session = userSession, ...opts } = {}) {
   const u = validateUsername(username);
   if (!u.ok) return failed('INVALID_USERNAME', nicknameErrorText(u.reason));
   const p = validatePassword(password);
   if (!p.ok) return failed('INVALID_PASSWORD', nicknameErrorText(p.reason));
-  const body = { username: u.username, password: p.password };
-  if (typeof nickname === 'string' && nickname !== '') {
-    const n = validateNickname(nickname);
-    if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
-    body.nickname = n.nickname;
-  }
-  return keep(await post('signup', body, opts), session);
+  const n = checkNewNickname(nickname);
+  if (!n.ok) return badNickname(n.reason);
+  return keep(await post('signup', { username: u.username, password: p.password, nickname: n.nickname }, opts), session);
 }
 
 /** 로그인 → { ok: true, user, me } | { ok: false, error, message } */
@@ -131,9 +140,10 @@ export function requireLogin(session = userSession, message = ACCOUNT_ERROR_TEXT
 /** 닉네임 변경 (로그인 중) → { ok: true, user, unchanged? } | { ok: false, error, message } */
 export async function changeNickname(nickname, { session = userSession, ...opts } = {}) {
   if (!session.isLoggedIn) return failed('NOT_LOGGED_IN');
-  const n = validateNickname(nickname);
-  if (!n.ok) return failed('INVALID_NICKNAME', nicknameErrorText(n.reason));
-  if (n.nickname === session.user.nickname) return { ok: true, unchanged: true, user: session.user };
+  // 지금 쓰는 이름 그대로면 서버에 묻지 않는다 (예전 규칙으로 만든 닉네임도 오류로 보이지 않게)
+  if (typeof nickname === 'string' && nickname.normalize('NFC').trim() === session.user.nickname) return { ok: true, unchanged: true, user: session.user };
+  const n = checkNewNickname(nickname);
+  if (!n.ok) return badNickname(n.reason);
   const res = await post('rename', { token: session.token, nickname: n.nickname }, opts);
   if (!res.ok) {
     if (res.error === 'AUTH_REQUIRED') requireLogin(session);

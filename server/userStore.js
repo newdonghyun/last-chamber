@@ -3,7 +3,8 @@
  *
  *   계정 하나 = players 행 하나 (user_id 는 서버가 가입 때 만든 UUID):
  *     { id, username, nickname, passwordHash, wins, losses, streak, maxStreak, mmr, createdAt, updatedAt, lastSeenAt }   (시각은 ms)
- *   · 회원가입 signup({ username, password, nickname }) — 아이디 · 닉네임이 다른 계정과 겹치면 USERNAME_TAKEN / NICKNAME_TAKEN. 비밀번호는 해시만(server/auth.js)
+ *   · 회원가입 signup({ username, password, nickname }) — 아이디 · 닉네임(대소문자 구분 없음)이 다른 계정과 겹치면 USERNAME_TAKEN / NICKNAME_TAKEN. 비밀번호는 해시만(server/auth.js)
+ *   · 중복 확인 checkNickname(nickname) — 가입 화면이 입력하는 동안 묻는다 → { ok, available }
  *   · 로그인 login({ username, password }) — 맞으면 그 계정(전적 그대로) · 틀리면 BAD_CREDENTIALS (아이디가 없는지 비밀번호가 틀렸는지는 알려 주지 않는다)
  *   · 자동 로그인 authenticate(token) — server/auth.js 의 로그인 토큰을 그 계정의 비밀번호 해시로 확인 → 계정 | null
  *   · 닉네임 변경 rename(id, nickname) — 다른 계정이 쓰는 닉네임이면 NICKNAME_TAKEN, 아니면 players 를 바로 UPDATE
@@ -26,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { hashPassword, verifyPassword, isPasswordHash, readToken, verifyToken, cleanUsername } from './auth.js';
-import { noirNickname } from './nicknames.js';
+import { nicknameKey } from '../src/engine/nicknameRules.js';
 import { WALLET_COLUMNS, walletToRow, walletFromRow, normalizeWallet, defaultWallet } from './wallet.js';
 
 // ── Supabase 접속 정보: 환경 변수가 없으면 기본값 ──
@@ -63,11 +64,6 @@ async function connectSupabase(url, key) {
 
 /** 유저 ID = UUID (소문자 16진수, RFC 4122 변형) */
 export const USER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-/** 닉네임 규칙: 2~10자 · 공백 없음 · 글자/숫자와 ( _ . - · ) — 클라이언트 src/ui/session.js validateNickname 과 같다 */
-export const NICK_RULE = Object.freeze({ min: 2, max: 10 });
-const NICK_CHARS = /^[\p{L}\p{N}_.\-·]+$/u;
-const HAS_WORD = /[\p{L}\p{N}]/u;
-const INVISIBLE_LETTERS = /[ᅟᅠㅤﾠ]/u; // 글자로 분류되지만 보이지 않는 한글 채움 문자
 const MAX_COUNT = 9_999_999;
 /** 서버 랭킹 점수 (players.mmr) */
 export const MMR_RULE = Object.freeze({ start: 1000, win: 25, loss: 20 });
@@ -76,17 +72,16 @@ const COLUMNS = 'user_id, nickname, wins, losses, streak, max_streak, mmr';
 const ACCOUNT_COLUMNS = `${COLUMNS}, username, password_hash`;
 /**
  * players 에 계정을 쓰려면 한 번 실행할 SQL (Supabase 대시보드 → SQL Editor).
- * 아이디는 하나뿐 · 닉네임은 계정끼리 하나뿐 (계정이 아닌 예전 행은 그대로 둔다) · 예전 PIN 컬럼 · 인덱스는 지운다
+ * 아이디는 하나뿐 · 닉네임은 계정끼리 대소문자 구분 없이 하나뿐 — lower(nickname) unique 인덱스 (계정이 아닌 예전 행은 그대로 둔다) · 예전 PIN 컬럼 · 인덱스는 지운다
  */
 export const ACCOUNT_SQL = [
   'alter table public.players add column if not exists username text;',
   'alter table public.players add column if not exists password_hash text;',
   'create unique index if not exists players_username_key on public.players (username);',
-  'create unique index if not exists players_account_nickname_key on public.players (nickname) where username is not null;',
+  'create unique index if not exists players_nickname_lower_key on public.players (lower(nickname)) where username is not null;',
   'drop index if exists public.players_nickname_pin_key;',
   'alter table public.players drop column if exists pin_hash;',
 ].join('\n');
-const AUTO_NICK_TRIES = 4; // 자동 닉네임이 unique 인덱스에서 겹쳤을 때 다시 뽑는 최대 횟수
 /** 서버 지갑(탄피 · 스킨 · 출석 · 긴급 보급) 컬럼 — Supabase SQL Editor 에서 한 번 실행한다. 기존 행은 기본값(탄피 300 · 기본 스킨)으로 채워진다 */
 export const WALLET_SQL = [
   'alter table public.players add column if not exists shells integer not null default 300;',
@@ -107,16 +102,6 @@ export const USER_DEFAULTS = Object.freeze({ maxUsers: 50_000, saveDelayMs: 1000
 export function cleanUserId(raw) {
   const id = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   return USER_ID_PATTERN.test(id) ? id : null;
-}
-
-/** 닉네임 검사 (NFC 정규화 · 앞뒤 공백 제거) → 닉네임 | null */
-export function cleanNickname(raw) {
-  if (typeof raw !== 'string' || raw.length > 64) return null;
-  const name = raw.normalize('NFC').trim();
-  const length = [...name].length;
-  if (length < NICK_RULE.min || length > NICK_RULE.max) return null;
-  if (/\s/u.test(name) || INVISIBLE_LETTERS.test(name) || !NICK_CHARS.test(name) || !HAS_WORD.test(name)) return null;
-  return name;
 }
 
 const count = (v) => (Number.isFinite(v) ? Math.min(MAX_COUNT, Math.max(0, Math.floor(v))) : 0);
@@ -196,7 +181,7 @@ const duplicateOf = (err) => {
  *   saveDelayMs 바뀐 뒤 파일에 쓰기까지 모으는 시간
  *   authSecret  로그인 토큰 서명에 섞는 서버 비밀 (환경 변수 AUTH_SECRET)
  *   now         시계 (테스트용)        onError(err)  읽기 · 쓰기 실패를 알린다 (서버는 계속 돈다)        log(...)  상태 로그
- * → { signup, login, authenticate, rename, ready, get, recordResult, recordMatch, getWallet, commitWallet, walletNow, leaderboard, health, publicView, size, flush, close }
+ * → { signup, checkNickname, login, authenticate, rename, ready, get, recordResult, recordMatch, getWallet, commitWallet, walletNow, leaderboard, health, publicView, size, flush, close }
  */
 export function createUserStore({
   file = null, db = null, maxUsers = USER_DEFAULTS.maxUsers, saveDelayMs = USER_DEFAULTS.saveDelayMs, authSecret = '',
@@ -204,7 +189,7 @@ export function createUserStore({
 } = {}) {
   const users = new Map(); // id → record (계정 · 캐시)
   const byUsername = new Map(); // 아이디 → id
-  const nickOwner = new Map(); // 계정 닉네임 → id
+  const nickOwner = new Map(); // 계정 닉네임(nicknameKey — 대소문자 무시) → id
   let dirty = false;
   let timer = null;
   let chain = Promise.resolve(); // 파일 쓰기는 한 번에 하나씩 차례로
@@ -214,7 +199,7 @@ export function createUserStore({
   const index = (rec) => {
     if (!rec.username) return;
     byUsername.set(rec.username, rec.id);
-    nickOwner.set(rec.nickname, rec.id);
+    nickOwner.set(nicknameKey(rec.nickname), rec.id);
   };
   function serial(task) {
     const run = serialChain.then(task);
@@ -294,7 +279,7 @@ export function createUserStore({
         const username = cleanUsername(row.username);
         if (!username) continue;
         byUsername.set(username, row.user_id);
-        nickOwner.set(row.nickname, row.user_id);
+        nickOwner.set(nicknameKey(row.nickname), row.user_id);
       }
       accountReady = true;
       log(`[DB] 계정 ${byUsername.size}개 확인 — 회원가입 · 로그인 사용 가능`);
@@ -410,14 +395,23 @@ export function createUserStore({
     return (res.data ?? []).length > 0;
   }
 
+  /** 다른 계정이 이 닉네임을 쓰는가 (대소문자 구분 없음) */
   async function nicknameTaken(nickname, exceptId) {
+    const key = nicknameKey(nickname);
     if (!client) {
-      const owner = nickOwner.get(nickname);
+      const owner = nickOwner.get(key);
       return Boolean(owner && owner !== exceptId);
     }
-    const res = check(await client.from(TABLE).select('user_id').eq('nickname', nickname).not('username', 'is', null).limit(5), `닉네임 확인(${nickname})`);
+    const pattern = nickname.replace(/[\\%_]/g, '\\$&'); // ilike 의 와일드카드를 글자 그대로
+    const res = check(await client.from(TABLE).select('user_id, nickname').ilike('nickname', pattern).not('username', 'is', null).limit(5), `닉네임 확인(${nickname})`);
     markDb(null);
-    return (res.data ?? []).some((row) => row.user_id !== exceptId);
+    return (res.data ?? []).some((row) => row.user_id !== exceptId && nicknameKey(row.nickname) === key);
+  }
+
+  /** 가입 화면의 중복 확인 → { ok: true, available } | { ok: false, error: 'ACCOUNT_SETUP_REQUIRED' } (nickname 은 검사한 값) */
+  async function checkNickname(nickname) {
+    if (!(await ensureAccounts())) return { ok: false, error: 'ACCOUNT_SETUP_REQUIRED' };
+    return { ok: true, available: !(await nicknameTaken(nickname, null)) };
   }
 
   if (file) load();
@@ -475,54 +469,37 @@ export function createUserStore({
 
   /**
    * 회원가입 (아이디 · 비밀번호 · 닉네임은 이미 검사한 값) → { ok: true, user } | { ok: false, error }
-   *   USERNAME_TAKEN · NICKNAME_TAKEN · ACCOUNT_SETUP_REQUIRED(DB 계정 컬럼 없음) · SERVER_BUSY(가득 참)
+   *   USERNAME_TAKEN · NICKNAME_TAKEN(대소문자 구분 없음) · ACCOUNT_SETUP_REQUIRED(DB 계정 컬럼 없음) · SERVER_BUSY(가득 참)
    */
-  async function signup({ username, password, nickname = null }) {
+  async function signup({ username, password, nickname }) {
     if (!(await ensureAccounts())) return { ok: false, error: 'ACCOUNT_SETUP_REQUIRED' };
-    const auto = nickname === null; // 닉네임을 비웠다 → 서버가 느와르 닉네임을 붙인다 (로비 · 계정 창에서 언제든 바꿀 수 있다)
-    return serial(async () => {
+    return serial(async () => { // 확인과 저장을 한 줄로 — 같은 닉네임 · 아이디로 동시에 눌러도 하나만 만들어진다
       if (await usernameTaken(username)) return { ok: false, error: 'USERNAME_TAKEN' };
-      if (!auto && (await nicknameTaken(nickname, null))) return { ok: false, error: 'NICKNAME_TAKEN' };
+      if (await nicknameTaken(nickname, null)) return { ok: false, error: 'NICKNAME_TAKEN' };
       if (users.size >= maxUsers) return { ok: false, error: 'SERVER_BUSY' };
       const t = now();
-      const passwordHash = await hashPassword(password);
-      for (let attempt = 0; attempt < AUTO_NICK_TRIES; attempt += 1) { // 직접 정한 닉네임은 한 번, 자동 닉네임은 겹치면 다시 뽑아 최대 AUTO_NICK_TRIES 번
-        const name = auto ? await freshNickname(attempt) : nickname;
-        if (!name) return { ok: false, error: 'SERVER_BUSY' };
-        const rec = {
-          id: randomUUID(), username, nickname: name, passwordHash,
-          wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t,
-        };
-        if (walletReady) rec.wallet = defaultWallet(statsOf(rec)); // 첫 지급 탄피 · 기본 스킨
-        if (client) {
-          try {
-            check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash, ...(rec.wallet ? walletToRow(rec.wallet) : {}) }), `회원가입(${username})`);
-            markDb(null);
-          } catch (err) {
-            const dup = duplicateOf(err); // 그새 같은 아이디 · 닉네임이 생겼다 (unique 인덱스)
-            if (dup === 'NICKNAME_TAKEN' && auto) continue; // 자동 닉네임이 그 사이 다른 가입과 겹쳤다 → 다시 뽑는다
-            if (dup) return { ok: false, error: dup };
-            throw err;
-          }
-          meta.set(rec.id, loadedMeta());
+      const rec = {
+        id: randomUUID(), username, nickname, passwordHash: await hashPassword(password),
+        wins: 0, losses: 0, streak: 0, maxStreak: 0, mmr: MMR_RULE.start, createdAt: t, updatedAt: t, lastSeenAt: t,
+      };
+      if (walletReady) rec.wallet = defaultWallet(statsOf(rec)); // 첫 지급 탄피 · 기본 스킨
+      if (client) {
+        try {
+          check(await client.from(TABLE).insert({ ...toRow(rec), username, password_hash: rec.passwordHash, ...(rec.wallet ? walletToRow(rec.wallet) : {}) }), `회원가입(${username})`);
+          markDb(null);
+        } catch (err) {
+          const dup = duplicateOf(err); // 그새 같은 아이디 · 닉네임이 생겼다 (unique 인덱스 — 다른 서버 인스턴스 등)
+          if (dup) return { ok: false, error: dup };
+          throw err;
         }
-        users.set(rec.id, rec);
-        index(rec);
-        board.at = -Infinity;
-        markDirty();
-        return { ok: true, user: rec };
+        meta.set(rec.id, loadedMeta());
       }
-      return { ok: false, error: 'NICKNAME_TAKEN' };
+      users.set(rec.id, rec);
+      index(rec);
+      board.at = -Infinity;
+      markDirty();
+      return { ok: true, user: rec };
     });
-  }
-
-  /** 아직 아무도 안 쓰는 느와르 닉네임 하나 (처음에는 숫자 없이, 겹치면 숫자를 붙여) — 못 찾으면 null */
-  async function freshNickname(round) {
-    for (let i = 0; i < 12; i += 1) {
-      const name = noirNickname(Math.random, { number: round > 0 || i >= 6 });
-      if (!(await nicknameTaken(name, null))) return name;
-    }
-    return null;
   }
 
   let dummyHash = null; // 없는 아이디도 같은 시간을 쓰게 (아이디가 있는지 응답 시간으로 알아내지 못하게)
@@ -598,10 +575,10 @@ export function createUserStore({
           throw err;
         }
       }
-      if (nickOwner.get(rec.nickname) === id) nickOwner.delete(rec.nickname);
+      if (nickOwner.get(nicknameKey(rec.nickname)) === id) nickOwner.delete(nicknameKey(rec.nickname));
       rec.nickname = nickname;
       rec.updatedAt = now();
-      nickOwner.set(nickname, id);
+      nickOwner.set(nicknameKey(nickname), id);
       board.at = -Infinity;
       markDirty();
       return { ok: true, user: rec };
@@ -693,6 +670,7 @@ export function createUserStore({
 
   return {
     signup,
+    checkNickname,
     login,
     authenticate,
     rename: renameAccount,

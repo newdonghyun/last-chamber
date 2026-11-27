@@ -1,10 +1,10 @@
 // 클라이언트 모듈 검증 (브라우저 없음): node tests/client.test.mjs
 //   1. 진동(platformBridge): 결정적인 이벤트 4종만 · 1회만 · 300ms 쿨타임 · 사소한 이벤트 무시 · 연타 없음 · 웹 진동은 짧은 한 번
-//   2. 닉네임 규칙(session.js validateNickname): 2~10자 · 공백 없음 · 보이지 않는 문자/이모지 금지 — 서버(userStore.cleanNickname)와 같은 판정
+//   2. 닉네임 규칙: 저장된 · 기존 닉네임(session.js validateNickname — 느슨) · 새로 정하는 닉네임(src/engine/nicknameRules.js — 한글 · 영문 · 숫자 2~10자 · 비속어 필터)
 //   3. 세션(UserSession): 서버가 준 토큰으로 로그인 · 자동 로그인(다시 읽기) · 닉네임 변경 · 로그아웃(아이디는 기본값으로) · 손님 · 예전(닉네임 · PIN) 세션 · 손상된 저장값
 //   4. 첫 화면 판단(sessionBoot.js): 로그인 토큰도 손님 표시도 없으면 html.needs-login
 //   6. 계정 API(accountApi): 회원가입 · 로그인 → 이 기기에 저장 (비밀번호는 저장 안 함) · 형식 검사 · 오류 문구 · 토큰 만료 → 다시 로그인 · 닉네임 변경 · 아이디/비밀번호 규칙이 서버와 같다
-//   9. 5초 가입 · 첫 판 가이드 · 초대 링크 · 서버 깨우기: invite.js · wake.js · guide.js · signUp(닉네임 생략) · 화면 연결(index.html · multiplayer.js · app.js)
+//   9. 가입(닉네임 직접 입력 · 중복 확인) · 첫 판 가이드 · 초대 링크 · 서버 깨우기: invite.js · wake.js · guide.js · accountApi.js · 화면 연결(index.html · multiplayer.js · app.js)
 //  10. 서버 지갑 거울(walletClient · PlayerProfile.adoptWallet) · 무효/서버 보상 결과 · 매칭 대기 15초 안내 · 로비 출석/긴급 보급/안내문 · 모바일 터치 값(격발 버튼 간격 16px · 0.35초 잠금 · 상단 버튼 40px)
 //   8. 소리 출력 지점 감사: Web Audio 는 soundEngine.js 한 곳뿐 · <audio> · new Audio · 음성 합성 · 시스템 벨(\x07) 없음 · 앱의 소리 호출 가드(포커스 · 인게임 화면)
 //   7. 인게임 [항복] / [나가기]: app.js 가 쓰는 요소가 index.html 에 모두 있다 · 확인 모달 · AI 나가기는 전적 · MMR · 탄피를 기록하지 않는다 · 온라인 항복은 서버 요청뿐
@@ -14,9 +14,9 @@ import vm from 'node:vm';
 import { PlatformBridge, HAPTIC_COOLDOWN_MS } from '../src/platform/platformBridge.js';
 import { randomUUID } from 'node:crypto';
 import { UserSession, validateNickname, validateUsername, validatePassword, isUserId, SESSION_KEY } from '../src/ui/session.js';
-import { signUp, logIn, changeNickname, serverBase } from '../src/ui/accountApi.js';
+import { signUp, logIn, changeNickname, checkNickname, serverBase } from '../src/ui/accountApi.js';
 import { cleanUsername as serverUsername, cleanPassword as serverPassword } from '../server/auth.js';
-import { cleanNickname as serverNickname } from '../server/userStore.js';
+import { checkNewNickname, nicknameKey } from '../src/engine/nicknameRules.js';
 import { PlayerProfile, STORAGE_KEY, MMR as CLIENT_MMR, REWARD } from '../src/ui/storeData.js';
 import { parseInviteCode, buildInviteLink, rememberInvite, peekInvite, clearInvite, cleanInviteUrl, captureInvite, INVITE_KEY } from '../src/ui/invite.js';
 import { retryUntil } from '../src/ui/wake.js';
@@ -126,9 +126,19 @@ function memoryStorage(initial = {}) {
   for (const [raw, good, want] of cases) {
     const res = validateNickname(raw);
     eq(good ? [res.ok, res.nickname] : [res.ok, res.reason], [good, want], `2 닉네임 ${JSON.stringify(raw)}`);
-    const server = serverNickname(raw);
-    ok(good ? server === want : server === null, `2 서버도 같은 판정 ${JSON.stringify(raw)} (server: ${JSON.stringify(server)})`);
   }
+
+  // 새로 정하는 닉네임 (가입 · 변경 — 서버와 화면이 같은 파일)
+  const verdict = (raw) => { const r = checkNewNickname(raw); return r.ok ? r.nickname : r.reason; };
+  eq(['방랑자', '  Ace7 ', 'ab', '123456', '가나다라마바사아자차', '총잡이2', 'DealerKim'].map(verdict), ['방랑자', 'Ace7', 'ab', '123456', '가나다라마바사아자차', '총잡이2', 'DealerKim'], '2 새 닉네임: 한글 · 영문 · 숫자 2~10자 (앞뒤 공백은 뗀다)');
+  const wrongForm = ['a', '가', '가나다라마바사아자차카', '방 랑자', 'Ace_7', 'a.b', '이름!', 'ㅋㅋ', 'ㅏㅏ', '漢字', 'こんにちは', '😀😀', '<b>x</b>', 'ab​', 'ㅤㅤ', 'x'.repeat(80)];
+  eq(wrongForm.map(verdict), wrongForm.map(() => 'format'), '2 새 닉네임: 공백 · 특수문자 · 낱자모 · 다른 문자 · 길이 위반은 format');
+  eq(['', '   ', undefined, null, 12345, { a: 1 }].map(verdict), ['empty', 'empty', 'empty', 'empty', 'empty', 'empty'], '2 새 닉네임: 비었거나 문자열이 아니면 empty');
+  const rude = ['시발', '씨발놈', '시1발', '개새끼', '병신1', '존나좋아', 'ㅤ지랄', 'FuckYou', 'f4ggot', 'sh1t', 'sibal', 'porn99', 'sex', 'ass', '운영자', '관리자1', 'admin', 'Admin99', 'GM', '진짜운영자'];
+  eq(rude.filter((n) => !['banned', 'format'].includes(verdict(n))), [], '2 새 닉네임: 욕설 · 비속어 · 운영자 사칭은 걸러진다 (숫자 섞기 · 대소문자 우회 포함)');
+  const innocent = ['grape', 'peacock', 'classic', 'badminton', 'Sussex', '시바견', '발전소', 'Gunner', '새벽딜러', '카드왕', '총알', 'analyst', 'title', 'cumin'];
+  eq(innocent.map(verdict), innocent, '2 새 닉네임: 비슷해 보이는 평범한 말은 막지 않는다');
+  eq([nicknameKey('AbC가'), nicknameKey('abc가') === nicknameKey('ABC가')], ['abc가', true], '2 중복 비교는 대소문자를 구분하지 않는다');
 }
 
 // ───────── 3. 세션 ─────────
@@ -272,7 +282,7 @@ function memoryStorage(initial = {}) {
   const other = new UserSession({ storage: memoryStorage() });
   const taken = await signUp({ username: 'gunner', password: 'secret-pass1', nickname: '다른이름' }, { session: other, base: 'http://srv', fetchImpl: reply(409, { ok: false, error: 'USERNAME_TAKEN' }) });
   const nickTaken = await signUp({ username: 'gunner2', password: 'secret-pass1', nickname: '총잡이' }, { session: other, base: 'http://srv', fetchImpl: reply(409, { ok: false, error: 'NICKNAME_TAKEN' }) });
-  eq([taken.message, nickTaken.message, other.isLoggedIn], ['이미 사용 중인 아이디예요.', '이미 사용 중인 닉네임이에요.', false], '6 중복 아이디 · 닉네임 안내 (로그인하지 않는다)');
+  eq([taken.message, nickTaken.message, other.isLoggedIn], ['이미 사용 중인 아이디예요.', '이미 사용 중인 닉네임입니다. 다른 닉네임을 입력해 주세요.', false], '6 중복 아이디 · 닉네임 안내 (로그인하지 않는다)');
   const wrong = await logIn({ username: 'gunner', password: 'nope-nope' }, { session: other, base: 'http://srv', fetchImpl: reply(401, { ok: false, error: 'BAD_CREDENTIALS' }) });
   const locked = await logIn({ username: 'gunner', password: 'nope-nope' }, { session: other, base: 'http://srv', fetchImpl: reply(429, { ok: false, error: 'LOGIN_LOCKED', retryAfterSec: 600 }) });
   eq([wrong.message, /10분 뒤/.test(locked.message)], ['아이디 또는 비밀번호가 맞지 않아요.', true], '6 틀린 비밀번호 · 잠금 안내');
@@ -284,7 +294,7 @@ function memoryStorage(initial = {}) {
   const renamedOk = await changeNickname('바뀐이름', { session: fresh, base: 'http://srv', fetchImpl: reply(200, { ok: true, nickname: '바뀐이름' }) });
   eq([renamedOk.ok, fresh.user.nickname, calls.at(-1).url, calls.at(-1).body], [true, '바뀐이름', 'http://srv/api/rename', { token: tok, nickname: '바뀐이름' }], '6 닉네임 변경: 토큰과 함께 서버에서 바꾼 뒤 이 기기에도');
   const renamedNo = await changeNickname('남의이름', { session: fresh, base: 'http://srv', fetchImpl: reply(409, { ok: false, error: 'NICKNAME_TAKEN' }) });
-  eq([renamedNo.ok, renamedNo.message, fresh.user.nickname], [false, '이미 사용 중인 닉네임이에요.', '바뀐이름'], '6 다른 계정의 닉네임으로는 바뀌지 않는다');
+  eq([renamedNo.ok, renamedNo.message, fresh.user.nickname], [false, '이미 사용 중인 닉네임입니다. 다른 닉네임을 입력해 주세요.', '바뀐이름'], '6 다른 계정의 닉네임으로는 바뀌지 않는다');
   const asked = [];
   globalThis.window = { dispatchEvent: (e) => asked.push(e.type) };
   const expired = await changeNickname('새닉네임', { session: fresh, base: 'http://srv', fetchImpl: reply(401, { ok: false, error: 'AUTH_REQUIRED' }) });
@@ -429,18 +439,35 @@ function memoryStorage(initial = {}) {
     eq([GUIDED_TURN_MS > 20_000, RULE_LINES.length, COACH_STEPS.map((s) => s.target)], [true, 3, ['shells', 'trigger-panel', 'player-items', 'player-hp']], '9 첫 판 턴 제한은 보통(20초)보다 길다 · 3줄 룰 · 코치마크 4단계(잔탄 · 격발 · 아이템 · 체력)');
   }
 
-  // 닉네임 없는 가입 (accountApi.signUp)
+  // 닉네임 직접 입력 가입 · 중복 확인 (accountApi.signUp · checkNickname)
   {
     const sent = [];
-    const fetchImpl = async (url, init) => { sent.push({ url, body: JSON.parse(init.body) }); return { ok: true, status: 200, json: async () => ({ ok: true, token: `t1.00000000-0000-4000-8000-000000000000.1800000000.${'c'.repeat(43)}`, user_id: '00000000-0000-4000-8000-000000000000', username: 'quick5', nickname: '붉은총잡이', me: null }) }; };
+    const reply = (body, status = 200) => async (url, init) => { sent.push({ url, body: JSON.parse(init.body) }); return { ok: status < 400, status, json: async () => body }; };
+    const account = { ok: true, token: `t1.00000000-0000-4000-8000-000000000000.1800000000.${'c'.repeat(43)}`, user_id: '00000000-0000-4000-8000-000000000000', username: 'quick5', nickname: '직접정함', me: null };
     const session = new UserSession({ storage: store() });
-    const res = await signUp({ username: 'quick5', password: 'secret12' }, { session, base: 'http://srv', fetchImpl });
-    eq([res.ok, sent[0].body, res.user?.nickname, session.isLoggedIn], [true, { username: 'quick5', password: 'secret12' }, '붉은총잡이', true], '9 아이디 · 비밀번호만 보낸다 (닉네임은 서버가 붙여 주고, 가입 즉시 로그인 상태)');
-    const explicit = await signUp({ username: 'quick6', password: 'secret12', nickname: '직접정함' }, { session: new UserSession({ storage: store() }), base: 'http://srv', fetchImpl });
-    eq([explicit.ok, sent[1].body.nickname], [true, '직접정함'], '9 닉네임을 주면 그대로 보낸다 (기존 호출 호환)');
+    const res = await signUp({ username: 'quick5', password: 'secret12', nickname: ' 직접정함 ' }, { session, base: 'http://srv', fetchImpl: reply(account) });
+    eq([res.ok, sent[0].body, res.user?.nickname, session.isLoggedIn], [true, { username: 'quick5', password: 'secret12', nickname: '직접정함' }, '직접정함', true], '9 직접 정한 닉네임을 보내고, 가입 즉시 로그인 상태');
     const before = sent.length;
-    const bad = await signUp({ username: 'quick7', password: 'secret12', nickname: 'a' }, { session: new UserSession({ storage: store() }), base: 'http://srv', fetchImpl });
-    eq([bad.ok, bad.error, sent.length], [false, 'INVALID_NICKNAME', before], '9 잘못된 닉네임을 직접 주면 요청 전에 거절');
+    const refused = [];
+    for (const nickname of [undefined, '', 'a', 'Ace_7', '시발']) refused.push(await signUp({ username: 'quick7', password: 'secret12', nickname }, { session: new UserSession({ storage: store() }), base: 'http://srv', fetchImpl: reply(account) }));
+    eq([refused.map((r) => r.error), sent.length], [Array(5).fill('INVALID_NICKNAME'), before], '9 닉네임이 없거나 규칙에 안 맞으면 요청 전에 거절');
+    eq([refused[2].message, refused[3].message], ['2~10자의 한글, 영문, 숫자만 사용할 수 있습니다.', '2~10자의 한글, 영문, 숫자만 사용할 수 있습니다.'], '9 형식 오류 안내문');
+
+    const free = await checkNickname('새이름', { base: 'http://srv', fetchImpl: reply({ ok: true, nickname: '새이름', available: true }) });
+    eq([free.ok, free.available, sent.at(-1).url, sent.at(-1).body], [true, true, 'http://srv/api/nickname', { nickname: '새이름' }], '9 중복 확인: POST /api/nickname');
+    eq((await checkNickname('남의이름', { base: 'http://srv', fetchImpl: reply({ ok: true, available: false }) })).available, false, '9 중복 확인: 이미 있으면 available false');
+    const asked = sent.length;
+    const local = await checkNickname('a b', { base: 'http://srv', fetchImpl: reply({ ok: true, available: true }) });
+    eq([local.ok, local.error, sent.length], [false, 'INVALID_NICKNAME', asked], '9 중복 확인: 형식이 틀리면 서버에 묻지 않는다');
+    const down = await checkNickname('새이름', { base: 'http://srv', fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
+    const flood = await checkNickname('새이름', { base: 'http://srv', fetchImpl: reply({ ok: false, error: 'RATE_LIMITED' }, 429) });
+    eq([down.ok, down.error, flood.ok, flood.error], [false, 'OFFLINE', false, 'RATE_LIMITED'], '9 중복 확인: 연결 실패 · 요청 과다는 오류로 (사용 가능으로 치지 않는다)');
+
+    // 예전 규칙(_ . - ·)으로 만든 계정은 그대로 로그인 · 저장되고, 같은 이름 저장은 오류가 아니다
+    const oldSession = new UserSession({ storage: store() });
+    const old = await logIn({ username: 'quick5', password: 'secret12' }, { session: oldSession, base: 'http://srv', fetchImpl: reply({ ...account, nickname: 'Old_Ace' }) });
+    const same = await changeNickname('Old_Ace', { session: oldSession, base: 'http://srv', fetchImpl: reply({ ok: false, error: 'SERVER_ERROR' }, 500) });
+    eq([old.ok, oldSession.user?.nickname, oldSession.isLoggedIn, same.ok, same.unchanged], [true, 'Old_Ace', true, true, true], '9 예전 닉네임 계정: 로그인 유지 · 그대로 저장해도 통과');
   }
 
   // 화면 연결 (정적 점검)
@@ -448,7 +475,9 @@ function memoryStorage(initial = {}) {
     const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const gateHtml = html.slice(html.indexOf('id="login-modal"'), html.indexOf('id="account-modal"'));
     ok(/id="tab-signup"[^>]*aria-selected="true"/.test(gateHtml) && /id="tab-login"[^>]*aria-selected="false"/.test(gateHtml) && /id="login-form"[^>]*data-mode="signup"/.test(gateHtml), '9 처음 열리는 탭은 회원가입');
-    ok(!/id="login-pass2"|id="login-nick"|login-signup-fields/.test(gateHtml), '9 가입 입력칸은 아이디 · 비밀번호 두 칸뿐 (확인 · 닉네임 칸 없음)');
+    ok(!/id="login-pass2"/.test(gateHtml) && /id="login-nick"[^>]*maxlength="10"/.test(gateHtml) && /id="login-nick-state"[^>]*aria-live="polite"/.test(gateHtml) && gateHtml.indexOf('id="login-pass"') < gateHtml.indexOf('id="login-nick"'), '9 가입 입력칸: 아이디 · 비밀번호 · 닉네임 + 확인 결과 줄');
+    const gateCss = readFileSync(new URL('../src/ui/loginGate.css', import.meta.url), 'utf8');
+    ok(/\.login-form\[data-mode="login"\] \.login-nick \{ display: none; \}/.test(gateCss) && /\.login-nick-state\.is-ok/.test(gateCss) && /\.login-nick-state\.is-bad/.test(gateCss) && /\.login-submit:disabled/.test(gateCss), '9 닉네임 칸은 회원가입에서만 · 초록/빨강 결과 · 비활성 버튼 모양');
     ok(/id="login-eye"[^>]*aria-pressed="false"/.test(gateHtml) && /id="login-eye-icon"/.test(gateHtml) && /id="i-eye"/.test(html) && /id="i-eye-off"/.test(html), '9 비밀번호 보기 / 숨기기 눈 아이콘 토글');
     ok(/id="login-guest"[^>]*>[^<]*AI 맛보기/.test(gateHtml), '9 하단 버튼은 "로그인 없이 AI 맛보기"');
     ok(/id="trigger-panel"/.test(html) && /id="first-rules"/.test(html) && /<dialog[^>]*id="coach"/.test(html), '9 3줄 룰 카드 · 코치마크 요소와 짚을 대상(#trigger-panel)이 있다');
@@ -461,7 +490,8 @@ function memoryStorage(initial = {}) {
     ok(!/addEventListener\(\s*'(blur|focus|visibilitychange|beforeunload|pageshow|freeze)'/.test(lobby) && !lobby.includes('lastchamber:halt'), '9 로비는 blur · visibility · focus · beforeunload 에 아무것도 하지 않는다');
     ok(lobby.includes("window.addEventListener('pagehide', (e) => { if (!e.persisted) leavePage(); });") && /request\('resume_room'/.test(lobby) && /res\.hostedRoom/.test(lobby) && /userSession\.isGuest\)[\s\S]{0,80}lastchamber:need-login/.test(lobby), '9 실제 종료에만 정리 · 재연결 · 기존 방 복구는 resume_room · 손님은 로그인 화면으로');
     const gate = readFileSync(new URL('../src/ui/loginGate.js', import.meta.url), 'utf8');
-    ok(/lastchamber:signed-in/.test(gate) && !/nickname: gate\.nick/.test(gate) && /signUp\(\{ username: gate\.user\.value, password: gate\.pass\.value \}\)/.test(gate), '9 가입은 아이디 · 비밀번호만 보내고, 성공하면 signed-in 이벤트를 낸다');
+    ok(/lastchamber:signed-in/.test(gate) && /signUp\(\{ username: gate\.user\.value, password: gate\.pass\.value, nickname: gate\.nick\.value \}\)/.test(gate), '9 가입은 닉네임까지 보내고, 성공하면 signed-in 이벤트를 낸다');
+    ok(/NICK_CHECK_DELAY_MS = 400/.test(gate) && /gate\.submit\.disabled = gateBusy \|\| \(mode === 'signup' && nick\.state !== 'ok'\)/.test(gate) && /seq !== nick\.seq/.test(gate), '9 400ms 뒤 중복 확인 · 통과해야 [회원가입] · 늦은 응답은 무시');
     const app = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
     ok(/const turnLimit = \(\) => \(online \? TURN_MS : guidedGame \? GUIDED_TURN_MS : TURN_MS\)/.test(app) && /el\.coach\.open/.test(app), '9 첫 AI 판만 턴 제한이 길고, 코치마크가 열려 있는 동안 시간이 멈춘다 (온라인은 서버의 20초 그대로)');
     ok(/guide\.shouldCoach\(\{ online \}\) && !coaching/.test(app) && /guide\.markCoachDone\(\)/.test(app) && /guide\.markRuleCard\(\)/.test(app), '9 코치마크는 첫 AI 판 내 첫 턴에 한 번 · 끝(건너뛰기 포함)이면 기록');

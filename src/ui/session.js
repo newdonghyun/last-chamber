@@ -6,7 +6,8 @@
  *     비밀번호는 저장하지 않는다. 토큰은 서버(server/auth.js)가 서명한 것이라 서버가 확인한다 (틀리거나 만료되면 다시 로그인).
  *   · 손님(둘러보기): 로그인 없이 AI 딜러 연습만 — continueAsGuest() 로 기억해 두면 다음에도 로그인 화면 없이 타이틀로 (온라인 대전은 로그인해야 열린다).
  *   · 로그아웃은 토큰을 지운다 (아이디는 남겨 다음 로그인 화면의 기본값으로).
- *   · 닉네임 규칙(validateNickname): 2~10자 · 공백 없음 · 글자/숫자와 ( _ . - · ) 만 — 서버(server/userStore.js cleanNickname)와 같은 규칙
+ *   · validateNickname: 이미 있는 닉네임(저장된 세션 · 서버가 알려 준 값)용 느슨한 규칙 — 2~10자 · 공백 없음 · 글자/숫자와 ( _ . - · ) — 예전 규칙으로 만든 계정이 로그아웃되지 않게.
+ *     새로 정하는 닉네임(가입 · 변경)은 더 엄격한 src/engine/nicknameRules.js checkNewNickname.
  *     아이디 규칙(validateUsername): 영문 소문자 · 숫자 · _ 4~16자 · 비밀번호(validatePassword): 6~64자 — 서버(server/auth.js)와 같은 규칙
  *   · 저장 형식 (localStorage 'lastchamber.session'):  { v: 3, token, id, username, nickname, loggedIn, guest, loginAt }
  *     예전 형식(v1 닉네임만 · v2 PIN)은 토큰이 없으므로 로그아웃 상태로 읽는다 (예전 닉네임은 가입 화면의 기본값으로만).
@@ -23,9 +24,11 @@
  *     userSession.subscribe(fn)     → 해제 함수. fn(user | null) 은 로그인 · 닉네임 변경 · 로그아웃 · 손님 · reload(다른 탭의 변경) 때마다 불린다
  */
 
+import { NEW_NICK_HINT } from '../engine/nicknameRules.js';
+
 export const SESSION_KEY = 'lastchamber.session';
 export const NICK_RULE = Object.freeze({ min: 2, max: 10 });
-export const NICK_HINT = `${NICK_RULE.min}~${NICK_RULE.max}자 · 공백 없이 · 한글 · 영문 · 숫자 · ( _ . - · )`;
+export const NICK_HINT = NEW_NICK_HINT; // 닉네임을 새로 정하는 칸의 안내문
 export const USERNAME_RULE = Object.freeze({ min: 4, max: 16 });
 export const USERNAME_HINT = `영문 소문자 · 숫자 · _ ${USERNAME_RULE.min}~${USERNAME_RULE.max}자`;
 export const PASSWORD_RULE = Object.freeze({ min: 6, max: 64 });

@@ -12,8 +12,9 @@
  *   · 프로필 · 코스메틱 · 이모트는 상대 화면에 그려지는 값이라 서버가 모양을 검사해 걸러서 넘긴다. 이벤트는 소켓당 초당 30개까지.
  *
  *   ── 계정 (HTTP · JSON) ── 오류: { ok: false, error } + HTTP 상태(API_STATUS)
- *   POST /api/signup { username, password, nickname? } 회원가입 → { ok, token, user_id, username, nickname, me }   USERNAME_TAKEN · NICKNAME_TAKEN · INVALID_*
- *     nickname 을 빼면(또는 빈 값) 서버가 '붉은총잡이' 같은 느와르 닉네임을 중복 없이 붙여 돌려준다 — 나중에 /api/rename 으로 바꿀 수 있다 (server/nicknames.js)
+ *   POST /api/signup { username, password, nickname }  회원가입 → { ok, token, user_id, username, nickname, me }   USERNAME_TAKEN · NICKNAME_TAKEN · INVALID_*
+ *     nickname 은 필수 — 한글 · 영문 · 숫자 2~10자, 비속어 불가 (src/engine/nicknameRules.js). 대소문자 구분 없이 중복이면 NICKNAME_TAKEN
+ *   POST /api/nickname { nickname }                     가입 화면의 중복 확인 → { ok, nickname, available }   INVALID_NICKNAME · RATE_LIMITED
  *   POST /api/login  { username, password }             로그인   → 같은 모양   BAD_CREDENTIALS(아이디가 없거나 비밀번호가 틀림) · LOGIN_LOCKED(5번 틀리면 15분)
  *   POST /api/rename { token, nickname }                닉네임 변경 (players 바로 UPDATE) → { ok, nickname, me }   NICKNAME_TAKEN · AUTH_REQUIRED
  *     token = 로그인 토큰(server/auth.js) — 클라이언트가 localStorage 에 두고 자동 로그인에 쓴다. 비밀번호는 해시로만 저장한다.
@@ -97,12 +98,13 @@ import express from 'express';
 import { Server } from 'socket.io';
 import { createRoomManager, fail, cleanProfile, ROOM_DEFAULTS, TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, LOBBY_CHANNEL } from './roomManager.js';
 import { createMatchmaker, QUEUE_TIERS } from './matchmaker.js';
-import { createUserStore, cleanNickname, supabaseOrigin, NICK_RULE as USER_NICK_RULE, USER_DEFAULTS } from './userStore.js';
+import { createUserStore, supabaseOrigin, USER_DEFAULTS } from './userStore.js';
 import { cleanUsername, cleanPassword, issueToken, createLoginLimiter, createWindowLimiter, LOGIN_LIMITS } from './auth.js';
+import { checkNewNickname } from '../src/engine/nicknameRules.js';
 import { runStoreAction, checkIn, claimEmergency, claimPractice, walletView, walletStatus, grantBrass, spendBrass } from './wallet.js';
 
 // 테스트 · 이후 단계가 server/index.js 하나만 import 해도 되도록 규칙 상수와 프로필 검사기를 그대로 다시 내보낸다
-export { TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, QUEUE_TIERS, USER_NICK_RULE, cleanProfile };
+export { TURN_MS, GRACE_MS, ROOM_TTL_MS, RESULT_TTL_MS, QUEUE_TIERS, cleanProfile };
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -125,6 +127,7 @@ const SERVER_DEFAULTS = {
   walletRatePer10s: 40, // 계정당 지갑 요청 (10초 안에)
   signupPer10Min: 10, // IP 당 가입 시도 (10분)
   signupPerDay: 40, // IP 당 가입 시도 (하루)
+  nickChecksPerMinute: 60, // IP 당 닉네임 중복 확인 (1분) — 가입 화면에서 입력을 멈출 때마다 한 번
   roomsPerMinute: 12, // 계정당 방 만들기 · 매칭 요청 (1분)
   joinFailsPerMinute: 15, // 계정 · IP 당 '없는 방' 응답 (1분) — 4자리 방 코드 대입 방지
   maxSocketsPerIp: 60, // IP 당 동시 소켓 (봇 도배 방지 · 같은 공유기를 쓰는 사람들은 넉넉히)
@@ -311,6 +314,7 @@ export function createGameServer(options = {}) {
   const limiter = createLoginLimiter({ ...LOGIN_LIMITS, ...cfg.loginLimits }); // 아이디별 비밀번호 오답 잠금 · IP 별 시도 수
   const signupBurst = createWindowLimiter({ max: cfg.signupPer10Min, windowMs: 10 * 60_000 });
   const signupDaily = createWindowLimiter({ max: cfg.signupPerDay, windowMs: 24 * 3600_000 });
+  const nickChecks = createWindowLimiter({ max: cfg.nickChecksPerMinute, windowMs: 60_000 });
   const roomStarts = createWindowLimiter({ max: cfg.roomsPerMinute, windowMs: 60_000 });
   const joinMisses = createWindowLimiter({ max: cfg.joinFailsPerMinute, windowMs: 60_000 });
   const addressOf = (headers, remote) => clientAddress(headers, remote, cfg);
@@ -329,15 +333,23 @@ export function createGameServer(options = {}) {
     if (!username) return fail('INVALID_USERNAME');
     const password = cleanPassword(req.body?.password);
     if (!password) return fail('INVALID_PASSWORD');
-    const raw = req.body?.nickname;
-    const auto = raw === undefined || raw === null || raw === ''; // 닉네임을 안 보내면 서버가 느와르 닉네임을 붙인다 (5초 가입)
-    const nickname = auto ? null : cleanNickname(raw);
-    if (!auto && !nickname) return fail('INVALID_NICKNAME');
+    const checked = checkNewNickname(req.body?.nickname); // 닉네임은 필수 · 한글/영문/숫자 2~10자 · 비속어 불가
+    if (!checked.ok) return { ...fail('INVALID_NICKNAME'), reason: checked.reason };
+    const { nickname } = checked;
     if (!signupBurst.hit(ip) || !signupDaily.hit(ip)) return fail('RATE_LIMITED'); // 계정 도배(봇) 방지
     const res = await users.signup({ username, password, nickname });
     if (!res.ok) return fail(res.error);
     log('회원가입', username);
     return sessionOf(res.user);
+  }
+
+  /** POST /api/nickname { nickname } — 가입 화면의 중복 확인 (로그인 없이) → { ok, nickname, available } */
+  async function apiNickname(req) {
+    if (!nickChecks.hit(ipOfRequest(req))) return fail('RATE_LIMITED');
+    const checked = checkNewNickname(req.body?.nickname);
+    if (!checked.ok) return { ...fail('INVALID_NICKNAME'), reason: checked.reason };
+    const res = await users.checkNickname(checked.nickname);
+    return res.ok ? { ok: true, nickname: checked.nickname, available: res.available } : fail(res.error);
   }
 
   /** POST /api/login { username, password } */
@@ -362,8 +374,10 @@ export function createGameServer(options = {}) {
     if (!limiter.allowIp(ipOfRequest(req))) return fail('RATE_LIMITED');
     const rec = await users.authenticate(req.body?.token);
     if (!rec) return fail('AUTH_REQUIRED');
-    const nickname = cleanNickname(req.body?.nickname);
-    if (!nickname) return fail('INVALID_NICKNAME');
+    // 지금 쓰는 이름 그대로면 검사 없이 (예전 규칙으로 만든 닉네임 포함), 바꿀 때만 새 규칙
+    const checked = req.body?.nickname === rec.nickname ? { ok: true, nickname: rec.nickname } : checkNewNickname(req.body?.nickname);
+    if (!checked.ok) return { ...fail('INVALID_NICKNAME'), reason: checked.reason };
+    const { nickname } = checked;
     const res = await users.rename(rec.id, nickname);
     if (!res.ok) return fail(res.error);
     for (const socket of io.sockets.sockets.values()) if (socket.data.user?.id === rec.id) socket.data.user.nickname = nickname;
@@ -473,6 +487,7 @@ export function createGameServer(options = {}) {
   });
   app.use('/api', apiCors(cfg.corsOrigin), (req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); }, express.json({ limit: '2kb' }));
   app.post('/api/signup', (req, res) => respond(res, apiSignup(req)));
+  app.post('/api/nickname', (req, res) => respond(res, apiNickname(req)));
   app.post('/api/login', (req, res) => respond(res, apiLogin(req)));
   app.post('/api/rename', (req, res) => respond(res, apiRename(req)));
   app.post('/api/wallet', (req, res) => respond(res, apiWallet(req)));

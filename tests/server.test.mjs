@@ -9,7 +9,7 @@
 //   Phase 8 (공개 방): 로비 목록 실시간 · 손님 제한 · 자기 방 · 잘못된 입장 · 클릭 입장 즉시 시작(랭킹전) · 목록에서 빠짐 · 방장 이탈/끊김
 //   Phase 11 (서버 지갑): 지갑 API 검증(구매 · 장착 · 서버 상자) · 출석 7일 사이클(한국 시간 자정 · 날짜 위조 무시) · 긴급 보급 하루 3회 · 연습 보상 하루 5판 · DB 컬럼 저장/복원 · 지갑 컬럼 없는 DB 폴백
 //                (참가비 선결제 · 환불 · 상금 · 조기 종료 무효 · 같은 상대 하루 3판 제한 · 서버가 정한 스킨 표시 · 로비 접속자 통계)
-//   Phase 10 (5초 가입): 닉네임을 비우면 서버가 느와르 닉네임을 중복 없이 붙인다 (메모리 · Supabase 흉내 — 흔한 이름이 모두 찼을 때는 숫자) · 직접 정한 닉네임 호환 · 닉네임 생성기 규칙
+//   Phase 10 (닉네임): 가입 닉네임 필수 · 규칙 · 비속어 · 중복 확인 API · 대소문자 무시 중복 · 동시 가입 · DB unique 충돌 · 예전 닉네임 계정 호환
 //   Phase 9 (항복): 공개 방 · 빠른 매칭 항복 = 항복자 −20 · 상대 +25 를 DB 요청 하나로 정산 · 친선 비밀방은 기록 없음 · 중복 · 동시 항복 · 재접속 · 끊김 유예 중 항복 · 방 격리
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -19,8 +19,7 @@ import { join } from 'node:path';
 import { io as connect } from 'socket.io-client';
 import { createGameServer, QUEUE_TIERS, clientAddress } from '../server/index.js';
 import { roomChannel, ROOM_DEFAULTS } from '../server/roomManager.js';
-import { cleanNickname } from '../server/userStore.js';
-import { noirNickname, NOIR_ADJECTIVES, NOIR_NOUNS } from '../server/nicknames.js';
+import { ACCOUNT_SQL } from '../server/userStore.js';
 import { hashPassword, issueToken, TOKEN_TTL_SEC } from '../server/auth.js';
 
 const T0 = performance.now();
@@ -183,10 +182,10 @@ async function phase3() {
   eq([guestBoard.ok, guestBoard.me, (await guest.call('watch_rooms')).ok], [true, null, true], '16 손님도 TOP 10 · 로비 방 목록은 볼 수 있다');
 
   // 17. 랭킹전(빠른 매칭) 전적 · 상대에게 보이는 이름은 계정 닉네임 · 친선 비밀방은 미반영 · 같은 계정끼리는 미반영
-  const b = await signupVia(port, 'Ace_7', { username: 'ace7' });
+  const b = await signupVia(port, 'Ace7', { username: 'ace7' });
   const B = await client(port, { token: b.token });
   const [mA, mB] = await queueMatch(A, B);
-  eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname, mA.ranked], ['총잡이', 'Ace_7', true], '17 상대 이름표는 계정 닉네임 · 빠른 매칭 = 랭킹전');
+  eq([mB.opponent.profile.nickname, mA.opponent.profile.nickname, mA.ranked], ['총잡이', 'Ace7', true], '17 상대 이름표는 계정 닉네임 · 빠른 매칭 = 랭킹전');
   ok(![mA, mB].some((m) => JSON.stringify(m).includes(a.user_id) || JSON.stringify(m).includes(b.user_id)), '17 유저 ID 는 match_found 어디에도 실리지 않는다');
   const [overA, overB] = [A.waitFor('game_over', (p) => p.code === mA.code), B.waitFor('game_over', (p) => p.code === mA.code)];
   await finishRound1(A, B, mA.code);
@@ -252,7 +251,7 @@ function fakeSupabase(rows = [], { accountColumns = true, walletColumns = true }
     for (const r of table.values()) {
       if (r.user_id === row.user_id) continue;
       if (row.username && r.username === row.username) return dup('players_username_key');
-      if (row.username && r.username && r.nickname === row.nickname) return dup('players_account_nickname_key');
+      if (row.username && r.username && r.nickname.toLowerCase() === row.nickname?.toLowerCase()) return dup('players_nickname_lower_key'); // lower(nickname) unique 인덱스
     }
     return null;
   };
@@ -272,6 +271,12 @@ function fakeSupabase(rows = [], { accountColumns = true, walletColumns = true }
     const next = (more, sortMore = [], n = lim, col = '') => query([...filters, ...more], [...sorts, ...sortMore], n, bad || (!accountColumns && ACCOUNT.test(col)));
     return {
       eq: (c, v) => next([(r) => r[c] === v], [], lim, c),
+      ilike: (c, pattern) => { // % · _ 와일드카드 (\\ 로 이스케이프) · 대소문자 무시
+        const body = pattern.replace(/\\(.)|([%_])|([.*+?^${}()|[\]\\])/g, (m, lit, wild, special) => (lit !== undefined ? lit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : wild ? (wild === '%' ? '.*' : '.') : `\\${special}`));
+        const re = new RegExp(`^${body}$`, 'i');
+        calls.push(`ilike:${c}:${pattern}`);
+        return next([(r) => re.test(r[c] ?? '')], [], lim, c);
+      },
       not: (c, op, v) => next([(r) => !(op === 'is' && v === null ? r[c] == null : r[c] === v)], [], lim, c),
       or: (expr) => { calls.push(`or:${expr}`); return next([orFilter(expr)]); },
       order: (c, o = {}) => next([], [[c, o.ascending !== false]]),
@@ -702,55 +707,90 @@ async function phase9() {
   await server.stop();
 }
 
-// ───────── Phase 10: 5초 가입 (닉네임 자동 부여) ─────────
+// ───────── Phase 10: 닉네임 직접 입력 · 중복 확인 ─────────
 async function phase10() {
-  // 43. 생성기: 모든 조합이 닉네임 규칙(2~10자 · 한글 · 공백 없음)을 통과한다
-  const bases = NOIR_ADJECTIVES.flatMap((a) => NOIR_NOUNS.map((n) => a + n));
-  ok(bases.length === NOIR_ADJECTIVES.length * NOIR_NOUNS.length && new Set(bases).size === bases.length, '43 형용사 × 명사 조합이 모두 다르다 (겹치는 말 없음)');
-  ok(bases.every((n) => cleanNickname(n) === n), `43 모든 기본 조합(${bases.length}개)이 닉네임 규칙을 통과`);
-  const numbered = Array.from({ length: 2000 }, () => noirNickname(Math.random, { number: true }));
-  ok(numbered.every((n) => cleanNickname(n) === n && [...n].length <= 10 && /\d{2}$/.test(n)), '43 숫자를 붙인 이름도 규칙 안 (최대 10자 · 두 자리 숫자)');
-  eq(noirNickname(() => 0), NOIR_ADJECTIVES[0] + NOIR_NOUNS[0], '43 난수를 고정하면 같은 이름 (결정적)');
-
-  // 44. 메모리 서버: 닉네임 없이 가입 → 서버가 붙인다
-  const server = testServer({ quiet: true, onError });
+  const server = testServer({ quiet: true, onError, loginLimits: { maxPerIp: 1000 } });
   const port = await server.start(0, '127.0.0.1');
   const api = apiOf(port);
-  const made = [];
-  for (let i = 0; i < 6; i += 1) made.push(await api('signup', { username: nextName(), password: PASSWORD }));
-  ok(made.every((r) => r.ok && r.token && r.user_id), '44 닉네임 없이 가입 → 성공 · 토큰 · user_id');
-  ok(made.every((r) => cleanNickname(r.nickname) === r.nickname), '44 서버가 붙인 닉네임은 규칙에 맞는다');
-  eq(new Set(made.map((r) => r.nickname)).size, made.length, '44 서로 겹치지 않는다');
-  const blank = await api('signup', { username: nextName(), password: PASSWORD, nickname: '' });
-  const nul = await api('signup', { username: nextName(), password: PASSWORD, nickname: null });
-  ok(blank.ok && nul.ok && blank.nickname && nul.nickname, '44 닉네임이 빈 문자열 · null 이어도 자동 부여');
-  const picked = await api('signup', { username: nextName(), password: PASSWORD, nickname: 'Dealer7' });
-  eq([picked.ok, picked.nickname], [true, 'Dealer7'], '44 직접 정한 닉네임은 그대로 (기존 호출 호환)');
-  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: 'Dealer7' })).error, 'NICKNAME_TAKEN', '44 직접 정한 닉네임이 겹치면 NICKNAME_TAKEN');
-  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: 'a' })).error, 'INVALID_NICKNAME', '44 잘못된 닉네임을 직접 주면 INVALID_NICKNAME (자동으로 넘어가지 않는다)');
-  eq((await api('signup', { username: nextName(), password: PASSWORD, nickname: { x: 1 } })).error, 'INVALID_NICKNAME', '44 문자열이 아닌 닉네임도 거절');
+  const join10 = (nickname, username = nextName()) => api('signup', { username, password: PASSWORD, nickname });
 
-  // 45. 자동 닉네임 계정도 평범한 계정: 로그인 · 닉네임 변경 · 소켓 접속 (프로필 이름 = 서버 닉네임)
-  const who = made[0];
-  const renamed = await api('rename', { token: who.token, nickname: '바꾼이름' });
-  eq([renamed.ok, renamed.nickname], [true, '바꾼이름'], '45 자동 닉네임은 나중에 마음대로 바꿀 수 있다');
-  const c = await client(port, { token: made[1].token });
-  const reg = await c.call('register_player', { token: made[1].token });
-  eq([reg.ok, reg.user?.nickname], [true, made[1].nickname], '45 소켓 로그인에서도 서버가 붙인 닉네임');
+  // 43. 닉네임은 필수 · 형식 · 비속어
+  const missing = [];
+  for (const nickname of [undefined, null, '', '   ', { x: 1 }]) missing.push(await join10(nickname));
+  eq(missing.map((r) => `${r.status} ${r.error} ${r.reason}`), Array(5).fill('400 INVALID_NICKNAME empty'), '43 닉네임 없이는 가입할 수 없다 (자동 부여 없음)');
+  const wrong = [];
+  for (const nickname of ['a', '가'.repeat(11), '새 사람', 'Ace_7', 'ㅋㅋㅋ', '이름!', '<b>', '😀😀']) wrong.push(await join10(nickname));
+  eq(wrong.map((r) => `${r.error} ${r.reason}`), Array(8).fill('INVALID_NICKNAME format'), '43 2~10자 한글 · 영문 · 숫자만');
+  const rude = [];
+  for (const nickname of ['시발', 'fuck123', '운영자', 'admin']) rude.push(await join10(nickname));
+  eq(rude.map((r) => `${r.error} ${r.reason}`), Array(4).fill('INVALID_NICKNAME banned'), '43 욕설 · 사칭 닉네임 거절');
+  eq(server.stats().users, 0, '43 거절된 시도는 계정을 만들지 않는다');
+
+  // 44. 중복 확인 API · 대소문자 구분 없는 중복
+  const before = await api('nickname', { nickname: 'Dealer7' });
+  eq([before.status, before.ok, before.available, before.nickname], [200, true, true, 'Dealer7'], '44 중복 확인: 아직 없으면 사용 가능');
+  const made = await join10('Dealer7');
+  eq([made.ok, made.nickname, Boolean(made.token)], [true, 'Dealer7', true], '44 직접 정한 닉네임으로 가입');
+  eq([(await api('nickname', { nickname: 'Dealer7' })).available, (await api('nickname', { nickname: 'dEALER7' })).available], [false, false], '44 중복 확인: 대소문자만 다른 이름도 사용 중');
+  const dupes = [await join10('Dealer7'), await join10('DEALER7'), await join10('dealer7')];
+  eq(dupes.map((r) => `${r.status} ${r.error}`), Array(3).fill('409 NICKNAME_TAKEN'), '44 가입도 대소문자 구분 없이 중복 거절');
+  eq((await api('nickname', { nickname: 'a b' })).error, 'INVALID_NICKNAME', '44 중복 확인: 규칙에 안 맞으면 INVALID_NICKNAME');
+
+  // 45. 같은 닉네임으로 동시에 가입 → 하나만
+  const rush = await Promise.all(Array.from({ length: 6 }, (_, i) => join10(i % 2 ? 'Racer' : 'rACER')));
+  eq([rush.filter((r) => r.ok).length, rush.filter((r) => r.error === 'NICKNAME_TAKEN').length], [1, 5], '45 동시에 눌러도 한 명만 가입');
+
+  // 46. 닉네임 변경: 같은 규칙 · 대소문자 무시 중복 · 본인 이름의 대소문자 바꾸기는 가능 · 놓은 이름은 다시 쓸 수 있다
+  const other = await join10('다른사람');
+  eq([(await api('rename', { token: other.token, nickname: 'dealer7' })).error, (await api('rename', { token: other.token, nickname: 'Ace_9' })).error], ['NICKNAME_TAKEN', 'INVALID_NICKNAME'], '46 변경도 중복 · 규칙 검사');
+  const recased = await api('rename', { token: made.token, nickname: 'DEALER7' });
+  eq([recased.ok, recased.nickname], [true, 'DEALER7'], '46 내 이름의 대소문자만 바꾸기는 된다');
+  eq((await api('rename', { token: made.token, nickname: '새이름7' })).ok, true, '46 다른 이름으로 변경');
+  eq((await api('nickname', { nickname: 'dealer7' })).available, true, '46 놓은 이름은 다시 사용 가능');
   await server.stop();
 
-  // 46. Supabase 흉내: 흔한 이름(기본 조합 400개)이 모두 이미 있어도 → 숫자를 붙여 겹치지 않게
-  const rows = bases.map((nickname, i) => ({ user_id: randomUUID(), username: `pre${i}`, password_hash: 'p1$x$y', nickname, wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }));
-  const db = fakeSupabase(rows);
+  // 47. 중복 확인 요청 제한 (가입은 따로)
+  const tight = testServer({ quiet: true, onError, nickChecksPerMinute: 3 });
+  const tightPort = await tight.start(0, '127.0.0.1');
+  const tightApi = apiOf(tightPort);
+  const hits = [];
+  for (let i = 0; i < 5; i += 1) hits.push((await tightApi('nickname', { nickname: `확인${i}` })).status);
+  eq(hits, [200, 200, 200, 429, 429], '47 IP 당 중복 확인 횟수 제한');
+  eq((await tightApi('signup', { username: nextName(), password: PASSWORD, nickname: '확인0' })).ok, true, '47 확인이 막혀도 가입 요청은 따로');
+  await tight.stop();
+
+  // 48. Supabase 흉내: 예전 규칙으로 만든 계정은 그대로 · 대소문자 무시 중복 · DB unique 충돌
+  ok(/unique index[^\n]*lower\(nickname\)[^\n]*username is not null/.test(ACCOUNT_SQL), '48 ACCOUNT_SQL: lower(nickname) unique 인덱스');
+  const passwordHash = await hashPassword(PASSWORD);
+  const row = (username, nickname, wins = 3) => ({ user_id: randomUUID(), username, password_hash: passwordHash, nickname, wins, losses: wins ? 1 : 0, streak: 1, max_streak: 2, mmr: 1055 });
+  const db = fakeSupabase([row('oldie', 'Old_Ace'), row('mixed', 'MixedCase', 0), { user_id: randomUUID(), nickname: '옛행', wins: 0, losses: 0, streak: 0, max_streak: 0, mmr: 1000 }]);
   const dbServer = testServer({ quiet: true, onError, supabaseClient: db, authSecret: 'test-secret' });
   const dbPort = await dbServer.start(0, '127.0.0.1');
   const dbApi = apiOf(dbPort);
-  const crowded = await dbApi('signup', { username: nextName(), password: PASSWORD });
-  ok(crowded.ok && /\d{2}$/.test(crowded.nickname) && cleanNickname(crowded.nickname) === crowded.nickname, `46 흔한 이름이 모두 찼으면 숫자를 붙인다 (${crowded.nickname})`);
-  const row = [...db.table.values()].find((r) => r.user_id === crowded.user_id);
-  eq([row?.nickname, row?.username === undefined], [crowded.nickname, false], '46 DB 행에도 그 닉네임으로 저장');
-  const twice = await dbApi('signup', { username: nextName(), password: PASSWORD });
-  ok(twice.ok && twice.nickname !== crowded.nickname, '46 연달아 가입해도 겹치지 않는다');
+  const old = await dbApi('login', { username: 'oldie', password: PASSWORD });
+  eq([old.ok, old.nickname, old.me?.wins], [true, 'Old_Ace', 3], '48 예전 닉네임(_ 포함) 계정 로그인 · 전적 유지');
+  const O = await client(dbPort, { token: old.token });
+  eq([(await O.call('register_player', {})).me?.nickname, (await O.call('get_leaderboard')).top.map((r) => r.nickname)], ['Old_Ace', ['Old_Ace']], '48 예전 닉네임이 랭킹에 그대로 보인다');
+  const keep = await dbApi('rename', { token: old.token, nickname: 'Old_Ace' });
+  eq([keep.ok, keep.nickname], [true, 'Old_Ace'], '48 지금 이름 그대로 저장은 통과 (새 규칙을 들이대지 않는다)');
+  eq([(await dbApi('nickname', { nickname: 'mixedcase' })).available, (await dbApi('signup', { username: nextName(), password: PASSWORD, nickname: 'MIXEDCASE' })).error], [false, 'NICKNAME_TAKEN'], '48 DB 계정과 대소문자 무시 중복');
+  eq((await dbApi('nickname', { nickname: '옛행' })).available, true, '48 계정이 아닌 예전 행의 이름은 쓸 수 있다');
+
+  // 49. 확인과 저장 사이에 다른 곳에서 같은 이름이 저장됨 → unique 인덱스 위반(23505) → 서버 오류가 아니라 NICKNAME_TAKEN
+  const realFrom = db.from;
+  db.from = (...args) => {
+    const table = realFrom(...args);
+    return {
+      ...table,
+      insert: async (next) => {
+        db.table.set('intruder', row('intruder', next.nickname.toUpperCase()));
+        return table.insert(next);
+      },
+    };
+  };
+  const clashed = await dbApi('signup', { username: nextName(), password: PASSWORD, nickname: 'photofin' });
+  eq([clashed.status, clashed.error], [409, 'NICKNAME_TAKEN'], '49 DB unique 충돌 → 409 NICKNAME_TAKEN');
+  db.from = realFrom;
   await dbServer.stop();
 }
 
@@ -1151,7 +1191,7 @@ async function phase14() {
   ], ['9.9.9.9', '3.3.3.3', '2.2.2.2'], '81 믿기로 한 앞단이 붙인 값만 읽는다 (기본은 소켓 주소 · 프록시는 뒤에서부터 · Cloudflare 헤더)');
 
   // 82. 가입 속도 제한
-  const signup = async (i, headers = {}) => (await fetch(`${base}/api/signup`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ username: `sec_user${i}`, password: PASSWORD }) })).json();
+  const signup = async (i, headers = {}) => (await fetch(`${base}/api/signup`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ username: `sec_user${i}`, password: PASSWORD, nickname: `보안손님${i}` }) })).json();
   const joined = [];
   for (let i = 0; i < 6; i += 1) joined.push(await signup(i, { 'x-forwarded-for': `10.0.0.${i}` }));
   eq(joined.map((r) => r.error ?? 'ok'), ['ok', 'ok', 'ok', 'ok', 'RATE_LIMITED', 'RATE_LIMITED'], '82 같은 IP 의 가입 도배 차단 (위조 헤더를 바꿔 가며 보내도)');
@@ -1221,10 +1261,10 @@ async function phase1() {
   const port = await server.start(0, '127.0.0.1');
   eq([QUEUE_TIERS.free, QUEUE_TIERS.pro, QUEUE_TIERS.vip], [{ fee: 0, prize: 0 }, { fee: 200, prize: 360 }, { fee: 1000, prize: 1800 }], '등급표: free 0 · pro 200→360 · vip 1000→1800');
   const A = await player(port, '알파');
-  const B = await player(port, 'Bravo_7');
+  const B = await player(port, 'Bravo7');
   const anon = await client(port);
   const profA = { nickname: '알파', mmr: 1100, tier: 'silver', title: '신입', cosmetics: { gun: 'gold', table: 'obsidian', flame: 'native' } };
-  const profB = { nickname: 'Bravo_7', mmr: 900, cosmetics: { gun: '<img src=x onerror=alert(1)>', table: 'obsidian' } }; // 나쁜 id 는 걸러져야 한다
+  const profB = { nickname: 'Bravo7', mmr: 900, cosmetics: { gun: '<img src=x onerror=alert(1)>', table: 'obsidian' } }; // 나쁜 id 는 걸러져야 한다
 
   // 1. 방 생성 (로그인한 계정만)
   eq((await anon.call('create_private_room', { profile: profA })).error, 'AUTH_REQUIRED', '1 로그인하지 않으면 방을 만들 수 없다');
@@ -1241,7 +1281,7 @@ async function phase1() {
   eq([mA.mode, mA.tier, mA.fee, mA.prize, mA.code], ['private', 'free', 0, 0, created.code], '2 사설 방은 무료 판');
   eq([mA.you, mB.you].sort(), ['P1', 'P2'], '2 서로 다른 좌석');
   eq([mA.opponent.id, mB.opponent.id], [mB.you, mA.you], '2 상대 좌석 id');
-  eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo_7', 1000], '2 A 가 보는 상대 프로필(B) — 이름 · MMR 은 서버 계정 값 (보낸 900 이 아니라)');
+  eq([mA.opponent.profile.nickname, mA.opponent.profile.mmr], ['Bravo7', 1000], '2 A 가 보는 상대 프로필(B) — 이름 · MMR 은 서버 계정 값 (보낸 900 이 아니라)');
   eq(mA.opponent.profile.cosmetics, { gun: 'steel', table: 'obsidian', flame: 'native', taunt: null }, '2 상대에게 보이는 스킨은 서버 지갑의 장착값 — 클라이언트가 보낸 이상한 id 는 무시');
   eq(mB.opponent.profile, { nickname: '알파', mmr: 1000, tier: 'silver', title: '새로 온 손님', cosmetics: { gun: 'steel', table: 'obsidian', flame: 'native', taunt: null } }, '2 B 가 보는 상대 프로필(A) — 가진 적 없는 gold 를 보냈어도 서버 지갑의 기본 스킨');
   ok(mA.token.length === 32 && mB.token.length === 32 && mA.token !== mB.token, '2 재접속 토큰은 각자 따로');
